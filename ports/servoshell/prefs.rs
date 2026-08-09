@@ -66,7 +66,9 @@ pub(crate) struct ServoShellPreferences {
     /// URL string of the homepage.
     pub homepage: String,
     /// URL string of the search engine page with '%s' standing in for the search term.
-    /// For example <https://duckduckgo.com/html/?q=%s>.
+    /// The Theorem fork defaults to the RustyWeb SERP; an external engine like
+    /// <https://duckduckgo.com/html/?q=%s> is the upstream default.
+    /// See SPEC-THEOREM-BROWSER-PERCEPTION-1.1 D10.
     pub searchpage: String,
     /// Whether or not to run servoshell in headless mode. While running in headless
     /// mode, image output is supported.
@@ -118,7 +120,7 @@ impl Default for ServoShellPreferences {
             no_native_titlebar: true,
             screen_size_override: None,
             simulate_touch_events: false,
-            searchpage: "https://duckduckgo.com/html/?q=%s".into(),
+            searchpage: "http://theorem.local/search?q=%s".into(),
             tracing_filter: None,
             url: None,
             output_image_path: None,

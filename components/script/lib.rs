@@ -29,11 +29,13 @@ mod body;
 pub(crate) mod clipboard_provider;
 pub(crate) mod conversions;
 mod devtools;
+mod document_layout_snapshot;
 pub(crate) mod document_loader;
 #[macro_use]
 mod dom;
 pub(crate) use dom::canvas_context;
 pub(crate) mod fetch;
+mod hit_test;
 pub(crate) mod indexeddb;
 mod init;
 mod layout_image;

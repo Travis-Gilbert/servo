@@ -107,12 +107,13 @@ use devtools_traits::{
 use embedder_traits::resources::{self, Resource};
 use embedder_traits::user_contents::{UserContentManagerId, UserContents};
 use embedder_traits::{
-    AnimationState, EmbedderControlId, EmbedderControlResponse, EmbedderProxy, FocusSequenceNumber,
-    GenericEmbedderProxy, InputEvent, InputEventAndId, InputEventOutcome, JSValue,
+    AnimationState, DocumentLayoutSnapshot, DocumentLayoutSnapshotError, EmbedderControlId,
+    EmbedderControlResponse, EmbedderProxy, FocusSequenceNumber, GenericEmbedderProxy,
+    HitTestResult, InputEvent, InputEventAndId, InputEventOutcome, JSValue,
     JavaScriptEvaluationError, JavaScriptEvaluationId, KeyboardEvent, MediaSessionActionType,
     MediaSessionEvent, MediaSessionPlaybackState, MouseButton, MouseButtonAction, MouseButtonEvent,
     NewWebViewDetails, PaintHitTestResult, Theme, ViewportDetails, WakeLockDelegate, WakeLockType,
-    WebDriverCommandMsg, WebDriverLoadStatus, WebDriverScriptCommand,
+    WebDriverCommandMsg, WebDriverLoadStatus, WebDriverScriptCommand, WebViewPoint,
 };
 use euclid::Size2D;
 use euclid::default::Size2D as UntypedSize2D;
@@ -1498,6 +1499,12 @@ where
             ) => {
                 self.handle_evaluate_javascript(webview_id, evaluation_id, script);
             },
+            EmbedderToConstellationMessage::DocumentLayoutSnapshot(webview_id, callback) => {
+                self.handle_document_layout_snapshot(webview_id, callback);
+            },
+            EmbedderToConstellationMessage::HitTest(webview_id, point, callback) => {
+                self.handle_hit_test(webview_id, point, callback);
+            },
             EmbedderToConstellationMessage::CreateMemoryReport(sender) => {
                 self.mem_profiler_chan.send(ProfilerMsg::Report(sender));
             },
@@ -1629,6 +1636,62 @@ where
                     ));
                 }
             },
+        }
+    }
+
+    #[servo_tracing::instrument(skip_all)]
+    fn handle_document_layout_snapshot(
+        &mut self,
+        webview_id: WebViewId,
+        callback: GenericCallback<Result<DocumentLayoutSnapshot, DocumentLayoutSnapshotError>>,
+    ) {
+        let browsing_context_id = BrowsingContextId::from(webview_id);
+        let Some(pipeline) = self
+            .browsing_contexts
+            .get(&browsing_context_id)
+            .and_then(|browsing_context| self.pipelines.get(&browsing_context.pipeline_id))
+        else {
+            let _ = callback.send(Err(DocumentLayoutSnapshotError::WebViewNotReady));
+            return;
+        };
+
+        let failure_callback = callback.clone();
+        if pipeline
+            .event_loop
+            .send(ScriptThreadMessage::DocumentLayoutSnapshot(
+                pipeline.id,
+                callback,
+            ))
+            .is_err()
+        {
+            let _ = failure_callback.send(Err(DocumentLayoutSnapshotError::InternalError));
+        }
+    }
+
+    #[servo_tracing::instrument(skip_all)]
+    fn handle_hit_test(
+        &mut self,
+        webview_id: WebViewId,
+        point: WebViewPoint,
+        callback: GenericCallback<HitTestResult>,
+    ) {
+        let browsing_context_id = BrowsingContextId::from(webview_id);
+        let Some(pipeline) = self
+            .browsing_contexts
+            .get(&browsing_context_id)
+            .and_then(|browsing_context| self.pipelines.get(&browsing_context.pipeline_id))
+        else {
+            let _ = callback.send(HitTestResult::Unavailable);
+            return;
+        };
+
+        let failure_callback = callback.clone();
+        if pipeline
+            .event_loop
+            .send(ScriptThreadMessage::HitTest(pipeline.id, point, callback))
+            .is_err()
+        {
+            let _ = failure_callback.send(HitTestResult::Unavailable);
         }
     }
 

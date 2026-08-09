@@ -193,6 +193,42 @@ pub struct TrustedNodeAddress(pub *const c_void);
 #[expect(unsafe_code)]
 unsafe impl Send for TrustedNodeAddress {}
 
+/// Computed values owned by an internal document layout projection.
+#[derive(Clone, Debug, Default)]
+pub struct DocumentLayoutSnapshotComputedStyle {
+    pub display: Option<String>,
+    pub visibility: Option<String>,
+    pub position: Option<String>,
+    pub overflow_x: Option<String>,
+    pub overflow_y: Option<String>,
+    pub opacity: Option<String>,
+    pub pointer_events: Option<String>,
+    pub cursor: Option<String>,
+    pub white_space: Option<String>,
+    pub font_size: Option<String>,
+}
+
+/// One owned layout/paint record. The address is an internal, short-lived join key that script
+/// replaces with a document-stable handle before constructing the public embedder payload.
+#[derive(Clone, Debug)]
+pub struct DocumentLayoutSnapshotProjectionNode {
+    pub node: UntrustedNodeAddress,
+    pub bbox: Option<Rect<i32, CSSPixel>>,
+    pub client_rect: Option<Rect<i32, CSSPixel>>,
+    pub scroll_rect: Option<Rect<i32, CSSPixel>>,
+    pub paint_order: Option<u32>,
+    pub stacking_context: Option<u32>,
+    pub computed: DocumentLayoutSnapshotComputedStyle,
+    pub visible: bool,
+    pub scrollable: bool,
+}
+
+/// Owned internal projection built from the current FragmentTree and stacking-context tree.
+#[derive(Clone, Debug, Default)]
+pub struct DocumentLayoutSnapshotProjection {
+    pub nodes: Vec<DocumentLayoutSnapshotProjectionNode>,
+}
+
 /// Whether the pending image needs to be fetched or is waiting on an existing fetch.
 #[derive(Debug)]
 pub enum PendingImageState {
@@ -404,6 +440,7 @@ pub trait Layout {
     ) -> Option<usize>;
     fn query_elements_from_point(&self, point: LayoutPoint) -> Vec<ElementsFromPointResult>;
     fn query_effective_overflow(&self, node: TrustedNodeAddress) -> Option<AxesOverflow>;
+    fn query_document_layout_snapshot(&self) -> Option<DocumentLayoutSnapshotProjection>;
     fn stylist_mut(&mut self) -> &mut Stylist;
 
     /// Set whether the accessibility tree should be constructed for this Layout.
@@ -558,6 +595,7 @@ pub enum QueryMsg {
     TextIndexQuery,
     PaddingQuery,
     FlushForUpdateTheRenderingQuery,
+    DocumentLayoutSnapshot,
 }
 
 /// The goal of a reflow request.

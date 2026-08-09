@@ -41,9 +41,10 @@ use devtools_traits::{
 };
 use embedder_traits::user_contents::{UserContentManagerId, UserContents, UserScript};
 use embedder_traits::{
-    EmbedderControlId, EmbedderControlResponse, EmbedderMsg, FocusSequenceNumber,
-    InputEventOutcome, JavaScriptEvaluationError, JavaScriptEvaluationId, MediaSessionActionType,
-    Theme, ViewportDetails, WebDriverScriptCommand,
+    DocumentLayoutSnapshot, DocumentLayoutSnapshotError, EmbedderControlId,
+    EmbedderControlResponse, EmbedderMsg, FocusSequenceNumber, HitTestResult, InputEventOutcome,
+    JavaScriptEvaluationError, JavaScriptEvaluationId, MediaSessionActionType, Theme,
+    ViewportDetails, WebDriverScriptCommand, WebViewPoint,
 };
 use encoding_rs::Encoding;
 use fonts::{FontContext, SystemFontServiceProxy};
@@ -81,7 +82,7 @@ use script_traits::{
 };
 use servo_arc::Arc as ServoArc;
 use servo_base::cross_process_instant::CrossProcessInstant;
-use servo_base::generic_channel::GenericSender;
+use servo_base::generic_channel::{GenericCallback, GenericSender};
 use servo_base::id::{
     BrowsingContextId, HistoryStateId, PipelineId, PipelineNamespace, ScriptEventLoopId, WebViewId,
 };
@@ -1965,6 +1966,12 @@ impl ScriptThread {
                 script,
             ) => {
                 self.handle_evaluate_javascript(webview_id, pipeline_id, evaluation_id, script, cx);
+            },
+            ScriptThreadMessage::DocumentLayoutSnapshot(pipeline_id, callback) => {
+                self.handle_document_layout_snapshot(pipeline_id, callback, cx);
+            },
+            ScriptThreadMessage::HitTest(pipeline_id, point, callback) => {
+                self.handle_hit_test(pipeline_id, point, callback, cx);
             },
             ScriptThreadMessage::SendImageKeysBatch(pipeline_id, image_keys) => {
                 if let Some(window) = self.documents.borrow().find_window(pipeline_id) {
@@ -4327,6 +4334,41 @@ impl ScriptThread {
                 globals,
             )
         }
+    }
+
+    fn handle_document_layout_snapshot(
+        &self,
+        pipeline_id: PipelineId,
+        callback: GenericCallback<Result<DocumentLayoutSnapshot, DocumentLayoutSnapshotError>>,
+        cx: &mut js::context::JSContext,
+    ) {
+        let Some(window) = self.documents.borrow().find_window(pipeline_id) else {
+            let _ = callback.send(Err(DocumentLayoutSnapshotError::WebViewNotReady));
+            return;
+        };
+
+        let global_scope = window.as_global_scope();
+        let mut realm = enter_auto_realm(cx, global_scope);
+        let cx = &mut realm.current_realm();
+        let _ = callback.send(crate::document_layout_snapshot::capture(&window, cx));
+    }
+
+    fn handle_hit_test(
+        &self,
+        pipeline_id: PipelineId,
+        point: WebViewPoint,
+        callback: GenericCallback<HitTestResult>,
+        cx: &mut js::context::JSContext,
+    ) {
+        let Some(window) = self.documents.borrow().find_window(pipeline_id) else {
+            let _ = callback.send(HitTestResult::Unavailable);
+            return;
+        };
+
+        let global_scope = window.as_global_scope();
+        let mut realm = enter_auto_realm(cx, global_scope);
+        let cx = &mut realm.current_realm();
+        let _ = callback.send(crate::hit_test::query(&window, point, cx));
     }
 
     fn handle_evaluate_javascript(

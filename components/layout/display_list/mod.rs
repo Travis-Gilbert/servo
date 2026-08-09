@@ -73,12 +73,14 @@ use crate::style_ext::{BorderStyleColor, ComputedValuesExt};
 mod background;
 mod clip;
 mod conversions;
+mod document_layout_snapshot;
 mod gradient;
 mod hit_test;
 mod paint_timing_handler;
 mod paint_traversal;
 mod stacking_context;
 
+pub(crate) use document_layout_snapshot::build_document_layout_snapshot_projection;
 pub(crate) use hit_test::HitTest;
 pub(crate) use paint_timing_handler::PaintTimingHandler;
 pub(crate) use stacking_context::*;

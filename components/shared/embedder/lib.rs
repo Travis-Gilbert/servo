@@ -14,7 +14,7 @@ pub mod resources;
 pub mod user_contents;
 pub mod webdriver;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::c_void;
 use std::fmt::{Debug, Display, Error, Formatter};
 use std::hash::Hash;
@@ -1047,6 +1047,179 @@ pub enum JSValue {
     Window(String),
     Array(Vec<JSValue>),
     Object(HashMap<String, JSValue>),
+}
+
+/// A rectangle in CSS pixels captured from Servo's live fragment tree.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DocumentLayoutRect {
+    /// Horizontal coordinate in the document coordinate space.
+    pub x: i32,
+    /// Vertical coordinate in the document coordinate space.
+    pub y: i32,
+    /// Rectangle width.
+    pub width: i32,
+    /// Rectangle height.
+    pub height: i32,
+}
+
+/// A bounded set of computed values captured with a document layout snapshot.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DocumentLayoutComputedStyle {
+    /// Computed `display` value.
+    pub display: Option<String>,
+    /// Computed `visibility` value.
+    pub visibility: Option<String>,
+    /// Computed `position` value.
+    pub position: Option<String>,
+    /// Computed `overflow-x` value.
+    pub overflow_x: Option<String>,
+    /// Computed `overflow-y` value.
+    pub overflow_y: Option<String>,
+    /// Computed `opacity` value.
+    pub opacity: Option<String>,
+    /// Computed `pointer-events` value.
+    pub pointer_events: Option<String>,
+    /// Computed `cursor` value.
+    pub cursor: Option<String>,
+    /// Computed `white-space` value.
+    pub white_space: Option<String>,
+    /// Computed `font-size` value.
+    pub font_size: Option<String>,
+}
+
+/// One owned DOM/layout/paint record in a document layout snapshot.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DocumentLayoutSnapshotNode {
+    /// Document-stable, non-pointer element handle.
+    pub handle: String,
+    /// Parent element handle, when the element has a parent element.
+    pub parent: Option<String>,
+    /// Lowercase local tag name.
+    pub tag: String,
+    /// Explicit or inferred semantic role.
+    pub role: String,
+    /// Accessible-name approximation from DOM semantics.
+    pub name: String,
+    /// Live form-control value, when applicable.
+    pub value: Option<String>,
+    /// Common test identifier attribute, when present.
+    pub test_id: Option<String>,
+    /// Complete owned attribute map.
+    pub attributes: BTreeMap<String, String>,
+    /// Union of the element's border-box fragments in document coordinates.
+    pub bbox: Option<DocumentLayoutRect>,
+    /// Union of the element's padding-box fragments in document coordinates.
+    pub client_rect: Option<DocumentLayoutRect>,
+    /// Scrollable overflow rectangle when larger than the client rectangle.
+    pub scroll_rect: Option<DocumentLayoutRect>,
+    /// Last back-to-front paint ordinal observed for the element.
+    pub paint_order: Option<u32>,
+    /// Traversal-assigned stacking-context ordinal.
+    pub stacking_context: Option<u32>,
+    /// Bounded computed-style projection from the fragment tree.
+    pub computed: DocumentLayoutComputedStyle,
+    /// Whether layout produced a non-empty, visible fragment for this element.
+    pub visible: bool,
+    /// Whether the element is not disabled.
+    pub enabled: bool,
+    /// Whether the element participates in the DOM read-write state.
+    pub editable: bool,
+    /// Whether its scrollable overflow is larger than its client box.
+    pub scrollable: bool,
+    /// Text from direct child text nodes only.
+    pub text: Option<String>,
+    /// How this node's structure was determined; the per-node counterpart of the
+    /// snapshot-level [`DocumentLayoutSnapshotSource`].
+    pub source: DocumentLayoutSnapshotNodeSource,
+}
+
+/// How a snapshot node's structure was determined.
+///
+/// Canvas is a replaced box whose children never reach the fragment tree, so
+/// declared fallback content has no layout projection of its own and is marked
+/// explicitly by the DOM-side capture; ordinary elements default to `Dom`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DocumentLayoutSnapshotNodeSource {
+    /// Ordinary element in the document tree.
+    #[default]
+    Dom,
+    /// Declared fallback content of a `<canvas>` element: the elements between
+    /// its tags. Their bounds are the canvas element's own bbox. Never
+    /// synthesized: present only when the page declared it.
+    CanvasFallback,
+}
+
+/// Physical viewport dimensions for a document layout snapshot.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DocumentLayoutViewport {
+    /// Physical viewport width.
+    pub width: u32,
+    /// Physical viewport height.
+    pub height: u32,
+}
+
+/// The engine path that produced a document layout snapshot.
+///
+/// Only the live fragment/stacking-context projection may report
+/// [`DocumentLayoutSnapshotSource::FragmentTree`]; the embedder's
+/// injected-script fallback records its own source and is never conflated
+/// with engine-backed evidence.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DocumentLayoutSnapshotSource {
+    /// Projected from Servo's live fragment and stacking-context trees.
+    #[default]
+    FragmentTree,
+}
+
+/// An owned, serializable projection of the active document's DOM, layout, and paint state.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct DocumentLayoutSnapshot {
+    /// Active document URL.
+    pub url: String,
+    /// Active document title.
+    pub title: String,
+    /// Element records in document order.
+    pub nodes: Vec<DocumentLayoutSnapshotNode>,
+    /// Device pixel ratio used by the active viewport.
+    pub device_pixel_ratio: f32,
+    /// Physical viewport dimensions.
+    pub viewport: DocumentLayoutViewport,
+    /// The engine path that produced this snapshot.
+    pub source: DocumentLayoutSnapshotSource,
+}
+
+/// Failure returned by document layout snapshot capture.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum DocumentLayoutSnapshotError {
+    /// The requested webview does not currently have an active document.
+    WebViewNotReady,
+    /// Layout did not have a live fragment and stacking-context tree to project.
+    LayoutUnavailable,
+    /// An internal channel or engine failure prevented capture.
+    InternalError,
+}
+
+/// The result of an embedder hit-test query at a point in a `WebView`.
+///
+/// The engine answers with the document-stable handle of the topmost event-receiving
+/// element at the queried point, from the same paint-tree query Servo's WebDriver
+/// `element_click` uses. The engine query has no notion of a queried target element, so
+/// `Occluded` is never produced here: it is the embedder's verdict when the returned
+/// handle does not match the handle of the element it intended to actuate.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum HitTestResult {
+    /// The topmost event-receiving element at the point, as its document-stable handle.
+    Handle(String),
+    /// The topmost element at the point is not the element the embedder queried for;
+    /// `by` is that element's document-stable handle.
+    Occluded { by: String },
+    /// The point lies outside the active document's viewport or no element is painted
+    /// there.
+    Outside,
+    /// The webview has no active document or the engine could not answer the query.
+    Unavailable,
 }
 
 /// Information about a JavaScript error that occured during the evaluation of a script.
