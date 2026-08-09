@@ -74,12 +74,14 @@ use crate::style_ext::{BorderStyleColor, ComputedValuesExt};
 mod background;
 mod clip;
 mod conversions;
+mod document_layout_snapshot;
 mod gradient;
 mod hit_test;
 mod paint_timing_handler;
 mod paint_traversal;
 mod stacking_context;
 
+pub(crate) use document_layout_snapshot::build_document_layout_snapshot_projection;
 pub(crate) use hit_test::HitTest;
 pub(crate) use paint_timing_handler::PaintTimingHandler;
 pub(crate) use stacking_context::*;
@@ -156,15 +158,41 @@ struct HighlightTraversalState {
 }
 
 impl InspectorHighlight {
-    fn for_node(node: OpaqueNode) -> Self {
-        Self {
-            tag: Tag {
-                node,
-                // TODO: Support highlighting pseudo-elements.
-                pseudo_element_chain: Default::default(),
-            },
-            state: None,
+    fn register_fragment_of_highlighted_dom_node(
+        &mut self,
+        builder: &DisplayListBuilder,
+        traversal_state: &TraversalState,
+        fragment: &Arc<BoxFragment>,
+    ) {
+        let spatial_id = builder.spatial_id(traversal_state.spatial_id);
+        let clip_chain_id = builder.clip_chain_id(traversal_state.clip_id);
+        let state = self.state.get_or_insert_with(|| HighlightTraversalState {
+            content_box: Rect::zero(),
+            spatial_id,
+            clip_chain_id,
+            maybe_box_fragment: Some(fragment.clone()),
+        });
+
+        // We only need to highlight the first `SpatialId`. Typically this will include the bottommost
+        // fragment for a node, which generally surrounds the entire content.
+        if spatial_id != state.spatial_id {
+            return;
         }
+
+        if clip_chain_id != ClipChainId::INVALID && state.clip_chain_id != ClipChainId::INVALID {
+            debug_assert_eq!(
+                clip_chain_id, state.clip_chain_id,
+                "Fragments of the same node must either have no clip chain or the same one"
+            );
+        }
+
+        state.maybe_box_fragment = Some(fragment.clone());
+        state.content_box = state.content_box.union(
+            &fragment
+                .base
+                .rect()
+                .translate(traversal_state.origin.to_vector()),
+        );
     }
 }
 

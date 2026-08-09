@@ -15,9 +15,10 @@ use crossbeam_channel::RecvTimeoutError;
 use devtools_traits::ScriptToDevtoolsControlMsg;
 use embedder_traits::user_contents::{UserContentManagerId, UserContents};
 use embedder_traits::{
-    EmbedderControlId, EmbedderControlResponse, FocusSequenceNumber, InputEventAndId,
     JavaScriptEvaluationId, MediaSessionActionType, PaintHitTestResult, ScriptToEmbedderChan,
-    Theme, ViewportDetails, WebDriverScriptCommand,
+    DocumentLayoutSnapshot, DocumentLayoutSnapshotError, EmbedderControlId,
+    Theme, ViewportDetails, WebDriverScriptCommand, WebViewPoint,
+    EmbedderControlResponse, FocusSequenceNumber, HitTestResult, InputEventAndId,
 };
 use euclid::{Scale, Size2D};
 use fonts_traits::{SystemFontServiceProxySender, WebFontLoadEvent};
@@ -297,6 +298,13 @@ pub enum ScriptThreadMessage {
     /// Evaluate the given JavaScript and return a result via a corresponding message
     /// to the Constellation.
     EvaluateJavaScript(WebViewId, PipelineId, JavaScriptEvaluationId, String),
+    /// Capture the active pipeline document through its live layout state.
+    DocumentLayoutSnapshot(
+        PipelineId,
+        GenericCallback<Result<DocumentLayoutSnapshot, DocumentLayoutSnapshotError>>,
+    ),
+    /// Hit-test the topmost event-receiving element at a point in the given pipeline.
+    HitTest(PipelineId, WebViewPoint, GenericCallback<HitTestResult>),
     /// A new batch of keys for the image cache for the specific pipeline.
     SendImageKeysBatch(PipelineId, Vec<ImageKey>),
     /// Preferences were updated in the parent process.

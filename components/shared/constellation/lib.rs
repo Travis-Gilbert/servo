@@ -17,11 +17,15 @@ use std::time::Duration;
 
 use embedder_traits::user_contents::{
     UserContentManagerId, UserScript, UserScriptId, UserStyleSheet, UserStyleSheetId,
+    DocumentLayoutSnapshot, DocumentLayoutSnapshotError, EmbedderControlId,
+    ViewportDetails, WebDriverCommandMsg, WebViewPoint,
+    EmbedderControlResponse, HitTestResult, InputEventAndId, JavaScriptEvaluationId,
 };
 use embedder_traits::{
-    EmbedderControlId, EmbedderControlResponse, InputEventAndId, JavaScriptEvaluationId,
     MediaSessionActionType, NewWebViewDetails, PaintHitTestResult, Theme, TraversalId, UrlRequest,
-    ViewportDetails, WebDriverCommandMsg,
+    ViewportDetails, WebDriverCommandMsg, WebViewPoint,
+    DocumentLayoutSnapshot, DocumentLayoutSnapshotError, EmbedderControlId,
+    EmbedderControlResponse, HitTestResult, InputEventAndId, JavaScriptEvaluationId,
 };
 pub use from_script_message::*;
 use malloc_size_of_derive::MallocSizeOf;
@@ -100,6 +104,14 @@ pub enum EmbedderToConstellationMessage {
     /// Evaluate a JavaScript string in the context of a `WebView`. When execution is complete or an
     /// error is encountered, a correpsonding message will be sent to the embedding layer.
     EvaluateJavaScript(WebViewId, JavaScriptEvaluationId, String),
+    /// Capture an owned document layout snapshot and invoke the callback asynchronously.
+    DocumentLayoutSnapshot(
+        WebViewId,
+        GenericCallback<Result<DocumentLayoutSnapshot, DocumentLayoutSnapshotError>>,
+    ),
+    /// Hit-test the topmost event-receiving element at a point in the `WebView` and invoke
+    /// the callback asynchronously.
+    HitTest(WebViewId, WebViewPoint, GenericCallback<HitTestResult>),
     /// Create a memory report and return it via the [`GenericCallback`]
     CreateMemoryReport(GenericCallback<MemoryReportResult>),
     /// Sends the generated image key to the image cache associated with this pipeline.
