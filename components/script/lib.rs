@@ -29,6 +29,7 @@ extern crate script_bindings;
 pub(crate) mod conversions;
 mod css;
 mod fetch;
+mod hit_test;
 #[macro_use]
 mod dom;
 pub(crate) use dom::canvas_context;
@@ -63,3 +64,5 @@ pub(crate) use crate::dom::bindings::trace::{CustomTraceable, JSTraceable};
 pub use crate::dom::serviceworker::serviceworker_manager::ServiceWorkerManager;
 pub use crate::engine::handle::JSEngineSetup;
 pub use crate::engine::init::init;
+
+mod document_layout_snapshot;

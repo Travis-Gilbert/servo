@@ -85,7 +85,6 @@ use webrender_api::units::{DevicePixel, LayoutVector2D};
 
 use crate::accessibility::{AccessibilityContext, AccessibilityDamageMap, AccessibilityTree};
 use crate::context::{CachedImageOrError, ImageResolver, LayoutContext};
-use crate::display_list::{DisplayListBuilder, HitTest, PaintTimingHandler, StackingContextTree};
 use crate::dom::NodeExt;
 use crate::query::{
     BoxAreaInclusion, find_character_offset_in_fragment_descendants, get_the_text_steps,
@@ -613,6 +612,21 @@ impl Layout for LayoutThread {
         with_layout_state(|| {
             let node = unsafe { ServoLayoutNode::new(&node) };
             process_effective_overflow_query(node)
+        })
+    }
+
+    fn query_document_layout_snapshot(
+        &self,
+    ) -> Option<layout_api::DocumentLayoutSnapshotProjection> {
+        with_layout_state(|| {
+            let fragment_tree = self.fragment_tree.borrow();
+            let fragment_tree = fragment_tree.as_ref()?;
+            let stacking_context_tree = self.stacking_context_tree.borrow();
+            let stacking_context_tree = stacking_context_tree.as_ref()?;
+            Some(build_document_layout_snapshot_projection(
+                fragment_tree,
+                stacking_context_tree,
+            ))
         })
     }
 
@@ -2031,6 +2045,7 @@ impl ReflowPhases {
                 },
                 QueryMsg::BoxArea |
                 QueryMsg::BoxAreas |
+                QueryMsg::DocumentLayoutSnapshot |
                 QueryMsg::ElementsFromPoint |
                 QueryMsg::FlushForUpdateTheRenderingQuery |
                 QueryMsg::OffsetParentQuery |

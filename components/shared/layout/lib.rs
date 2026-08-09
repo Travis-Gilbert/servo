@@ -194,8 +194,34 @@ pub struct TrustedNodeAddress(pub *const c_void);
 #[expect(unsafe_code)]
 unsafe impl Send for TrustedNodeAddress {}
 
-/// Whether the pending image needs to be fetched or is waiting on an existing fetch.
-#[derive(Debug)]
+pub struct DocumentLayoutSnapshotComputedStyle {
+    pub display: Option<String>,
+    pub visibility: Option<String>,
+    pub position: Option<String>,
+    pub overflow_x: Option<String>,
+    pub overflow_y: Option<String>,
+    pub opacity: Option<String>,
+    pub pointer_events: Option<String>,
+    pub cursor: Option<String>,
+    pub white_space: Option<String>,
+    pub font_size: Option<String>,
+}
+
+pub struct DocumentLayoutSnapshotProjectionNode {
+    pub node: UntrustedNodeAddress,
+    pub bbox: Option<Rect<i32, CSSPixel>>,
+    pub client_rect: Option<Rect<i32, CSSPixel>>,
+    pub scroll_rect: Option<Rect<i32, CSSPixel>>,
+    pub paint_order: Option<u32>,
+    pub stacking_context: Option<u32>,
+    pub computed: DocumentLayoutSnapshotComputedStyle,
+    pub visible: bool,
+    pub scrollable: bool,
+}
+
+pub struct DocumentLayoutSnapshotProjection {
+    pub nodes: Vec<DocumentLayoutSnapshotProjectionNode>,
+}
 pub enum PendingImageState {
     Unrequested(ServoUrl),
     PendingResponse,
@@ -415,6 +441,7 @@ pub trait Layout {
     ) -> Option<(OpaqueNode, Utf32CodeUnits)>;
     fn hit_test(&self, flags: HitTestFlags, point: LayoutPoint) -> HitTestResult;
     fn query_effective_overflow(&self, node: TrustedNodeAddress) -> Option<AxesOverflow>;
+    fn query_document_layout_snapshot(&self) -> Option<DocumentLayoutSnapshotProjection>;
     fn stylist_mut(&mut self) -> &mut Stylist;
 
     /// Set whether the accessibility tree should be constructed for this Layout.
@@ -571,6 +598,7 @@ pub enum QueryMsg {
     TextIndexQuery,
     PaddingQuery,
     FlushForUpdateTheRenderingQuery,
+    DocumentLayoutSnapshot,
 }
 
 /// The goal of a reflow request.

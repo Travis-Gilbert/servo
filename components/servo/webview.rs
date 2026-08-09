@@ -12,10 +12,11 @@ use accesskit::{
 };
 use dpi::PhysicalSize;
 use embedder_traits::{
-    ContextMenuAction, ContextMenuItem, Cursor, EmbedderControlId, EmbedderControlRequest, Image,
     InputEvent, InputEventAndId, InputEventId, JSValue, JavaScriptEvaluationError, LoadStatus,
     MediaSessionActionType, NewWebViewDetails, ScreenGeometry, ScreenshotCaptureError, Scroll,
     Theme, TraversalId, UrlRequest, ViewportDetails, WebViewPoint, WebViewRect,
+    ContextMenuAction, ContextMenuItem, Cursor, DocumentLayoutSnapshot,
+    DocumentLayoutSnapshotError, EmbedderControlId, EmbedderControlRequest, HitTestResult, Image,
 };
 use euclid::{Scale, Size2D};
 use image::RgbaImage;
@@ -23,7 +24,6 @@ use log::debug;
 use paint_api::WebViewTrait;
 use paint_api::rendering_context::RenderingContext;
 use servo_base::Epoch;
-use servo_base::generic_channel::GenericSender;
 use servo_base::id::WebViewId;
 use servo_config::pref;
 use servo_constellation_traits::{
@@ -737,6 +737,56 @@ impl WebView {
             self.id(),
             script.to_string(),
             Box::new(callback),
+        );
+    }
+
+    /// Capture an owned DOM/layout/paint projection for the active document.
+    ///
+    /// Layout geometry comes from the live FragmentTree and paint ordering comes from the live
+    /// stacking-context paint traversal. Servo enriches the projection with owned DOM semantics
+    /// before invoking `callback`; no engine tree, pointer identity, or reference crosses this API.
+    pub fn document_layout_snapshot(
+        &self,
+        callback: impl FnOnce(Result<DocumentLayoutSnapshot, DocumentLayoutSnapshotError>)
+        + Send
+        + 'static,
+    ) {
+        let mut callback = Some(callback);
+        let callback = GenericCallback::new(move |result| {
+            let result = result.unwrap_or(Err(DocumentLayoutSnapshotError::InternalError));
+            if let Some(callback) = callback.take() {
+                callback(result);
+            }
+        })
+        .expect("Failed to create document layout snapshot callback");
+        self.inner().servo.constellation_proxy().send(
+            EmbedderToConstellationMessage::DocumentLayoutSnapshot(self.id(), callback),
+        );
+    }
+
+    /// Hit-test the active document at `point` and report the topmost event-receiving
+    /// element by its document-stable handle.
+    ///
+    /// This is the same paint-tree hit test Servo's WebDriver `element_click` performs,
+    /// answered against the live layout state at query time. The engine reports what is
+    /// on top; it never produces [`HitTestResult::Occluded`], which is the embedder's
+    /// verdict when the reported handle does not match the element it intended to
+    /// actuate.
+    pub fn hit_test(
+        &self,
+        point: WebViewPoint,
+        callback: impl FnOnce(HitTestResult) + Send + 'static,
+    ) {
+        let mut callback = Some(callback);
+        let callback = GenericCallback::new(move |result| {
+            let result = result.unwrap_or(HitTestResult::Unavailable);
+            if let Some(callback) = callback.take() {
+                callback(result);
+            }
+        })
+        .expect("Failed to create hit-test callback");
+        self.inner().servo.constellation_proxy().send(
+            EmbedderToConstellationMessage::HitTest(self.id(), point, callback),
         );
     }
 
