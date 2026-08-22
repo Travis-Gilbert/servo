@@ -1288,8 +1288,16 @@ fn set_logger(script_to_constellation_sender: ScriptToConstellationSender) {
     log::set_max_level(filter);
 }
 
+fn content_process_diagnostic(enabled: bool, stage: &str) {
+    if enabled {
+        eprintln!("servo-content-diagnostic: {stage}");
+    }
+}
+
 /// Content process entry point.
 pub fn run_content_process(token: String) {
+    let diagnostics = std::env::var_os("SERVO_CONTENT_PROCESS_DIAGNOSTICS").is_some();
+    content_process_diagnostic(diagnostics, "entry");
     let (unprivileged_content_sender, unprivileged_content_receiver) =
         ipc::channel::<UnprivilegedContent>().unwrap();
     let connection_bootstrap: IpcSender<IpcSender<UnprivilegedContent>> =
@@ -1299,22 +1307,39 @@ pub fn run_content_process(token: String) {
         .unwrap();
 
     let unprivileged_content = unprivileged_content_receiver.recv().unwrap();
+    content_process_diagnostic(diagnostics, "payload-received");
     opts::initialize_options(unprivileged_content.opts());
     prefs::set(unprivileged_content.prefs().clone());
 
     // Enter the sandbox if necessary.
     if opts::get().sandbox {
+        content_process_diagnostic(diagnostics, "sandbox-activating");
         create_sandbox();
+        content_process_diagnostic(diagnostics, "sandbox-active");
     }
 
+    content_process_diagnostic(diagnostics, "js-initializing");
     let _js_engine_setup = script::init();
+    content_process_diagnostic(diagnostics, "js-ready");
 
     match unprivileged_content {
         UnprivilegedContent::ScriptEventLoop(new_event_loop_info) => {
+            if diagnostics {
+                eprintln!(
+                    "servo-content-diagnostic: script-event-loop reporter={}",
+                    new_event_loop_info
+                        .system_memory_reporter_name
+                        .as_deref()
+                        .unwrap_or("<missing>"),
+                );
+            }
+            content_process_diagnostic(diagnostics, "media-initializing");
             media_platform::init();
+            content_process_diagnostic(diagnostics, "media-ready");
 
             // Start the fetch thread for this content process.
             let fetch_thread_join_handle = start_fetch_thread();
+            content_process_diagnostic(diagnostics, "fetch-thread-started");
 
             set_logger(
                 new_event_loop_info
@@ -1323,7 +1348,9 @@ pub fn run_content_process(token: String) {
                     .clone(),
             );
 
+            content_process_diagnostic(diagnostics, "memory-reporter-registering");
             register_system_memory_reporter_for_event_loop(&new_event_loop_info);
+            content_process_diagnostic(diagnostics, "memory-reporter-registered");
 
             let (background_hang_monitor_register, background_hang_monitor_join_handle) =
                 HangMonitorRegister::init(
@@ -1333,6 +1360,7 @@ pub fn run_content_process(token: String) {
                 );
 
             let layout_factory = Arc::new(LayoutFactoryImpl());
+            content_process_diagnostic(diagnostics, "script-thread-creating");
             let script_join_handle = script::ScriptThread::create(
                 new_event_loop_info.initial_script_state,
                 layout_factory,
@@ -1341,6 +1369,7 @@ pub fn run_content_process(token: String) {
                 )),
                 background_hang_monitor_register,
             );
+            content_process_diagnostic(diagnostics, "script-thread-created");
 
             script_join_handle
                 .join()
