@@ -49,6 +49,16 @@ impl UnprivilegedContent {
             UnprivilegedContent::ServiceWorker(content) => &content.prefs,
         }
     }
+
+    fn system_memory_reporter_name(&mut self, pid: u32) -> Option<String> {
+        let UnprivilegedContent::ScriptEventLoop(content) = self else {
+            return None;
+        };
+
+        let reporter_name = format!("system-content-{pid}");
+        content.system_memory_reporter_name = Some(reporter_name.clone());
+        Some(reporter_name)
+    }
 }
 
 /// Our content process sandbox profile on Mac. As restrictive as possible.
@@ -154,7 +164,7 @@ pub fn content_process_sandbox_profile() {
     target_arch = "riscv32",
     target_arch = "riscv64"
 ))]
-pub fn spawn_multiprocess(content: UnprivilegedContent) -> Result<Process, IpcError> {
+pub fn spawn_multiprocess(mut content: UnprivilegedContent) -> Result<Process, IpcError> {
     use ipc_channel::ipc::{IpcOneShotServer, IpcSender};
     // Note that this function can panic, due to process creation,
     // avoiding this panic would require a mechanism for dealing
@@ -170,11 +180,14 @@ pub fn spawn_multiprocess(content: UnprivilegedContent) -> Result<Process, IpcEr
     let child = child_process
         .spawn()
         .expect("Failed to start unsandboxed child process!");
+    let mut process = Process::unsandboxed(child);
+    let reporter_name = content.system_memory_reporter_name(process.pid());
+    process.set_system_memory_reporter_name(reporter_name);
 
     let (_receiver, sender) = server.accept().expect("Server failed to accept.");
     sender.send(content)?;
 
-    Ok(Process::Unsandboxed(child))
+    Ok(process)
 }
 
 #[cfg(all(
@@ -187,7 +200,7 @@ pub fn spawn_multiprocess(content: UnprivilegedContent) -> Result<Process, IpcEr
     not(target_arch = "riscv32"),
     not(target_arch = "riscv64")
 ))]
-pub fn spawn_multiprocess(content: UnprivilegedContent) -> Result<Process, IpcError> {
+pub fn spawn_multiprocess(mut content: UnprivilegedContent) -> Result<Process, IpcError> {
     use gaol::sandbox::{self, Sandbox, SandboxMethods};
     use ipc_channel::ipc::{IpcOneShotServer, IpcSender};
 
@@ -218,12 +231,12 @@ pub fn spawn_multiprocess(content: UnprivilegedContent) -> Result<Process, IpcEr
         .expect("Failed to create IPC one-shot server.");
 
     // If there is a sandbox, use the `gaol` API to create the child process.
-    let process = if content.opts().sandbox {
+    let mut process = if content.opts().sandbox {
         let mut command = sandbox::Command::me().expect("Failed to get current sandbox.");
         setup_common(&mut command, token);
 
         let profile = content_process_sandbox_profile();
-        Process::Sandboxed(
+        Process::sandboxed(
             Sandbox::new(profile)
                 .start(&mut command)
                 .expect("Failed to start sandboxed child process!")
@@ -234,12 +247,15 @@ pub fn spawn_multiprocess(content: UnprivilegedContent) -> Result<Process, IpcEr
         let mut child_process = process::Command::new(path_to_self);
         setup_common(&mut child_process, token);
 
-        Process::Unsandboxed(
+        Process::unsandboxed(
             child_process
                 .spawn()
                 .expect("Failed to start unsandboxed child process!"),
         )
     };
+
+    let reporter_name = content.system_memory_reporter_name(process.pid());
+    process.set_system_memory_reporter_name(reporter_name);
 
     let (_receiver, sender) = server.accept().expect("Server failed to accept.");
     sender.send(content)?;

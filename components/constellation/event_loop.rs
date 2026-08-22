@@ -171,6 +171,7 @@ impl EventLoop {
                 opts: (*opts::get()).clone(),
                 prefs: Box::new(prefs::get().clone()),
                 broken_image_icon_data: constellation.broken_image_icon_data.clone(),
+                system_memory_reporter_name: None,
             },
         ))?;
 
@@ -221,4 +222,6 @@ pub struct NewScriptEventLoopProcessInfo {
     pub prefs: Box<Preferences>,
     /// The broken image icon data that is used to create an image to show in place of broken images.
     pub broken_image_icon_data: Vec<u8>,
+    /// Parent-namespace reporter name assigned after the content process is spawned.
+    pub system_memory_reporter_name: Option<String>,
 }

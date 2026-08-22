@@ -1466,9 +1466,15 @@ impl ServoBuilder {
 fn register_system_memory_reporter_for_event_loop(
     new_event_loop_info: &NewScriptEventLoopProcessInfo,
 ) {
-    // Register the system memory reporter, which will run on its own thread. It never needs to
-    // be unregistered, because as long as the memory profiler is running the system memory
-    // reporter can make measurements.
+    // The parent assigns this name after spawning the process. A sandboxed Linux child is PID 1
+    // in its own namespace, while the parent must unregister it by the host-visible PID.
+    let reporter_name = new_event_loop_info
+        .system_memory_reporter_name
+        .as_ref()
+        .expect("content process memory reporter name was not assigned by its parent");
+
+    // Register the system memory reporter, which runs on its own thread. The parent unregisters
+    // it when this content process exits.
     let callback = GenericCallback::new(|message| {
         if let Ok(request) = message {
             system_reporter::collect_reports(request);
@@ -1479,7 +1485,7 @@ fn register_system_memory_reporter_for_event_loop(
         .initial_script_state
         .memory_profiler_sender
         .send(ProfilerMsg::RegisterReporter(
-            format!("system-content-{}", std::process::id()),
+            reporter_name.clone(),
             Reporter(callback),
         ));
 }

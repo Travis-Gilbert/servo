@@ -8,25 +8,52 @@ use crossbeam_channel::{Receiver, Select};
 use log::{debug, warn};
 use profile_traits::mem::{ProfilerChan, ProfilerMsg};
 
-pub enum Process {
+pub struct Process {
+    kind: ProcessKind,
+    system_memory_reporter_name: Option<String>,
+}
+
+enum ProcessKind {
     Unsandboxed(Child),
     Sandboxed(u32),
 }
 
 impl Process {
-    fn pid(&self) -> u32 {
-        match self {
-            Self::Unsandboxed(child) => child.id(),
-            Self::Sandboxed(pid) => *pid,
+    pub(crate) fn unsandboxed(child: Child) -> Self {
+        Self {
+            kind: ProcessKind::Unsandboxed(child),
+            system_memory_reporter_name: None,
         }
     }
 
+    pub(crate) fn sandboxed(pid: u32) -> Self {
+        Self {
+            kind: ProcessKind::Sandboxed(pid),
+            system_memory_reporter_name: None,
+        }
+    }
+
+    pub(crate) fn pid(&self) -> u32 {
+        match &self.kind {
+            ProcessKind::Unsandboxed(child) => child.id(),
+            ProcessKind::Sandboxed(pid) => *pid,
+        }
+    }
+
+    pub(crate) fn set_system_memory_reporter_name(&mut self, name: Option<String>) {
+        self.system_memory_reporter_name = name;
+    }
+
+    fn system_memory_reporter_name(&self) -> Option<&str> {
+        self.system_memory_reporter_name.as_deref()
+    }
+
     fn wait(&mut self) {
-        match self {
-            Self::Unsandboxed(child) => {
+        match &mut self.kind {
+            ProcessKind::Unsandboxed(child) => {
                 let _ = child.wait();
             },
-            Self::Sandboxed(_pid) => {
+            ProcessKind::Sandboxed(_pid) => {
                 // TODO: use nix::waitpid() on supported platforms.
                 warn!("wait() is not yet implemented for sandboxed processes.");
             },
@@ -69,12 +96,29 @@ impl ProcessManager {
     pub fn remove(&mut self, index: usize) {
         let (mut process, _) = self.processes.swap_remove(index);
         debug!("Removing process pid={}", process.pid());
-        // Unregister this process system memory profiler
-        self.mem_profiler_chan
-            .send(ProfilerMsg::UnregisterReporter(format!(
-                "system-content-{}",
-                process.pid()
-            )));
+        if let Some(reporter_name) = process.system_memory_reporter_name() {
+            self.mem_profiler_chan
+                .send(ProfilerMsg::UnregisterReporter(reporter_name.to_owned()));
+        }
         process.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Process;
+
+    #[test]
+    fn sandboxed_process_keeps_parent_reporter_name() {
+        let mut process = Process::sandboxed(42);
+        assert_eq!(process.pid(), 42);
+        assert_eq!(process.system_memory_reporter_name(), None);
+
+        process.set_system_memory_reporter_name(Some("system-content-42".to_owned()));
+
+        assert_eq!(
+            process.system_memory_reporter_name(),
+            Some("system-content-42")
+        );
     }
 }
