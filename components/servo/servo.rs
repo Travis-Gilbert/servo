@@ -97,44 +97,17 @@ use crate::webview_delegate::{
 
 #[cfg(feature = "media-gstreamer")]
 mod media_platform {
-    use servo_media_gstreamer::GStreamerBackend;
-
     use super::ServoMedia;
-
-    #[cfg(any(windows, target_os = "macos"))]
     pub fn init() {
-        ServoMedia::init_with_backend(|| {
-            let mut plugin_dir = std::env::current_exe().unwrap();
-            plugin_dir.pop();
-
-            if cfg!(target_os = "macos") {
-                plugin_dir.push("lib");
-            }
-
-            let plugin_list = crate::gstreamer_plugins::gstreamer_plugins();
-            match GStreamerBackend::init_with_plugins(plugin_dir, &plugin_list) {
-                Ok(b) => b,
-                Err(e) => {
-                    log::error!("Error initializing GStreamer: {:?}", e);
-                    std::process::exit(1);
-                },
-            }
-        });
-    }
-
-    #[cfg(not(any(windows, target_os = "macos")))]
-    pub fn init() {
-        ServoMedia::init::<GStreamerBackend>();
+        ServoMedia::init::<servo_media_dummy::DummyBackend>();
     }
 }
 
-#[cfg(all(not(feature = "media-gstreamer"), target_env = "ohos"))]
+#[cfg(all(not(feature = "media-gstreamer"), not(target_env = "ohos")))]
 mod media_platform {
-    use servo_media_ohos::OhosBackend;
-
     use super::ServoMedia;
     pub fn init() {
-        ServoMedia::init::<OhosBackend>();
+        ServoMedia::init::<servo_media_dummy::DummyBackend>();
     }
 }
 
@@ -1374,9 +1347,7 @@ pub fn run_content_process(token: String) {
     not(target_env = "ohos"),
 ))]
 fn create_sandbox() {
-    ChildSandbox::new(content_process_sandbox_profile())
-        .activate()
-        .expect("Failed to activate sandbox!");
+    panic!("Sandboxing is not supported on Windows, iOS, ARM, RISC-V targets and android.");
 }
 
 #[cfg(any(
@@ -1451,9 +1422,15 @@ impl ServoBuilder {
 fn register_system_memory_reporter_for_event_loop(
     new_event_loop_info: &NewScriptEventLoopProcessInfo,
 ) {
-    // Register the system memory reporter, which will run on its own thread. It never needs to
-    // be unregistered, because as long as the memory profiler is running the system memory
-    // reporter can make measurements.
+    // The parent assigns this name after spawning the process. A sandboxed Linux child is PID 1
+    // in its own namespace, while the parent must unregister it by the host-visible PID.
+    let reporter_name = new_event_loop_info
+        .system_memory_reporter_name
+        .as_ref()
+        .expect("content process memory reporter name was not assigned by its parent");
+
+    // Register the system memory reporter, which runs on its own thread. The parent unregisters
+    // it when this content process exits.
     let callback = GenericCallback::new(|message| {
         if let Ok(request) = message {
             system_reporter::collect_reports(request);
@@ -1464,7 +1441,7 @@ fn register_system_memory_reporter_for_event_loop(
         .initial_script_state
         .memory_profiler_sender
         .send(ProfilerMsg::RegisterReporter(
-            format!("system-content-{}", std::process::id()),
+            reporter_name.clone(),
             Reporter(callback),
         ));
 }
