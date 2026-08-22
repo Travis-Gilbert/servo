@@ -280,6 +280,10 @@ fn setup_common<C: CommandMethods>(command: &mut C, token: String) {
     if let Ok(value) = env::var("RUST_LOG") {
         C::env(command, "RUST_LOG", value);
     }
+
+    if let Ok(value) = env::var("SERVO_CONTENT_PROCESS_DIAGNOSTICS") {
+        C::env(command, "SERVO_CONTENT_PROCESS_DIAGNOSTICS", value);
+    }
 }
 
 /// A trait to unify commands launched as multiprocess with or without a sandbox.
