@@ -27,6 +27,11 @@ pub enum ConstellationToEmbedderMsg {
     MediaSessionEvent(WebViewId, MediaSessionEvent),
     /// A pipeline panicked. First string is the reason, second one is the backtrace.
     Panic(WebViewId, String, Option<String>),
+    /// A pipeline selected by the random hardening test hook exited.
+    ///
+    /// This is deliberately distinct from `Panic`: the closure is an injected
+    /// lifecycle fault used to test embedder recovery, not an engine panic.
+    RandomPipelineClosure(WebViewId),
     /// A `WebView` potentially gained focus for keyboard events.
     /// If the boolean value is false, the `WebView` could not be focused.
     WebViewFocused(WebViewId, bool),

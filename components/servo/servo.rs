@@ -839,6 +839,11 @@ impl ServoInner {
                         .notify_crashed(webview, reason, backtrace);
                 }
             },
+            ConstellationToEmbedderMsg::RandomPipelineClosure(webview_id) => {
+                if let Some(webview) = self.get_webview_handle(webview_id) {
+                    webview.delegate().notify_random_pipeline_closure(webview);
+                }
+            },
             ConstellationToEmbedderMsg::ReportProfile(_items) => {},
             ConstellationToEmbedderMsg::MediaSessionEvent(webview_id, media_session_event) => {
                 if let Some(webview) = self.get_webview_handle(webview_id) {

@@ -969,6 +969,9 @@ pub trait WebViewDelegate {
     }
     /// A pipeline in the webview panicked. First string is the reason, second one is the backtrace.
     fn notify_crashed(&self, _webview: WebView, _reason: String, _backtrace: Option<String>) {}
+    /// A pipeline selected by Servo's random hardening hook exited. This is a
+    /// test lifecycle signal, not a `notify_crashed` panic report.
+    fn notify_random_pipeline_closure(&self, _webview: WebView) {}
     /// Notifies the embedder about media session events
     /// (i.e. when there is metadata for the active media session, playback state changes...).
     fn notify_media_session_event(&self, _webview: WebView, _event: MediaSessionEvent) {}
