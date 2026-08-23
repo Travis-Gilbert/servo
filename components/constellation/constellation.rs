@@ -5830,7 +5830,7 @@ where
         if let Some((ref mut rng, probability)) = self.random_pipeline_closure
             && let Some(pipeline_id) = pipeline_ids.choose(rng)
         {
-            let pipeline_id = pipeline_id.clone();
+            let pipeline_id = **pipeline_id;
             let pending_pipeline = self.pipelines.get(&pipeline_id).is_some_and(|pipeline| {
                 self.pending_changes
                     .iter()
