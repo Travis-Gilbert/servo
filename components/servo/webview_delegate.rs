@@ -692,30 +692,11 @@ pub enum SimpleDialog {
 }
 
 impl SimpleDialog {
-    #[doc(hidden)]
-    pub fn message(&self) -> &str {
+    fn id(&self) -> EmbedderControlId {
         match self {
-            SimpleDialog::Alert(alert_dialog) => alert_dialog.message(),
-            SimpleDialog::Confirm(confirm_dialog) => confirm_dialog.message(),
-            SimpleDialog::Prompt(prompt_dialog) => prompt_dialog.message(),
-        }
-    }
-
-    #[doc(hidden)]
-    pub fn confirm(self) {
-        match self {
-            SimpleDialog::Alert(alert_dialog) => alert_dialog.confirm(),
-            SimpleDialog::Confirm(confirm_dialog) => confirm_dialog.confirm(),
-            SimpleDialog::Prompt(prompt_dialog) => prompt_dialog.confirm(),
-        }
-    }
-
-    #[doc(hidden)]
-    pub fn dismiss(self) {
-        match self {
-            SimpleDialog::Alert(alert_dialog) => alert_dialog.confirm(),
-            SimpleDialog::Confirm(confirm_dialog) => confirm_dialog.dismiss(),
-            SimpleDialog::Prompt(prompt_dialog) => prompt_dialog.dismiss(),
+            SimpleDialog::Alert(alert_dialog) => alert_dialog.id,
+            SimpleDialog::Confirm(confirm_dialog) => confirm_dialog.id,
+            SimpleDialog::Prompt(prompt_dialog) => prompt_dialog.id,
         }
     }
 }
@@ -973,6 +954,9 @@ pub trait WebViewDelegate {
     }
     /// A pipeline in the webview panicked. First string is the reason, second one is the backtrace.
     fn notify_crashed(&self, _webview: WebView, _reason: String, _backtrace: Option<String>) {}
+    /// A pipeline selected by Servo's random hardening hook exited. This is a
+    /// test lifecycle signal, not a `notify_crashed` panic report.
+    fn notify_random_pipeline_closure(&self, _webview: WebView) {}
     /// Notifies the embedder about media session events
     /// (i.e. when there is metadata for the active media session, playback state changes...).
     fn notify_media_session_event(&self, _webview: WebView, _event: MediaSessionEvent) {}
