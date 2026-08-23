@@ -449,6 +449,11 @@ pub struct Constellation<STF, SWF> {
     /// This is for testing the hardening of the constellation.
     random_pipeline_closure: Option<(SmallRng, f32)>,
 
+    /// Pipelines selected by the random hardening hook. The marker survives
+    /// until their ordinary exit notification reaches the constellation, at
+    /// which point the embedder gets a distinct recovery signal.
+    random_pipeline_closures: FxHashSet<PipelineId>,
+
     /// Phantom data that keeps the Rust type system happy.
     phantom: PhantomData<(STF, SWF)>,
 
@@ -715,6 +720,7 @@ where
                         warn!("Randomly closing pipelines using seed {random_pipeline_closure_seed:?}.");
                         (rng, probability)
                     }),
+                    random_pipeline_closures: Default::default(),
                     #[cfg(feature = "webgl")]
                     webgl_threads: state.webgl_threads,
                     webxr_registry: state.webxr_registry,
@@ -3030,6 +3036,7 @@ where
 
     fn handle_pipeline_exited(&mut self, pipeline_id: PipelineId, exit_source: PipelineExitSource) {
         debug!("{}: Exited", pipeline_id);
+        let random_pipeline_closure = self.random_pipeline_closures.remove(&pipeline_id);
         self.remove_worker_animation_frame_providers_for_pipeline(pipeline_id);
 
         let Some(pipeline) = self.pipelines.remove(&pipeline_id) else {
@@ -3050,6 +3057,12 @@ where
             pipeline.id,
             exit_source,
         ));
+
+        if random_pipeline_closure {
+            self.constellation_to_embedder_proxy.send(
+                ConstellationToEmbedderMsg::RandomPipelineClosure(pipeline.webview_id),
+            );
+        }
     }
 
     #[servo_tracing::instrument(skip_all)]
@@ -6234,16 +6247,16 @@ where
         // In order to get repeatability, we sort the pipeline ids.
         let mut pipeline_ids: Vec<&PipelineId> = self.pipelines.keys().collect();
         pipeline_ids.sort_unstable();
-        if let Some((ref mut rng, probability)) = self.random_pipeline_closure &&
-            let Some(pipeline_id) = pipeline_ids.choose(rng) &&
-            let Some(pipeline) = self.pipelines.get(pipeline_id)
+        if let Some((ref mut rng, probability)) = self.random_pipeline_closure
+            && let Some(pipeline_id) = pipeline_ids.choose(rng)
         {
-            if self
-                .webviews
-                .values()
-                .any(|webview| webview.pipeline_is_pending(pipeline.id)) &&
-                probability <= rng.random::<f32>()
-            {
+            let pipeline_id = **pipeline_id;
+            let pending_pipeline = self.pipelines.get(&pipeline_id).is_some_and(|pipeline| {
+                self.webviews
+                    .values()
+                    .any(|webview| webview.pipeline_is_pending(pipeline.id))
+            });
+            if pending_pipeline && probability <= rng.random::<f32>() {
                 // We tend not to close pending pipelines, as that almost always
                 // results in pipelines being closed early in their lifecycle,
                 // and not stressing the constellation as much.
@@ -6253,7 +6266,11 @@ where
                 // Note that we deliberately do not do any of the tidying up
                 // associated with closing a pipeline. The constellation should cope!
                 warn!("{}: Randomly closing pipeline", pipeline_id);
-                pipeline.send_exit_message_to_script(DiscardBrowsingContext::No);
+                self.random_pipeline_closures.insert(pipeline_id);
+                self.pipelines
+                    .get(&pipeline_id)
+                    .expect("selected pipeline should still be registered")
+                    .send_exit_message_to_script(DiscardBrowsingContext::No);
             }
         }
     }
