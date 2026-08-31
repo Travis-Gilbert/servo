@@ -380,6 +380,9 @@ pub struct Preferences {
     pub network_use_webpki_roots: bool,
     /// The maximum content size we will forward for preallocation, defaults to 5MB
     pub network_max_content_length: u64,
+    /// Maximum encoded body bytes buffered for one embedder-intercepted HTTP response.
+    /// This does not limit ordinary network responses or custom protocol handlers.
+    pub network_interception_max_response_bytes: u64,
     /// The length of the session history, in navigations, for each `WebView. Back-forward
     /// cache entries that are more than `session_history_max_length` steps in the future or
     /// `session_history_max_length` steps in the past will be discarded. Navigating forward
@@ -580,6 +583,7 @@ impl Preferences {
             network_local_directory_listing_enabled: true,
             network_use_webpki_roots: false,
             network_max_content_length: 5 * 1024 * 1024,
+            network_interception_max_response_bytes: 64 * 1024 * 1024,
             session_history_max_length: 20,
             shell_background_color_rgba: [1.0, 1.0, 1.0, 1.0],
             log_filter: String::new(),

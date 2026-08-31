@@ -20,6 +20,7 @@ mod hsts;
 mod http_cache;
 mod http_loader;
 mod image_cache;
+mod interception;
 mod resource_thread;
 mod subresource_integrity;
 use std::sync::Arc;
