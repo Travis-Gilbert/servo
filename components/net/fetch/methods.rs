@@ -3,7 +3,6 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::{io, mem, str};
 
 use base64::Engine as _;
@@ -61,6 +60,8 @@ use crate::protocols::{ProtocolRegistry, is_url_potentially_trustworthy};
 use crate::request_interceptor::RequestInterceptor;
 use crate::subresource_integrity::is_response_integrity_valid;
 
+use tokio_util::sync::CancellationToken;
+
 pub type Target<'a> = &'a mut (dyn FetchTaskTarget + Send);
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -117,16 +118,21 @@ pub struct FetchContext {
 
 #[derive(Default)]
 pub struct CancellationListener {
-    cancelled: AtomicBool,
+    cancellation_token: CancellationToken,
 }
 
 impl CancellationListener {
     pub(crate) fn cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Relaxed)
+        self.cancellation_token.is_cancelled()
     }
 
-    pub(crate) fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Relaxed)
+    /// Cancel this fetch and wake any task waiting for an embedder response.
+    pub fn cancel(&self) {
+        self.cancellation_token.cancel();
+    }
+
+    pub(crate) async fn wait_until_cancelled(&self) {
+        self.cancellation_token.cancelled().await;
     }
 }
 
@@ -537,14 +543,6 @@ pub async fn main_fetch(
 
     let current_url = request.current_url();
     let current_scheme = current_url.scheme();
-
-    // Intercept the request and maybe override the response.
-    context
-        .request_interceptor
-        .lock()
-        .await
-        .intercept_request(request, &mut response, context)
-        .await;
 
     let mut response = match response {
         Some(response) => response,

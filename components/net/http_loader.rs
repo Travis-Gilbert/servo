@@ -2216,31 +2216,42 @@ async fn http_network_fetch(
         // Let connection be the result of obtaining a connection, given networkPartitionKey,
         // request’s current URL, includeCredentials, and newConnection.
         _ => {
-            let response_future = obtain_response(
-                &context.state.client,
-                &url,
-                &request.method,
-                &mut request.headers,
-                body,
-                request
-                    .body
-                    .as_ref()
-                    .is_some_and(|body| body.source_is_null()),
-                &request.pipeline_id,
-                Some(&request_id),
-                request.destination,
-                is_xhr,
-                context,
-                fetch_terminated_sender,
-                browsing_context_id,
-            );
-
-            // This will only get the headers, the body is read later
-            let (response_stream, msg) = match response_future.await {
-                Ok(wrapped_response) => wrapped_response,
+            // Interception replaces only HTTP transport. Fetch retains policy, redirects,
+            // decoding, cookies, cache and response filtering around this branch.
+            // Clone the interceptor before awaiting so the shared lock is not held across
+            // embedder response or cancellation waits.
+            let interceptor = context.request_interceptor.lock().await.clone();
+            match interceptor.intercept_request(request, context).await {
+                Ok(Some(response)) => (Decoder::detect(response, url.is_secure_scheme()), None),
                 Err(error) => return Response::network_error(error),
-            };
-            (response_stream, msg)
+                Ok(None) => {
+                let response_future = obtain_response(
+                    &context.state.client,
+                    &url,
+                    &request.method,
+                    &mut request.headers,
+                    body,
+                    request
+                        .body
+                        .as_ref()
+                        .is_some_and(|body| body.source_is_null()),
+                    &request.pipeline_id,
+                    Some(&request_id),
+                    request.destination,
+                    is_xhr,
+                    context,
+                    fetch_terminated_sender,
+                    browsing_context_id,
+                );
+
+                // This will only get the headers, the body is read later
+                let (response_stream, msg) = match response_future.await {
+                    Ok(wrapped_response) => wrapped_response,
+                    Err(error) => return Response::network_error(error),
+                };
+                (response_stream, msg)
+                },
+            }
         },
     };
 
@@ -2303,16 +2314,15 @@ async fn http_network_fetch(
 
     let response_body = response.body.clone();
 
-    // We're about to spawn a future to be waited on here
-    let (done_sender, done_receiver) = unbounded_channel();
-    *done_chan = Some((done_sender.clone(), done_receiver));
-
     let devtools_sender = context.devtools_chan.clone();
     let cancellation_listener = context.cancellation_listener.clone();
     if cancellation_listener.cancelled() {
         return Response::network_error(NetworkError::LoadCancelled);
     }
 
+    // We're about to spawn a future to be waited on here
+    let (done_sender, done_receiver) = unbounded_channel();
+    *done_chan = Some((done_sender.clone(), done_receiver));
     if let Some(ref sender) = devtools_sender &&
         let Some(m) = msg
     {
