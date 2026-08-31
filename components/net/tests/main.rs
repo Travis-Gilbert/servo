@@ -63,27 +63,9 @@ fn create_embedder_proxy_and_receiver() -> (EmbedderProxy, Receiver<EmbedderMsg>
 
 fn create_generic_embedder_proxy_and_receiver<T>() -> (GenericEmbedderProxy<T>, Receiver<T>) {
     let (sender, receiver) = unbounded();
-    let event_loop_waker = || {
-        struct DummyEventLoopWaker {}
-        impl DummyEventLoopWaker {
-            fn new() -> DummyEventLoopWaker {
-                DummyEventLoopWaker {}
-            }
-        }
-        impl embedder_traits::EventLoopWaker for DummyEventLoopWaker {
-            fn wake(&self) {}
-            fn clone_box(&self) -> Box<dyn embedder_traits::EventLoopWaker> {
-                Box::new(DummyEventLoopWaker {})
-            }
-        }
-
-        Box::new(DummyEventLoopWaker::new())
-    };
-
-    let embedder_proxy = embedder_traits::GenericEmbedderProxy {
-        sender,
-        event_loop_waker: event_loop_waker(),
-    };
+    // Reuse the shared test runtime and waker instead of creating a test-owned runtime.
+    let mut embedder_proxy = create_generic_embedder_proxy::<T>();
+    embedder_proxy.sender = sender;
 
     (embedder_proxy, receiver)
 }
