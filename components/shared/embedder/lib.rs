@@ -674,6 +674,10 @@ pub enum GamepadHapticEffectType {
 
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct WebResourceRequest {
+    /// Whether the request carries an upload stream. The interceptor does not expose its bytes,
+    /// so embedders must not dispatch body-dependent handlers with a fabricated empty body.
+    #[serde(default)]
+    pub has_body: bool,
     #[serde(
         deserialize_with = "::hyper_serde::deserialize",
         serialize_with = "::hyper_serde::serialize"
