@@ -55,4 +55,5 @@ uuid = { workspace = true }
 webrender_api = { workspace = true }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 servo-default-resources = { workspace = true }
