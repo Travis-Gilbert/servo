@@ -420,6 +420,7 @@ impl SharedWorkerGlobalScope {
                     is_nested_browsing_context,
                     insecure_requests_policy,
                     has_trustworthy_ancestor_origin: current_global_ancestor_trustworthy,
+                    is_window: false,
                 };
 
                 let event_loop_sender = ScriptEventLoopSender::SharedWorker(own_sender.clone());

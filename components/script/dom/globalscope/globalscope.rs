@@ -2652,6 +2652,7 @@ impl GlobalScope {
             is_nested_browsing_context: false,
             insecure_requests_policy: self.insecure_requests_policy(),
             has_trustworthy_ancestor_origin: false,
+            is_window: false,
         }
     }
 

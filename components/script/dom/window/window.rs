@@ -994,6 +994,7 @@ impl Window {
             is_nested_browsing_context: !self.is_top_level(),
             insecure_requests_policy,
             has_trustworthy_ancestor_origin,
+            is_window: true,
         }
     }
 

@@ -225,6 +225,11 @@ pub struct RequestClient {
     pub insecure_requests_policy: InsecureRequestsPolicy,
     /// <https://w3c.github.io/webappsec-secure-contexts/#potentially-trustworthy-origin>
     pub has_trustworthy_ancestor_origin: bool,
+    /// True only for a client backed by an actual `Window` global.
+    /// Workers and synthetic clients remain false even when they share a window's origin or IDs.
+    /// This must not be inferred from `is_nested_browsing_context`; missing metadata fails closed.
+    #[serde(default)]
+    pub is_window: bool,
 }
 
 /// <https://html.spec.whatwg.org/multipage/#system-visibility-state>
