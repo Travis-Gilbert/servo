@@ -61,12 +61,12 @@ impl ServoErrorChannel {
     }
 }
 
-pub(crate) trait AbstractSender {
+pub(crate) trait AbstractSender: Send {
     type Message;
     fn send(&self, value: Self::Message) -> SendResult;
 }
 
-impl<T: Serialize> AbstractSender for GenericSender<T> {
+impl<T: Serialize + Send> AbstractSender for GenericSender<T> {
     type Message = T;
     fn send(&self, value: T) -> SendResult {
         GenericSender::send(self, value)
@@ -82,7 +82,7 @@ impl<T: for<'de> Deserialize<'de> + Serialize + Send + 'static> AbstractSender
     }
 }
 
-impl<T> AbstractSender for TokioSender<T> {
+impl<T: Send> AbstractSender for TokioSender<T> {
     type Message = T;
     fn send(&self, value: T) -> SendResult {
         TokioSender::send(self, value).map_err(|_| SendError::Disconnected)
@@ -97,7 +97,7 @@ impl<T> From<TokioOneshotSender<T>> for OneshotSender<T> {
     }
 }
 
-impl<T> AbstractSender for OneshotSender<T> {
+impl<T: Send> AbstractSender for OneshotSender<T> {
     type Message = T;
     fn send(&self, value: T) -> SendResult {
         let sender = self.0.borrow_mut().take();
@@ -117,7 +117,7 @@ pub(crate) struct IpcResponder<T> {
     default_response: Option<T>,
 }
 
-impl<T: Serialize + 'static> IpcResponder<T> {
+impl<T: Serialize + Send + 'static> IpcResponder<T> {
     pub(crate) fn new(response_sender: GenericSender<T>, default_response: T) -> Self {
         Self {
             response_sender: Box::new(response_sender),
