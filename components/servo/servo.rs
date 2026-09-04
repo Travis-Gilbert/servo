@@ -93,7 +93,6 @@ use servo_media::ServoMedia;
 use servo_media::player::context::GlContext;
 use servo_wakelock::DefaultWakeLockDelegate;
 use storage::new_storage_threads;
-use storage_traits::StorageThreads;
 #[cfg(feature = "multiprocess")]
 use style::global_style_data::StyleThreadPool;
 #[cfg(feature = "webxr")]
@@ -978,6 +977,7 @@ impl Servo {
             mem_profiler_chan.clone(),
             opts.config_dir.clone(),
             opts.temporary_storage,
+            builder.storage_engines,
         );
 
         create_constellation(
@@ -1461,6 +1461,7 @@ pub struct ServoBuilder {
     preferences: Option<Box<Preferences>>,
     event_loop_waker: Box<dyn EventLoopWaker>,
     protocol_registry: ProtocolRegistry,
+    storage_engines: StorageEngines,
 }
 
 impl Default for ServoBuilder {
@@ -1470,6 +1471,7 @@ impl Default for ServoBuilder {
             preferences: Default::default(),
             event_loop_waker: Box::new(DefaultEventLoopWaker),
             protocol_registry: Default::default(),
+            storage_engines: Default::default(),
         }
     }
 }
@@ -1496,6 +1498,11 @@ impl ServoBuilder {
 
     pub fn protocol_registry(mut self, protocol_registry: ProtocolRegistry) -> Self {
         self.protocol_registry = protocol_registry;
+        self
+    }
+
+    pub fn storage_engines(mut self, storage_engines: StorageEngines) -> Self {
+        self.storage_engines = storage_engines;
         self
     }
 }

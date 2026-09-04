@@ -3,8 +3,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::collections::HashMap;
-use std::fmt::Debug;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::thread;
 
 use log::error;
@@ -13,44 +13,10 @@ use net_traits::response::Response;
 use servo_base::generic_channel::{self, GenericReceiver, GenericSender};
 use servo_url::ImmutableOrigin;
 use storage_traits::cache_storage::{
-    CacheStorageError, CacheStorageThreadHandle, CacheStorageThreadMessage,
-    CacheStorageThreadResponse,
+    CacheStorageEngine, CacheStorageEngineFactory, CacheStorageError,
+    CacheStorageThreadHandle, CacheStorageThreadMessage, CacheStorageThreadResponse,
 };
 use storage_traits::client_storage::StorageProxyMap;
-
-trait CacheStorageEngine {
-    type Error: Debug;
-
-    /// <https://w3c.github.io/ServiceWorker/#cache-storage-has>
-    fn has_cache(
-        &mut self,
-        origin: ImmutableOrigin,
-        cache_name: &str,
-    ) -> Result<bool, CacheStorageError<Self::Error>>;
-
-    /// <https://w3c.github.io/ServiceWorker/#cache-storage-open>
-    fn open_cache(
-        &mut self,
-        origin: ImmutableOrigin,
-        cache_name: String,
-        proxy_map: &StorageProxyMap,
-    ) -> Result<(), CacheStorageError<Self::Error>>;
-
-    /// <https://w3c.github.io/ServiceWorker/#cache-keys>
-    fn keys(
-        &mut self,
-        origin: ImmutableOrigin,
-        cache_name: &str,
-    ) -> Result<Vec<String>, CacheStorageError<Self::Error>>;
-
-    /// <https://w3c.github.io/ServiceWorker/#dom-cachestorage-delete>
-    fn delete_cache(
-        &mut self,
-        origin: ImmutableOrigin,
-        cache_name: &str,
-        proxy_map: &StorageProxyMap,
-    ) -> Result<bool, CacheStorageError<Self::Error>>;
-}
 
 /// <https://w3c.github.io/ServiceWorker/#dfn-request-response-list>
 pub struct RequestResponseList {
@@ -64,32 +30,31 @@ pub struct MemCacheStorageEngine {
 }
 
 impl CacheStorageEngine for MemCacheStorageEngine {
-    type Error = ();
-
     /// <https://w3c.github.io/ServiceWorker/#cache-storage-has>
     /// The parallel steps.
     fn has_cache(
         &mut self,
-        origin: ImmutableOrigin,
+        origin: &ImmutableOrigin,
+        _proxy_map: &StorageProxyMap,
         cache_name: &str,
-    ) -> Result<bool, CacheStorageError<Self::Error>> {
+    ) -> Result<bool, CacheStorageError<String>> {
         // Step 2.1:For each key → value of the relevant name to cache map:
         // Step 2.1.1: If cacheName matches key, resolve promise with true and abort these steps.
         // Step 2.2: Resolve promise with false.
         // Note: promise resolved in the callback in CacheStorage.
         Ok(self
             .name_to_cache_map
-            .contains_key(&(origin, cache_name.to_string())))
+            .contains_key(&(origin.clone(), cache_name.to_string())))
     }
 
     /// <https://w3c.github.io/ServiceWorker/#cache-storage-open>
     /// The parallel steps.
     fn open_cache(
         &mut self,
-        origin: ImmutableOrigin,
+        origin: &ImmutableOrigin,
         cache_name: String,
         proxy_map: &StorageProxyMap,
-    ) -> Result<(), CacheStorageError<Self::Error>> {
+    ) -> Result<(), CacheStorageError<String>> {
         // Step 2.1: For each key → value of the relevant name to cache map:
         // Step 2.1.1: If cacheName matches key, then:
         // Resolve promise with a new Cache object that represents value.
@@ -114,12 +79,17 @@ impl CacheStorageEngine for MemCacheStorageEngine {
             .create_database(proxy_map.bottle_id, cache_name.clone())
             .recv()
         else {
-            return Err(CacheStorageError::Internal(()));
+            return Err(CacheStorageError::Internal(
+                "CacheStorage create_database channel closed".to_owned(),
+            ));
         };
         if response.is_err() {
-            return Err(CacheStorageError::Internal(()));
+            return Err(CacheStorageError::Internal(
+                "CacheStorage create_database failed".to_owned(),
+            ));
         }
-        self.name_to_cache_map.insert((origin, cache_name), cache);
+        self.name_to_cache_map
+            .insert((origin.clone(), cache_name), cache);
 
         // Step 2.4: Resolve promise with a new Cache object that represents cache.
         // Note: promise resolved in script.
@@ -130,9 +100,9 @@ impl CacheStorageEngine for MemCacheStorageEngine {
     /// The parallel steps.
     fn keys(
         &mut self,
-        origin: ImmutableOrigin,
+        origin: &ImmutableOrigin,
         cache_name: &str,
-    ) -> Result<Vec<String>, CacheStorageError<Self::Error>> {
+    ) -> Result<Vec<String>, CacheStorageError<String>> {
         // Step 5.1: Let requests be an empty list.
         let mut requests: Vec<String> = Vec::new();
 
@@ -140,9 +110,11 @@ impl CacheStorageEngine for MemCacheStorageEngine {
         // Step 5.2.1: For each requestResponse of the relevant request response list:
         let Some(relevant_cache) = self
             .name_to_cache_map
-            .get(&(origin, cache_name.to_string()))
+            .get(&(origin.clone(), cache_name.to_string()))
         else {
-            return Err(CacheStorageError::Internal(()));
+            return Err(CacheStorageError::Internal(
+                "CacheStorage cache not found".to_owned(),
+            ));
         };
         // Step 5.2.2: Add requestResponse’s request to requests.
         for (request, _response) in &relevant_cache.list {
@@ -159,10 +131,10 @@ impl CacheStorageEngine for MemCacheStorageEngine {
     /// The "running the algorithm specified in has" part, and the parallel steps.
     fn delete_cache(
         &mut self,
-        origin: ImmutableOrigin,
+        origin: &ImmutableOrigin,
         cache_name: &str,
         proxy: &StorageProxyMap,
-    ) -> Result<bool, CacheStorageError<Self::Error>> {
+    ) -> Result<bool, CacheStorageError<String>> {
         // Step 1: Let promise be the result of running the algorithm specified in has(cacheName) method with cacheName.
         // Step 2: Return the result of reacting to promise with a fulfillment handler that,
         // when called with argument cacheExists,
@@ -177,7 +149,7 @@ impl CacheStorageEngine for MemCacheStorageEngine {
         // Step 2.3.1: Remove the relevant name to cache map[cacheName].
         let has = self
             .name_to_cache_map
-            .remove(&(origin, cache_name.to_string()))
+            .remove(&(origin.clone(), cache_name.to_string()))
             .is_some();
 
         if has {
@@ -186,10 +158,14 @@ impl CacheStorageEngine for MemCacheStorageEngine {
                 .delete_database(proxy.bottle_id, cache_name.to_string())
                 .recv()
             else {
-                return Err(CacheStorageError::Internal(()));
+                return Err(CacheStorageError::Internal(
+                    "CacheStorage delete_database channel closed".to_owned(),
+                ));
             };
             if response.is_err() {
-                return Err(CacheStorageError::Internal(()));
+                return Err(CacheStorageError::Internal(
+                    "CacheStorage delete_database failed".to_owned(),
+                ));
             }
         }
 
@@ -199,12 +175,30 @@ impl CacheStorageEngine for MemCacheStorageEngine {
     }
 }
 
+pub(crate) struct DefaultCacheStorageEngineFactory;
+
+impl CacheStorageEngineFactory for DefaultCacheStorageEngineFactory {
+    fn open(&self, _storage_dir: PathBuf) -> Result<Box<dyn CacheStorageEngine>, String> {
+        Ok(Box::new(MemCacheStorageEngine {
+            name_to_cache_map: Default::default(),
+        }))
+    }
+}
+
 pub trait CacheStorageThreadFactory {
-    fn new(config_dir: Option<PathBuf>, temporary_storage: bool) -> Self;
+    fn new(
+        config_dir: Option<PathBuf>,
+        temporary_storage: bool,
+        factory: Option<Arc<dyn CacheStorageEngineFactory>>,
+    ) -> Self;
 }
 
 impl CacheStorageThreadFactory for CacheStorageThreadHandle {
-    fn new(config_dir: Option<PathBuf>, temporary_storage: bool) -> CacheStorageThreadHandle {
+    fn new(
+        config_dir: Option<PathBuf>,
+        temporary_storage: bool,
+        factory: Option<Arc<dyn CacheStorageEngineFactory>>,
+    ) -> CacheStorageThreadHandle {
         let (generic_sender, generic_receiver) = generic_channel::channel().unwrap();
         let mut temp_dir: Option<tempfile::TempDir> = None;
         let base_dir = config_dir
@@ -229,11 +223,19 @@ impl CacheStorageThreadFactory for CacheStorageThreadHandle {
             .spawn(move || {
                 // Keep temp_dir alive while the thread runs.
                 let _ = temp_dir;
-                let engine = MemCacheStorageEngine {
-                    name_to_cache_map: Default::default(),
+                let factory = factory.unwrap_or_else(|| Arc::new(DefaultCacheStorageEngineFactory));
+                let engine = match factory.open(storage_dir) {
+                    Ok(engine) => engine,
+                    Err(error) => {
+                        error!("Failed to initialize CacheStorage engine: {error}");
+                        return;
+                    },
                 };
-                let mut cache_storage_thread =
-                    CacheStorageThread::new(sender_clone, generic_receiver, engine);
+                let mut cache_storage_thread = CacheStorageThread::new(
+                    sender_clone,
+                    generic_receiver,
+                    engine,
+                );
                 cache_storage_thread.start();
             })
             .expect("Thread spawning failed");
@@ -242,22 +244,19 @@ impl CacheStorageThreadFactory for CacheStorageThreadHandle {
     }
 }
 
-struct CacheStorageThread<E: CacheStorageEngine> {
+struct CacheStorageThread {
     receiver: GenericReceiver<CacheStorageThreadMessage>,
     // Note: a sender to self might be required later for the storage engine.
     _sender: GenericSender<CacheStorageThreadMessage>,
-    engine: E,
+    engine: Box<dyn CacheStorageEngine>,
 }
 
-impl<E> CacheStorageThread<E>
-where
-    E: CacheStorageEngine,
-{
+impl CacheStorageThread {
     pub fn new(
         _sender: GenericSender<CacheStorageThreadMessage>,
         receiver: GenericReceiver<CacheStorageThreadMessage>,
-        engine: E,
-    ) -> CacheStorageThread<E> {
+        engine: Box<dyn CacheStorageEngine>,
+    ) -> CacheStorageThread {
         CacheStorageThread {
             _sender,
             receiver,
@@ -271,10 +270,10 @@ where
                 CacheStorageThreadMessage::HasCache {
                     cache_name,
                     callback,
-                    proxy: _,
+                    proxy,
                     origin,
                 } => {
-                    let result = self.engine.has_cache(origin.clone(), &cache_name);
+                    let result = self.engine.has_cache(&origin, &proxy, &cache_name);
                     if callback
                         .send(CacheStorageThreadResponse::HasCacheResult(
                             result.map_err(|e| format!("{:?}", e)),
@@ -292,7 +291,7 @@ where
                 } => {
                     let result = self
                         .engine
-                        .open_cache(origin.clone(), cache_name.clone(), &proxy);
+                        .open_cache(&origin, cache_name.clone(), &proxy);
                     if callback
                         .send(CacheStorageThreadResponse::OpenCacheResult {
                             result: result.map_err(|e| format!("{:?}", e)),
@@ -308,7 +307,7 @@ where
                     callback,
                     origin,
                 } => {
-                    let result = self.engine.keys(origin.clone(), &cache_name);
+                    let result = self.engine.keys(&origin, &cache_name);
                     if callback
                         .send(CacheStorageThreadResponse::KeysResult(
                             result.map_err(|e| format!("{:?}", e)),
@@ -326,7 +325,7 @@ where
                 } => {
                     let result = self
                         .engine
-                        .delete_cache(origin.clone(), &cache_name, &proxy);
+                        .delete_cache(&origin, &cache_name, &proxy);
                     if callback
                         .send(CacheStorageThreadResponse::DeleteCacheResult(
                             result.map_err(|e| format!("{:?}", e)),

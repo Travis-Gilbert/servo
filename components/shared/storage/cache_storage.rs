@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::ops::{Deref, DerefMut};
+use std::path::PathBuf;
 
 use malloc_size_of_derive::MallocSizeOf;
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,48 @@ use crate::client_storage::StorageProxyMap;
 #[derive(Debug, Deserialize, Serialize)]
 pub enum CacheStorageError<T> {
     Internal(T),
+}
+
+/// Cache Storage operations exposed to embedders that provide a storage backend.
+///
+/// This contract mirrors the four operations handled by Servo's CacheStorage
+/// thread so an embedder backend remains authoritative for the complete API.
+pub trait CacheStorageEngine: Send {
+    /// <https://w3c.github.io/ServiceWorker/#cache-storage-has>
+    fn has_cache(
+        &mut self,
+        origin: &ImmutableOrigin,
+        proxy_map: &StorageProxyMap,
+        cache_name: &str,
+    ) -> Result<bool, CacheStorageError<String>>;
+
+    /// <https://w3c.github.io/ServiceWorker/#cache-storage-open>
+    fn open_cache(
+        &mut self,
+        origin: &ImmutableOrigin,
+        cache_name: String,
+        proxy_map: &StorageProxyMap,
+    ) -> Result<(), CacheStorageError<String>>;
+
+    /// <https://w3c.github.io/ServiceWorker/#cache-keys>
+    fn keys(
+        &mut self,
+        origin: &ImmutableOrigin,
+        cache_name: &str,
+    ) -> Result<Vec<String>, CacheStorageError<String>>;
+
+    /// <https://w3c.github.io/ServiceWorker/#dom-cachestorage-delete>
+    fn delete_cache(
+        &mut self,
+        origin: &ImmutableOrigin,
+        cache_name: &str,
+        proxy_map: &StorageProxyMap,
+    ) -> Result<bool, CacheStorageError<String>>;
+}
+
+/// Creates a Cache Storage backend for one storage thread.
+pub trait CacheStorageEngineFactory: Send + Sync {
+    fn open(&self, storage_dir: PathBuf) -> Result<Box<dyn CacheStorageEngine>, String>;
 }
 
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]

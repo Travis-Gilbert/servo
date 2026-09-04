@@ -18,7 +18,8 @@ use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::{GenericSend, SendError};
 use storage_traits::indexeddb::{
     AsyncOperation, AsyncReadOnlyOperation, BackendError, BackendResult, IndexedDBKeyType,
-    IndexedDBRecord, IndexedDBThreadMsg, IndexedDBTxnMode, PutItemResult, SyncOperation,
+    IndexedDBRecord, IndexedDBThreadMsg, IndexedDBTxnMode, KvsOperationContext, KvsOperationTarget,
+    PutItemResult, SyncOperation,
 };
 use stylo_atoms::Atom;
 
@@ -556,6 +557,10 @@ impl IDBRequest {
                 global.origin().immutable().clone(),
                 String::from(transaction.get_db_name()),
                 String::from(source.get_name()),
+                KvsOperationContext {
+                    target: KvsOperationTarget::ObjectStore,
+                    index_updates: Vec::new(),
+                },
                 transaction.get_serial_number(),
                 request_id,
                 transaction_mode,

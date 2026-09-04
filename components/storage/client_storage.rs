@@ -4,6 +4,7 @@
 use std::fmt::Debug;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::{fs, thread};
 
 use log::warn;
@@ -13,7 +14,7 @@ use servo_base::id::{BrowsingContextId, WebViewId};
 use servo_url::ImmutableOrigin;
 use storage_traits::client_storage::{
     ClientStorageErrorr, ClientStorageThreadHandle, ClientStorageThreadMessage, Mode,
-    StorageIdentifier, StorageProxyMap, StorageType,
+    RegistryEngine, RegistryEngineFactory, StorageIdentifier, StorageProxyMap, StorageType,
 };
 use uuid::Uuid;
 
@@ -23,7 +24,7 @@ use uuid::Uuid;
 /// limit (<https://developer.mozilla.org/en-US/docs/Web/API/Storage_API/Storage_quotas_and_eviction_criteria>).
 const STORAGE_SHELF_QUOTA_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
-trait RegistryEngine {
+trait RegistryBackend {
     type Error: Debug;
     fn create_database(
         &mut self,
@@ -51,7 +52,34 @@ trait RegistryEngine {
     ) -> Result<bool, String>;
     fn estimate(&mut self, origin: ImmutableOrigin) -> Result<(u64, u64), String>;
 }
-
+trait RegistryBackend {
+    type Error: Debug;
+    fn create_database(
+        &mut self,
+        bottle_id: i64,
+        name: String,
+    ) -> Result<(PathBuf, bool), ClientStorageErrorr<Self::Error>>;
+    fn delete_database(
+        &mut self,
+        bottle_id: i64,
+        name: String,
+    ) -> Result<(), ClientStorageErrorr<Self::Error>>;
+    fn obtain_a_storage_bottle_map(
+        &mut self,
+        storage_type: StorageType,
+        webview: Option<WebViewId>,
+        storage_identifier: StorageIdentifier,
+        origin: ImmutableOrigin,
+        sender: &GenericSender<ClientStorageThreadMessage>,
+    ) -> Result<StorageProxyMap, ClientStorageErrorr<Self::Error>>;
+    fn persisted(&mut self, origin: ImmutableOrigin) -> Result<bool, String>;
+    fn persist(
+        &mut self,
+        origin: ImmutableOrigin,
+        permission_granted: bool,
+    ) -> Result<bool, String>;
+    fn estimate(&mut self, origin: ImmutableOrigin) -> Result<(u64, u64), String>;
+}
 struct SqliteEngine {
     connection: Connection,
     base_dir: PathBuf,
@@ -420,7 +448,7 @@ fn directory_size(path: &PathBuf) -> Result<u64, String> {
     Ok(size)
 }
 
-impl RegistryEngine for SqliteEngine {
+impl RegistryBackend for SqliteEngine {
     type Error = rusqlite::Error;
 
     /// Create a database for the indexedDB endpoint.
@@ -665,12 +693,356 @@ impl RegistryEngine for SqliteEngine {
     }
 }
 
+fn map_registry_error<E: Debug>(error: ClientStorageErrorr<E>) -> ClientStorageErrorr<String> {
+    match error {
+        ClientStorageErrorr::BottleAlreadyExists => ClientStorageErrorr::BottleAlreadyExists,
+        ClientStorageErrorr::BucketDoesNotExist => ClientStorageErrorr::BucketDoesNotExist,
+        ClientStorageErrorr::DatabaseAlreadyExists => ClientStorageErrorr::DatabaseAlreadyExists,
+        ClientStorageErrorr::DatabaseDoesNotExist => ClientStorageErrorr::DatabaseDoesNotExist,
+        ClientStorageErrorr::DirectoryCreationFailed => {
+            ClientStorageErrorr::DirectoryCreationFailed
+        },
+        ClientStorageErrorr::DirectoryDeletionFailed => {
+            ClientStorageErrorr::DirectoryDeletionFailed
+        },
+        ClientStorageErrorr::SessionStorageRequiresWindow => {
+            ClientStorageErrorr::SessionStorageRequiresWindow
+        },
+        ClientStorageErrorr::Internal(error) => {
+            ClientStorageErrorr::Internal(format!("{error:?}"))
+        },
+    }
+}
+struct RegistryBackendAdapter<E>(E);
+
+impl<E> RegistryEngine for RegistryBackendAdapter<E>
+where
+    E: RegistryBackend + Send,
+{
+    fn create_database(
+        &mut self,
+        bottle_id: i64,
+        name: String,
+    ) -> Result<(PathBuf, bool), ClientStorageErrorr<String>> {
+        self.0
+            .create_database(bottle_id, name)
+            .map_err(map_registry_error)
+    }
+
+    fn delete_database(
+        &mut self,
+        bottle_id: i64,
+        name: String,
+    ) -> Result<(), ClientStorageErrorr<String>> {
+        self.0
+            .delete_database(bottle_id, name)
+            .map_err(map_registry_error)
+    }
+
+    fn obtain_a_storage_bottle_map(
+        &mut self,
+        storage_type: StorageType,
+        webview: Option<WebViewId>,
+        storage_identifier: StorageIdentifier,
+        origin: ImmutableOrigin,
+        sender: &GenericSender<ClientStorageThreadMessage>,
+    ) -> Result<StorageProxyMap, ClientStorageErrorr<String>> {
+        self.0
+            .obtain_a_storage_bottle_map(
+                storage_type,
+                webview,
+                storage_identifier,
+                origin,
+                sender,
+            )
+            .map_err(map_registry_error)
+    }
+
+    fn persisted(&mut self, origin: ImmutableOrigin) -> Result<bool, String> {
+        self.0.persisted(origin)
+    }
+
+    fn persist(
+        &mut self,
+        origin: ImmutableOrigin,
+        permission_granted: bool,
+    ) -> Result<bool, String> {
+        self.0.persist(origin, permission_granted)
+    }
+
+    fn estimate(&mut self, origin: ImmutableOrigin) -> Result<(u64, u64), String> {
+        self.0.estimate(origin)
+    }
+}
+pub(crate) struct SqliteRegistryEngineFactory;
+
+impl RegistryEngineFactory for SqliteRegistryEngineFactory {
+    fn open(&self, storage_dir: PathBuf) -> Result<Box<dyn RegistryEngine>, String> {
+        let engine = SqliteEngine::new(storage_dir).unwrap_or_else(|error| {
+            warn!("Failed to initialize ClientStorage engine into storage dir: {error:?}");
+            SqliteEngine::memory().unwrap()
+        });
+        Ok(Box::new(RegistryBackendAdapter(engine)))
+    }
+}
+impl RegistryBackend for SqliteEngine {
+    type Error = rusqlite::Error;
+
+    /// Create a database for the indexedDB endpoint.
+    fn create_database(
+        &mut self,
+        bottle_id: i64,
+        name: String,
+    ) -> Result<(PathBuf, bool), ClientStorageErrorr<Self::Error>> {
+        let tx = self.connection.transaction()?;
+
+        // TODO: combine this into a single query (utilizing WITH and a join).
+        let database_id: i64 = tx
+            .query_row(
+                "INSERT INTO databases (bottle_id, name) VALUES (?1, ?2)
+             ON CONFLICT(bottle_id, name) DO UPDATE SET name = excluded.name
+            RETURNING id;",
+                (bottle_id, name),
+                |row| row.get(0),
+            )
+            .map_err(ClientStorageErrorr::Internal)?;
+
+        let existing_path: Option<String> = tx
+            .query_row(
+                "SELECT path FROM directories WHERE database_id = ?1;",
+                [database_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(ClientStorageErrorr::Internal)?;
+
+        if let Some(p) = existing_path {
+            // If it exists, we don't need the transaction anymore
+            return Ok((PathBuf::from(p), false));
+        }
+
+        let dir = Uuid::new_v4().to_string();
+        let cluster = dir.chars().last().unwrap();
+        let path = self
+            .base_dir
+            .join("bottles")
+            .join(cluster.to_string())
+            .join(dir);
+
+        let path_str = path.to_str().ok_or_else(|| {
+            ClientStorageErrorr::Internal(rusqlite::Error::InvalidParameterName(String::from(
+                "path",
+            )))
+        })?;
+
+        tx.execute(
+            "INSERT INTO directories (database_id, path) VALUES (?1, ?2);",
+            (database_id, path_str),
+        )
+        .map_err(ClientStorageErrorr::Internal)?;
+
+        tx.commit().map_err(ClientStorageErrorr::Internal)?;
+
+        std::fs::create_dir_all(&path).map_err(|_| ClientStorageErrorr::DirectoryCreationFailed)?;
+
+        Ok((path, true))
+    }
+
+    /// Delete a database for the indexedDB endpoint.
+    fn delete_database(
+        &mut self,
+        bottle_id: i64,
+        name: String,
+    ) -> Result<(), ClientStorageErrorr<Self::Error>> {
+        let tx = self.connection.transaction()?;
+
+        let database_id: i64 = tx.query_row(
+            "SELECT id FROM databases WHERE bottle_id = ?1 AND name = ?2;",
+            (bottle_id, name.clone()),
+            |row| row.get(0),
+        )?;
+
+        let path: String = tx.query_row(
+            "SELECT path FROM directories WHERE database_id = ?1;",
+            [database_id],
+            |row| row.get(0),
+        )?;
+
+        tx.execute(
+            "DELETE FROM databases WHERE bottle_id = ?1 AND name = ?2;",
+            (bottle_id, name),
+        )?;
+
+        if tx.changes() == 0 {
+            return Err(ClientStorageErrorr::DatabaseDoesNotExist);
+        }
+        // Note: directory deleted through SQL cascade.
+
+        tx.commit()?;
+
+        // Delete the directory on disk.
+        // Note: on Windows this needs to be done outside of the transaction,
+        // because the transaction holds a file lock.
+        std::fs::remove_dir_all(&path).map_err(|_| ClientStorageErrorr::DirectoryDeletionFailed)?;
+
+        Ok(())
+    }
+
+    /// <https://storage.spec.whatwg.org/#obtain-a-storage-bottle-map>
+    fn obtain_a_storage_bottle_map(
+        &mut self,
+        storage_type: StorageType,
+        webview: Option<WebViewId>,
+        storage_identifier: StorageIdentifier,
+        origin: ImmutableOrigin,
+        sender: &GenericSender<ClientStorageThreadMessage>,
+    ) -> Result<StorageProxyMap, ClientStorageErrorr<Self::Error>> {
+        let tx = self.connection.transaction()?;
+
+        // Step 1. Let shed be null.
+        let shed_id: i64 = match storage_type {
+            StorageType::Local => {
+                // Step 2. If type is "local", then set shed to the user agent’s storage shed.
+                ensure_storage_shed(&storage_type, None, &tx)?
+            },
+            StorageType::Session => {
+                // Step 3: Otherwise:
+                // Step 3.1: Assert: type is "session".
+                let Some(webview) = webview else {
+                    debug_assert!(false, "Session storage is only available on Window.");
+                    return Err(ClientStorageErrorr::SessionStorageRequiresWindow);
+                };
+
+                // Step 3.2: Set shed to environment’s global object’s associated Document’s
+                // node navigable’s traversable navigable’s storage shed.
+                // Note: using the browsing context of the webview as the traversable navigable.
+                ensure_storage_shed(
+                    &storage_type,
+                    Some(Into::<BrowsingContextId>::into(webview).to_string()),
+                    &tx,
+                )?
+            },
+        };
+
+        // Step 4. Let shelf be the result of running obtain a storage shelf, with shed,
+        // environment, and type.
+        // Step 5. If shelf is failure, then return failure.
+        let shelf = obtain_a_storage_shelf(shed_id, &origin, storage_type, &tx)?;
+
+        // Step 6. Let bucket be shelf’s bucket map["default"].
+        let bucket_id = shelf.default_bucket_id;
+
+        let bottle_id: i64 = tx.query_row(
+            "SELECT id FROM bottles WHERE bucket_id = ?1 AND identifier = ?2;",
+            (bucket_id, storage_identifier.as_str()),
+            |row| row.get(0),
+        )?;
+
+        tx.commit()?;
+
+        // Step 7. Let bottle be bucket’s bottle map[identifier].
+
+        // Step 8. Let proxyMap be a new storage proxy map whose backing map is bottle’s map.
+        // Step 9. Append proxyMap to bottle’s proxy map reference set.
+        // Step 10. Return proxyMap.
+        Ok(StorageProxyMap {
+            bottle_id,
+            handle: ClientStorageThreadHandle::new(sender.clone()),
+        })
+    }
+
+    fn persisted(&mut self, origin: ImmutableOrigin) -> Result<bool, String> {
+        let tx = self
+            .connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+
+        // <https://storage.spec.whatwg.org/#dom-storagemanager-persisted>
+        // Let shelf be the result of running obtain a local storage shelf with this’s relevant
+        // settings object.
+        let shelf = obtain_a_local_storage_shelf(&origin, &tx)?;
+
+        // Let persisted be true if shelf’s bucket map["default"]'s mode is "persistent";
+        // otherwise false.
+        // It will be false when there’s an internal error.
+        let persisted = bucket_mode(shelf.default_bucket_id, &tx)
+            .is_ok_and(|mode| mode == Mode::Persistent) &&
+            tx.commit().is_ok();
+
+        Ok(persisted)
+    }
+
+    fn persist(
+        &mut self,
+        origin: ImmutableOrigin,
+        permission_granted: bool,
+    ) -> Result<bool, String> {
+        let tx = self
+            .connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+
+        // <https://storage.spec.whatwg.org/#dom-storagemanager-persist>
+        // Let shelf be the result of running obtain a local storage shelf with this’s relevant
+        // settings object.
+        let shelf = obtain_a_local_storage_shelf(&origin, &tx)?;
+
+        // Let bucket be shelf’s bucket map["default"].
+        let bucket_id = shelf.default_bucket_id;
+
+        // Let persisted be true if bucket’s mode is "persistent"; otherwise false.
+        // It will be false when there’s an internal error.
+        let mut persisted = bucket_mode(bucket_id, &tx).is_ok_and(|mode| mode == Mode::Persistent);
+
+        // If persisted is false and permission is "granted", then:
+        // Set bucket’s mode to "persistent".
+        // If there was no internal error, then set persisted to true.
+        if !persisted && permission_granted {
+            persisted = set_bucket_mode(bucket_id, Mode::Persistent, &tx).is_ok();
+        }
+
+        if tx.commit().is_err() {
+            persisted = false;
+        }
+
+        Ok(persisted)
+    }
+
+    fn estimate(&mut self, origin: ImmutableOrigin) -> Result<(u64, u64), String> {
+        let tx = self
+            .connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+
+        // <https://storage.spec.whatwg.org/#dom-storagemanager-estimate>
+        // Let shelf be the result of running obtain a local storage shelf with this’s relevant
+        // settings object.
+        let shelf = obtain_a_local_storage_shelf(&origin, &tx)?;
+
+        // Let usage be storage usage for shelf.
+        let usage = storage_usage_for_bucket(shelf.default_bucket_id, &tx)?;
+        // Let quota be storage quota for shelf.
+        let quota = storage_quota_for_bucket(shelf.default_bucket_id, &tx)?;
+
+        tx.commit().map_err(|error| error.to_string())?;
+
+        Ok((usage, quota))
+    }
+}
 pub trait ClientStorageThreadFactory {
-    fn new(config_dir: Option<PathBuf>, temporary_storage: bool) -> Self;
+    fn new(
+        config_dir: Option<PathBuf>,
+        temporary_storage: bool,
+        factory: Option<Arc<dyn RegistryEngineFactory>>,
+    ) -> Self;
 }
 
 impl ClientStorageThreadFactory for ClientStorageThreadHandle {
-    fn new(config_dir: Option<PathBuf>, temporary_storage: bool) -> ClientStorageThreadHandle {
+    fn new(
+        config_dir: Option<PathBuf>,
+        temporary_storage: bool,
+        factory: Option<Arc<dyn RegistryEngineFactory>>,
+    ) -> ClientStorageThreadHandle {
         let (generic_sender, generic_receiver) = generic_channel::channel().unwrap();
         let mut temp_dir: Option<tempfile::TempDir> = None;
         let base_dir = config_dir
@@ -695,10 +1067,11 @@ impl ClientStorageThreadFactory for ClientStorageThreadHandle {
             .spawn(move || {
                 // Keep temp_dir alive while the thread runs.
                 let _ = temp_dir;
-                let engine = SqliteEngine::new(storage_dir).unwrap_or_else(|error| {
-                    warn!("Failed to initialize ClientStorage engine into storage dir: {error:?}");
-                    SqliteEngine::memory().unwrap()
-                });
+                let factory = factory.unwrap_or_else(|| Arc::new(SqliteRegistryEngineFactory));
+                let Ok(engine) = factory.open(storage_dir) else {
+                    warn!("Failed to initialize ClientStorage engine");
+                    return;
+                };
                 ClientStorageThread::new(sender_clone, generic_receiver, engine).start();
             })
             .expect("Thread spawning failed");
@@ -707,21 +1080,87 @@ impl ClientStorageThreadFactory for ClientStorageThreadHandle {
     }
 }
 
-struct ClientStorageThread<E: RegistryEngine> {
+struct ClientStorageThread {
     receiver: GenericReceiver<ClientStorageThreadMessage>,
     sender: GenericSender<ClientStorageThreadMessage>,
-    engine: E,
+    engine: Box<dyn RegistryEngine>,
 }
 
-impl<E> ClientStorageThread<E>
-where
-    E: RegistryEngine,
-{
+impl ClientStorageThread {
     pub fn new(
         sender: GenericSender<ClientStorageThreadMessage>,
         receiver: GenericReceiver<ClientStorageThreadMessage>,
-        engine: E,
-    ) -> ClientStorageThread<E> {
+        engine: Box<dyn RegistryEngine>,
+    ) -> ClientStorageThread {
+        ClientStorageThread {
+            sender,
+            receiver,
+            engine,
+        }
+    }
+
+    pub fn start(&mut self) {
+        while let Ok(message) = self.receiver.recv() {
+            match message {
+                ClientStorageThreadMessage::ObtainBottleMap {
+                    storage_type,
+                    storage_identifier,
+                    webview,
+                    origin,
+                    sender,
+                } => {
+                    let result = self.engine.obtain_a_storage_bottle_map(
+                        storage_type,
+                        webview,
+                        storage_identifier,
+                        origin,
+                        &self.sender,
+                    );
+                    let _ = sender.send(result.map_err(|e| format!("{:?}", e)));
+                },
+                ClientStorageThreadMessage::CreateDatabase {
+                    bottle_id,
+                    name,
+                    sender,
+                } => {
+                    let result = self.engine.create_database(bottle_id, name);
+                    let _ = sender.send(result.map_err(|e| format!("{:?}", e)));
+                },
+                ClientStorageThreadMessage::DeleteDatabase {
+                    bottle_id,
+                    name,
+                    sender,
+                } => {
+                    let result = self.engine.delete_database(bottle_id, name);
+                    let _ = sender.send(result.map_err(|e| format!("{:?}", e)));
+                },
+                ClientStorageThreadMessage::Persisted { origin, sender } => {
+                    let _ = sender.send(self.engine.persisted(origin));
+                },
+                ClientStorageThreadMessage::Persist {
+                    origin,
+                    permission_granted,
+                    sender,
+                } => {
+                    let _ = sender.send(self.engine.persist(origin, permission_granted));
+                },
+                ClientStorageThreadMessage::Estimate { origin, sender } => {
+                    let _ = sender.send(self.engine.estimate(origin));
+                },
+                ClientStorageThreadMessage::Exit(sender) => {
+                    let _ = sender.send(());
+                    break;
+                },
+            }
+        }
+    }
+}
+impl ClientStorageThread {
+    pub fn new(
+        sender: GenericSender<ClientStorageThreadMessage>,
+        receiver: GenericReceiver<ClientStorageThreadMessage>,
+        engine: Box<dyn RegistryEngine>,
+    ) -> ClientStorageThread {
         ClientStorageThread {
             sender,
             receiver,
