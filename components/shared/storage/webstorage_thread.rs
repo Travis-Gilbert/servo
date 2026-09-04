@@ -2,12 +2,75 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
 use malloc_size_of_derive::MallocSizeOf;
 use profile_traits::mem::ReportsChan;
 use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::GenericSender;
 use servo_base::id::WebViewId;
 use servo_url::ImmutableOrigin;
+
+#[derive(Clone, Default, MallocSizeOf)]
+pub struct OriginEntry {
+    tree: BTreeMap<String, String>,
+    size: usize,
+}
+
+impl OriginEntry {
+    pub fn inner(&self) -> &BTreeMap<String, String> {
+        &self.tree
+    }
+
+    pub fn insert(&mut self, key: String, value: String) -> Option<String> {
+        let old_value = self.tree.insert(key.clone(), value.clone());
+        let size_change = match &old_value {
+            Some(old) => value.len() as isize - old.len() as isize,
+            None => (key.len() + value.len()) as isize,
+        };
+        self.size = (self.size as isize + size_change) as usize;
+        old_value
+    }
+
+    pub fn remove(&mut self, key: &str) -> Option<String> {
+        let old_value = self.tree.remove(key);
+        if let Some(old) = &old_value {
+            self.size -= key.len() + old.len();
+        }
+        old_value
+    }
+
+    pub fn clear(&mut self) {
+        self.tree.clear();
+        self.size = 0;
+    }
+
+    pub fn size(&self) -> usize {
+        self.size
+    }
+}
+
+pub trait WebStorageEngine: Send {
+    fn len(&self) -> Result<usize, String>;
+    fn key(&self, index: usize) -> Result<Option<String>, String>;
+    fn keys(&self) -> Result<Vec<String>, String>;
+    fn get(&self, key: &str) -> Result<Option<String>, String>;
+    fn set(&mut self, key: &str, value: &str) -> Result<Option<String>, String>;
+    fn delete(&mut self, key: &str) -> Result<Option<String>, String>;
+    fn clear(&mut self) -> Result<bool, String>;
+    fn size(&self) -> Result<usize, String>;
+}
+
+pub trait WebStorageEngineFactory: Send + Sync {
+    fn open(
+        &self,
+        storage_type: WebStorageType,
+        webview_id: Option<WebViewId>,
+        origin: &ImmutableOrigin,
+        db_dir: Option<PathBuf>,
+    ) -> Result<Box<dyn WebStorageEngine>, String>;
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, MallocSizeOf, Serialize)]
 pub enum WebStorageType {

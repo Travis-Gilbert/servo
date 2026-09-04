@@ -3,10 +3,12 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::cmp::{Ordering, PartialEq, PartialOrd};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
+use std::path::PathBuf;
 
+use malloc_size_of::MallocSizeOf;
 use malloc_size_of_derive::MallocSizeOf;
 use profile_traits::generic_callback::GenericCallback;
 use profile_traits::mem::ReportsChan;
@@ -59,6 +61,192 @@ impl Display for BackendError {
 impl Error for BackendError {}
 
 pub type BackendResult<T> = Result<T, BackendError>;
+
+/// A key used by storage backends to identify an IndexedDB database.
+#[derive(Clone, Debug, Eq, Hash, MallocSizeOf, PartialEq)]
+pub struct IndexedDBDescription {
+    pub origin: ImmutableOrigin,
+    pub name: String,
+}
+
+#[derive(MallocSizeOf)]
+pub struct KvsOperation {
+    pub store_name: String,
+    /// Identifies whether the request addresses the object store or one of its indexes, and
+    /// carries index keys already extracted by the script layer for record updates.
+    ///
+    /// The pinned Servo producer currently emits only [`KvsOperationTarget::ObjectStore`] with
+    /// no index updates because its `IDBIndex` implementation has no request methods and its
+    /// SQLite backend does not populate index record tables. Keeping this context at the engine
+    /// boundary lets external engines consume index semantics when that producer support exists,
+    /// without requiring a backend to decode JavaScript values or evaluate key paths.
+    pub context: KvsOperationContext,
+    pub operation: AsyncOperation,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, MallocSizeOf, PartialEq, Serialize)]
+pub struct KvsOperationContext {
+    pub target: KvsOperationTarget,
+    pub index_updates: Vec<KvsIndexUpdate>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, MallocSizeOf, PartialEq, Serialize)]
+pub enum KvsOperationTarget {
+    #[default]
+    ObjectStore,
+    Index {
+        name: String,
+    },
+}
+
+/// Keys extracted for one index while preparing an object-store record update.
+///
+/// `keys` contains one entry per index record to write. A multi-entry index is flattened by the
+/// script layer before it reaches the backend; an empty vector means extraction produced no index
+/// record. The backend retains responsibility for uniqueness checks using its index schema.
+#[derive(Clone, Debug, Deserialize, MallocSizeOf, PartialEq, Serialize)]
+pub struct KvsIndexUpdate {
+    pub index_name: String,
+    pub keys: Vec<IndexedDBKeyType>,
+}
+
+#[derive(MallocSizeOf)]
+pub struct KvsTransaction {
+    pub mode: IndexedDBTxnMode,
+    pub requests: VecDeque<KvsOperation>,
+}
+
+/// The backend contract used by Servo's IndexedDB transaction scheduler.
+///
+/// Errors are normalized at this boundary so the trait can be used as a trait
+/// object by embedders while preserving the DOM-facing error categories.
+pub trait KvsEngine: MallocSizeOf + Send {
+    fn create_store(
+        &self,
+        store_name: &str,
+        key_path: Option<KeyPath>,
+        auto_increment: bool,
+    ) -> BackendResult<CreateObjectResult>;
+
+    fn delete_store(&self, store_name: &str) -> BackendResult<()>;
+
+    fn close_store(&self, store_name: &str) -> BackendResult<()>;
+
+    fn process_transaction(
+        &self,
+        transaction: KvsTransaction,
+        on_complete: Box<dyn FnOnce() + Send + 'static>,
+    );
+
+    fn key_generator_current_number(&self, store_name: &str) -> Option<i64>;
+    fn set_key_generator_current_number(
+        &self,
+        store_name: &str,
+        current_number: i64,
+    ) -> BackendResult<()>;
+    fn key_path(&self, store_name: &str) -> Option<KeyPath>;
+    fn object_store_names(&self) -> BackendResult<Vec<String>>;
+    fn indexes(&self, store_name: &str) -> BackendResult<Vec<IndexedDBIndex>>;
+
+    fn create_index(
+        &self,
+        store_name: &str,
+        index_name: String,
+        key_path: KeyPath,
+        unique: bool,
+        multi_entry: bool,
+    ) -> BackendResult<CreateObjectResult>;
+    fn delete_index(&self, store_name: &str, index_name: String) -> BackendResult<()>;
+
+    fn version(&self) -> BackendResult<u64>;
+    fn set_version(&self, version: u64) -> BackendResult<()>;
+}
+
+impl<T> KvsEngine for Box<T>
+where
+    T: KvsEngine + ?Sized,
+{
+    fn create_store(
+        &self,
+        store_name: &str,
+        key_path: Option<KeyPath>,
+        auto_increment: bool,
+    ) -> BackendResult<CreateObjectResult> {
+        (**self).create_store(store_name, key_path, auto_increment)
+    }
+
+    fn delete_store(&self, store_name: &str) -> BackendResult<()> {
+        (**self).delete_store(store_name)
+    }
+
+    fn close_store(&self, store_name: &str) -> BackendResult<()> {
+        (**self).close_store(store_name)
+    }
+
+    fn process_transaction(
+        &self,
+        transaction: KvsTransaction,
+        on_complete: Box<dyn FnOnce() + Send + 'static>,
+    ) {
+        (**self).process_transaction(transaction, on_complete)
+    }
+
+    fn key_generator_current_number(&self, store_name: &str) -> Option<i64> {
+        (**self).key_generator_current_number(store_name)
+    }
+
+    fn set_key_generator_current_number(
+        &self,
+        store_name: &str,
+        current_number: i64,
+    ) -> BackendResult<()> {
+        (**self).set_key_generator_current_number(store_name, current_number)
+    }
+
+    fn key_path(&self, store_name: &str) -> Option<KeyPath> {
+        (**self).key_path(store_name)
+    }
+
+    fn object_store_names(&self) -> BackendResult<Vec<String>> {
+        (**self).object_store_names()
+    }
+
+    fn indexes(&self, store_name: &str) -> BackendResult<Vec<IndexedDBIndex>> {
+        (**self).indexes(store_name)
+    }
+
+    fn create_index(
+        &self,
+        store_name: &str,
+        index_name: String,
+        key_path: KeyPath,
+        unique: bool,
+        multi_entry: bool,
+    ) -> BackendResult<CreateObjectResult> {
+        (**self).create_index(store_name, index_name, key_path, unique, multi_entry)
+    }
+
+    fn delete_index(&self, store_name: &str, index_name: String) -> BackendResult<()> {
+        (**self).delete_index(store_name, index_name)
+    }
+
+    fn version(&self) -> BackendResult<u64> {
+        (**self).version()
+    }
+
+    fn set_version(&self, version: u64) -> BackendResult<()> {
+        (**self).set_version(version)
+    }
+}
+
+pub trait IndexedDbEngineFactory: Send + Sync {
+    fn open(
+        &self,
+        path: PathBuf,
+        created: bool,
+        description: &IndexedDBDescription,
+    ) -> BackendResult<Box<dyn KvsEngine>>;
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, MallocSizeOf, Serialize)]
 pub enum KeyPath {
@@ -642,8 +830,9 @@ pub enum IndexedDBThreadMsg {
         ImmutableOrigin,
         String, // Database
         String, // ObjectStore
-        u64,    // Serial number of the transaction that requests this operation
-        u64,    // Monotonic request id in the transaction
+        KvsOperationContext,
+        u64, // Serial number of the transaction that requests this operation
+        u64, // Monotonic request id in the transaction
         IndexedDBTxnMode,
         AsyncOperation,
     ),
@@ -666,7 +855,98 @@ pub enum IndexedDBThreadMsg {
 
 #[cfg(test)]
 mod test {
+    use std::sync::{Arc, Mutex};
+
+    use malloc_size_of::MallocSizeOfOps;
+    use profile_traits::time::ProfilerChan;
+
     use super::*;
+
+    struct RecordingEngine {
+        observed: Arc<Mutex<Option<KvsOperationContext>>>,
+    }
+
+    impl MallocSizeOf for RecordingEngine {
+        fn size_of(&self, _ops: &mut MallocSizeOfOps) -> usize {
+            0
+        }
+    }
+
+    impl KvsEngine for RecordingEngine {
+        fn create_store(
+            &self,
+            _store_name: &str,
+            _key_path: Option<KeyPath>,
+            _auto_increment: bool,
+        ) -> BackendResult<CreateObjectResult> {
+            Ok(CreateObjectResult::Created)
+        }
+
+        fn delete_store(&self, _store_name: &str) -> BackendResult<()> {
+            Ok(())
+        }
+
+        fn close_store(&self, _store_name: &str) -> BackendResult<()> {
+            Ok(())
+        }
+
+        fn process_transaction(
+            &self,
+            mut transaction: KvsTransaction,
+            on_complete: Box<dyn FnOnce() + Send + 'static>,
+        ) {
+            let request = transaction.requests.pop_front().unwrap();
+            *self.observed.lock().unwrap() = Some(request.context);
+            on_complete();
+        }
+
+        fn key_generator_current_number(&self, _store_name: &str) -> Option<i64> {
+            None
+        }
+
+        fn set_key_generator_current_number(
+            &self,
+            _store_name: &str,
+            _current_number: i64,
+        ) -> BackendResult<()> {
+            Ok(())
+        }
+
+        fn key_path(&self, _store_name: &str) -> Option<KeyPath> {
+            None
+        }
+
+        fn object_store_names(&self) -> BackendResult<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        fn indexes(&self, _store_name: &str) -> BackendResult<Vec<IndexedDBIndex>> {
+            Ok(Vec::new())
+        }
+
+        fn create_index(
+            &self,
+            _store_name: &str,
+            _index_name: String,
+            _key_path: KeyPath,
+            _unique: bool,
+            _multi_entry: bool,
+        ) -> BackendResult<CreateObjectResult> {
+            Ok(CreateObjectResult::Created)
+        }
+
+        fn delete_index(&self, _store_name: &str, _index_name: String) -> BackendResult<()> {
+            Ok(())
+        }
+
+        fn version(&self) -> BackendResult<u64> {
+            Ok(0)
+        }
+
+        fn set_version(&self, _version: u64) -> BackendResult<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn test_as_singleton() {
@@ -681,5 +961,45 @@ mod test {
         let full_range = IndexedDBKeyRange::new(None, None, false, false);
         assert!(!full_range.is_singleton());
         assert!(full_range.as_singleton().is_none());
+    }
+
+    #[test]
+    fn external_engine_observes_index_operation_context() {
+        let observed = Arc::new(Mutex::new(None));
+        let engine: Box<dyn KvsEngine> = Box::new(RecordingEngine {
+            observed: observed.clone(),
+        });
+        let expected = KvsOperationContext {
+            target: KvsOperationTarget::Index {
+                name: "by-tag".to_owned(),
+            },
+            index_updates: vec![KvsIndexUpdate {
+                index_name: "by-tag".to_owned(),
+                keys: vec![IndexedDBKeyType::String("rust".to_owned())],
+            }],
+        };
+        let callback = GenericCallback::new(ProfilerChan(None), |_| {}).unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        engine.process_transaction(
+            KvsTransaction {
+                mode: IndexedDBTxnMode::Readwrite,
+                requests: VecDeque::from([KvsOperation {
+                    store_name: "documents".to_owned(),
+                    context: expected.clone(),
+                    operation: AsyncOperation::ReadWrite(AsyncReadWriteOperation::PutItem {
+                        callback,
+                        key: Some(IndexedDBKeyType::Number(1.0)),
+                        value: vec![1, 2, 3],
+                        should_overwrite: true,
+                        key_generator_current_number: None,
+                    }),
+                }]),
+            },
+            Box::new(move || done_tx.send(()).unwrap()),
+        );
+
+        done_rx.recv().unwrap();
+        assert_eq!(*observed.lock().unwrap(), Some(expected));
     }
 }

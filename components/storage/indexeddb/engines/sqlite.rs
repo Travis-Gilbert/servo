@@ -12,13 +12,12 @@ use sea_query_rusqlite::RusqliteBinder;
 use servo_base::threadpool::ThreadPool;
 use storage_traits::indexeddb::{
     AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, AsyncSchemaOperation,
-    BackendError, CreateObjectResult, IndexedDBIndex, IndexedDBKeyRange, IndexedDBKeyType,
-    IndexedDBRecord, IndexedDBTxnMode, KeyPath, PutItemResult,
+    BackendError, BackendResult, CreateObjectResult, IndexedDBDescription, IndexedDBIndex,
+    IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord, IndexedDBTxnMode, KeyPath, KvsEngine,
+    KvsTransaction, PutItemResult,
 };
 
-use crate::indexeddb::IndexedDBDescription;
-use crate::indexeddb::engines::{KvsEngine, KvsTransaction};
-use crate::shared::{DB_INIT_PRAGMAS, DB_PRAGMAS};
+use crate::shared::{DB_INIT_PRAGMAS, DB_PRAGMAS, is_sqlite_disk_full_error};
 
 mod create;
 mod database_model;
@@ -26,6 +25,14 @@ mod encoding;
 mod object_data_model;
 mod object_store_index_model;
 mod object_store_model;
+
+fn backend_error_from_sqlite_error(error: Error) -> BackendError {
+    if is_sqlite_disk_full_error(&error) {
+        BackendError::QuotaExceeded
+    } else {
+        BackendError::DbErr(format!("{error:?}"))
+    }
+}
 
 fn range_to_query(range: IndexedDBKeyRange) -> Condition {
     // Special case for optimization
@@ -66,7 +73,6 @@ pub struct SqliteEngine {
     connection: Connection,
     read_pool: Arc<ThreadPool>,
     write_pool: Arc<ThreadPool>,
-    created_db_path: bool,
 }
 
 impl SqliteEngine {
@@ -84,7 +90,7 @@ impl SqliteEngine {
     // TODO: intake dual pools
     pub fn new(
         path: PathBuf,
-        created: bool,
+        _created: bool,
         db_info: &IndexedDBDescription,
         pool: Arc<ThreadPool>,
     ) -> Result<Self, Error> {
@@ -101,13 +107,7 @@ impl SqliteEngine {
             db_path,
             read_pool: pool.clone(),
             write_pool: pool,
-            created_db_path: created,
         })
-    }
-
-    /// Returns whether the physical db was created as part of `new`.
-    pub(crate) fn created_db_path(&self) -> bool {
-        self.created_db_path
     }
 
     fn init_db(path: &Path, db_info: &IndexedDBDescription) -> Result<Connection, Error> {
@@ -450,15 +450,14 @@ impl SqliteEngine {
 }
 
 impl KvsEngine for SqliteEngine {
-    type Error = Error;
-
     fn create_store(
         &self,
         store_name: &str,
         key_path: Option<KeyPath>,
         auto_increment: bool,
-    ) -> Result<CreateObjectResult, Self::Error> {
+    ) -> BackendResult<CreateObjectResult> {
         Self::create_store(&self.connection, store_name, key_path, auto_increment)
+            .map_err(backend_error_from_sqlite_error)
     }
     fn create_index(
         &self,
@@ -467,7 +466,7 @@ impl KvsEngine for SqliteEngine {
         key_path: KeyPath,
         unique: bool,
         multi_entry: bool,
-    ) -> Result<CreateObjectResult, Self::Error> {
+    ) -> BackendResult<CreateObjectResult> {
         Self::create_index(
             &self.connection,
             store_name,
@@ -476,13 +475,14 @@ impl KvsEngine for SqliteEngine {
             unique,
             multi_entry,
         )
+        .map_err(backend_error_from_sqlite_error)
     }
 
-    fn delete_store(&self, store_name: &str) -> Result<(), Self::Error> {
-        Self::delete_store(&self.connection, store_name)
+    fn delete_store(&self, store_name: &str) -> BackendResult<()> {
+        Self::delete_store(&self.connection, store_name).map_err(backend_error_from_sqlite_error)
     }
 
-    fn close_store(&self, _store_name: &str) -> Result<(), Self::Error> {
+    fn close_store(&self, _store_name: &str) -> BackendResult<()> {
         // TODO: do something
         Ok(())
     }
@@ -512,6 +512,10 @@ impl KvsEngine for SqliteEngine {
                 },
             };
             for request in transaction.requests {
+                // The pinned SQLite implementation has schema support for indexes but no index
+                // request methods or index-record maintenance. Preserve its behavior by handling
+                // the operation against the object store while still carrying `request.context`
+                // intact to custom engines through the public KvsEngine contract.
                 if let AsyncOperation::Schema(AsyncSchemaOperation::CreateObjectStore {
                     callback,
                     key_path,
@@ -749,26 +753,29 @@ impl KvsEngine for SqliteEngine {
         &self,
         store_name: &str,
         current_number: i64,
-    ) -> Result<(), Self::Error> {
-        // Ensure missing store is reported as QueryReturnedNoRows even when an
-        // UPDATE might affect zero rows due to no-op assignment.
-        let store_exists: bool = self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM object_store WHERE name = ?)",
-            params![store_name],
-            |row| row.get(0),
-        )?;
-        if !store_exists {
-            return Err(Error::QueryReturnedNoRows);
-        }
+    ) -> BackendResult<()> {
+        let update = || -> Result<(), Error> {
+            // Ensure missing store is reported as QueryReturnedNoRows even when an
+            // UPDATE might affect zero rows due to no-op assignment.
+            let store_exists: bool = self.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM object_store WHERE name = ?)",
+                params![store_name],
+                |row| row.get(0),
+            )?;
+            if !store_exists {
+                return Err(Error::QueryReturnedNoRows);
+            }
 
-        let rows_affected = self.connection.execute(
-            "UPDATE object_store SET auto_increment = ? WHERE name = ?",
-            params![current_number, store_name],
-        )?;
-        if rows_affected > 1 {
-            return Err(Error::QueryReturnedMoreThanOneRow);
-        }
-        Ok(())
+            let rows_affected = self.connection.execute(
+                "UPDATE object_store SET auto_increment = ? WHERE name = ?",
+                params![current_number, store_name],
+            )?;
+            if rows_affected > 1 {
+                return Err(Error::QueryReturnedMoreThanOneRow);
+            }
+            Ok(())
+        };
+        update().map_err(backend_error_from_sqlite_error)
     }
 
     fn key_path(&self, store_name: &str) -> Option<KeyPath> {
@@ -788,56 +795,66 @@ impl KvsEngine for SqliteEngine {
             .unwrap_or_default()
     }
 
-    fn object_store_names(&self) -> Result<Vec<String>, Self::Error> {
-        let mut stmt = self.connection.prepare("SELECT name FROM object_store")?;
-        stmt.query_map([], |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()
+    fn object_store_names(&self) -> BackendResult<Vec<String>> {
+        let load = || -> Result<Vec<String>, Error> {
+            let mut stmt = self.connection.prepare("SELECT name FROM object_store")?;
+            stmt.query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()
+        };
+        load().map_err(backend_error_from_sqlite_error)
     }
 
-    fn indexes(&self, store_name: &str) -> Result<Vec<IndexedDBIndex>, Self::Error> {
-        let object_store = self.connection.query_row(
-            "SELECT * FROM object_store WHERE name = ?",
-            params![store_name.to_string()],
-            |row| object_store_model::Model::try_from(row),
-        )?;
+    fn indexes(&self, store_name: &str) -> BackendResult<Vec<IndexedDBIndex>> {
+        let load = || -> Result<Vec<IndexedDBIndex>, Error> {
+            let object_store = self.connection.query_row(
+                "SELECT * FROM object_store WHERE name = ?",
+                params![store_name.to_string()],
+                |row| object_store_model::Model::try_from(row),
+            )?;
 
-        let mut stmt = self
-            .connection
-            .prepare("SELECT * FROM object_store_index WHERE object_store_id = ?")?;
-        let indexes = stmt
-            .query_map(params![object_store.id], |row| {
-                let model = object_store_index_model::Model::try_from(row)?;
-                Ok(IndexedDBIndex {
-                    name: model.name,
-                    key_path: postcard::from_bytes(&model.key_path).unwrap(),
-                    unique: model.unique_index,
-                    multi_entry: model.multi_entry_index,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(indexes)
+            let mut stmt = self
+                .connection
+                .prepare("SELECT * FROM object_store_index WHERE object_store_id = ?")?;
+            let indexes = stmt
+                .query_map(params![object_store.id], |row| {
+                    let model = object_store_index_model::Model::try_from(row)?;
+                    Ok(IndexedDBIndex {
+                        name: model.name,
+                        key_path: postcard::from_bytes(&model.key_path).unwrap(),
+                        unique: model.unique_index,
+                        multi_entry: model.multi_entry_index,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(indexes)
+        };
+        load().map_err(backend_error_from_sqlite_error)
     }
 
-    fn delete_index(&self, store_name: &str, index_name: String) -> Result<(), Self::Error> {
+    fn delete_index(&self, store_name: &str, index_name: String) -> BackendResult<()> {
         Self::delete_index(&self.connection, store_name, index_name)
+            .map_err(backend_error_from_sqlite_error)
     }
 
-    fn version(&self) -> Result<u64, Self::Error> {
-        let version: i64 =
-            self.connection
-                .query_row("SELECT version FROM database LIMIT 1", [], |row| row.get(0))?;
-        Ok(u64::from_ne_bytes(version.to_ne_bytes()))
+    fn version(&self) -> BackendResult<u64> {
+        self.connection
+            .query_row("SELECT version FROM database LIMIT 1", [], |row| row.get(0))
+            .map(|version: i64| u64::from_ne_bytes(version.to_ne_bytes()))
+            .map_err(backend_error_from_sqlite_error)
     }
 
-    fn set_version(&self, version: u64) -> Result<(), Self::Error> {
-        let rows_affected = self.connection.execute(
-            "UPDATE database SET version = ?",
-            params![i64::from_ne_bytes(version.to_ne_bytes())],
-        )?;
-        if rows_affected == 0 {
-            return Err(Error::QueryReturnedNoRows);
-        }
-        Ok(())
+    fn set_version(&self, version: u64) -> BackendResult<()> {
+        let update = || -> Result<(), Error> {
+            let rows_affected = self.connection.execute(
+                "UPDATE database SET version = ?",
+                params![i64::from_ne_bytes(version.to_ne_bytes())],
+            )?;
+            if rows_affected == 0 {
+                return Err(Error::QueryReturnedNoRows);
+            }
+            Ok(())
+        };
+        update().map_err(backend_error_from_sqlite_error)
     }
 }
 
@@ -851,11 +868,10 @@ fn get_db_status(connection: &Connection, op: i32) -> Result<i32, i32> {
 }
 
 impl MallocSizeOf for SqliteEngine {
-    fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
+    fn size_of(&self, _ops: &mut MallocSizeOfOps) -> usize {
         // 48 KB (3.3.1 at https://sqlite.org/malloc.html)
         const DEFAULT_LOOKASIDE_SIZE: usize = 48 * 1024;
-        self.created_db_path.size_of(ops) +
-            DEFAULT_LOOKASIDE_SIZE +
+        DEFAULT_LOOKASIDE_SIZE +
             get_db_status(
                 &self.connection,
                 rusqlite::ffi::SQLITE_DBSTATUS_CACHE_USED_SHARED,
@@ -886,14 +902,14 @@ mod tests {
     };
     use storage_traits::indexeddb::{
         AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, CreateObjectResult,
-        IndexedDBKeyRange, IndexedDBKeyType, IndexedDBTxnMode, KeyPath, PutItemResult,
+        IndexedDBDescription, IndexedDBKeyRange, IndexedDBKeyType, IndexedDBTxnMode, KeyPath,
+        KvsEngine, KvsOperation, KvsTransaction, PutItemResult,
     };
     use url::Host;
 
     use crate::ClientStorageThreadFactory;
-    use crate::indexeddb::IndexedDBDescription;
     use crate::indexeddb::engines::sqlite::encoding;
-    use crate::indexeddb::engines::{KvsEngine, KvsOperation, KvsTransaction, SqliteEngine};
+    use crate::indexeddb::engines::SqliteEngine;
 
     fn install_test_namespace() {
         PipelineNamespace::install(PipelineNamespaceId(1));
@@ -925,7 +941,7 @@ mod tests {
         }
         let tmp_dir = tempfile::tempdir().unwrap();
         let handle: ClientStorageThreadHandle =
-            ClientStorageThreadFactory::new(Some(tmp_dir.path().to_path_buf()), true);
+            ClientStorageThreadFactory::new(Some(tmp_dir.path().to_path_buf()), true, None);
 
         let storage_proxy_map = handle
             .obtain_a_storage_bottle_map(
@@ -1219,6 +1235,7 @@ mod tests {
                 requests: VecDeque::from(vec![
                     KvsOperation {
                         store_name: store_name.to_owned(),
+                        context: Default::default(),
                         operation: AsyncOperation::ReadWrite(AsyncReadWriteOperation::PutItem {
                             callback: get_callback(put.0),
                             key: Some(IndexedDBKeyType::Number(1.0)),
@@ -1229,6 +1246,7 @@ mod tests {
                     },
                     KvsOperation {
                         store_name: store_name.to_owned(),
+                        context: Default::default(),
                         operation: AsyncOperation::ReadWrite(AsyncReadWriteOperation::PutItem {
                             callback: get_callback(put2.0),
                             key: Some(IndexedDBKeyType::String("2.0".to_string())),
@@ -1239,6 +1257,7 @@ mod tests {
                     },
                     KvsOperation {
                         store_name: store_name.to_owned(),
+                        context: Default::default(),
                         operation: AsyncOperation::ReadWrite(AsyncReadWriteOperation::PutItem {
                             callback: get_callback(put3.0),
                             key: Some(IndexedDBKeyType::Array(vec![
@@ -1253,6 +1272,7 @@ mod tests {
                     // Try to put a duplicate key without overwrite
                     KvsOperation {
                         store_name: store_name.to_owned(),
+                        context: Default::default(),
                         operation: AsyncOperation::ReadWrite(AsyncReadWriteOperation::PutItem {
                             callback: get_callback(put_dup.0),
                             key: Some(IndexedDBKeyType::Number(1.0)),
@@ -1263,6 +1283,7 @@ mod tests {
                     },
                     KvsOperation {
                         store_name: store_name.to_owned(),
+                        context: Default::default(),
                         operation: AsyncOperation::ReadWrite(AsyncReadWriteOperation::PutItem {
                             callback: get_callback(put_overwrite.0),
                             key: Some(IndexedDBKeyType::Number(1.0)),
@@ -1273,6 +1294,7 @@ mod tests {
                     },
                     KvsOperation {
                         store_name: store_name.to_owned(),
+                        context: Default::default(),
                         operation: AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetItem {
                             callback: get_callback(get_item_some.0),
                             key_range: IndexedDBKeyRange::only(IndexedDBKeyType::Number(1.0)),
@@ -1280,6 +1302,7 @@ mod tests {
                     },
                     KvsOperation {
                         store_name: store_name.to_owned(),
+                        context: Default::default(),
                         operation: AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetItem {
                             callback: get_callback(get_item_none.0),
                             key_range: IndexedDBKeyRange::only(IndexedDBKeyType::Number(5.0)),
@@ -1287,6 +1310,7 @@ mod tests {
                     },
                     KvsOperation {
                         store_name: store_name.to_owned(),
+                        context: Default::default(),
                         operation: AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllItems {
                             callback: get_callback(get_all_items.0),
                             key_range: IndexedDBKeyRange::lower_bound(
@@ -1298,6 +1322,7 @@ mod tests {
                     },
                     KvsOperation {
                         store_name: store_name.to_owned(),
+                        context: Default::default(),
                         operation: AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Count {
                             callback: get_callback(count.0),
                             key_range: IndexedDBKeyRange::only(IndexedDBKeyType::Number(1.0)),
@@ -1305,6 +1330,7 @@ mod tests {
                     },
                     KvsOperation {
                         store_name: store_name.to_owned(),
+                        context: Default::default(),
                         operation: AsyncOperation::ReadWrite(AsyncReadWriteOperation::RemoveItem {
                             callback: get_callback(remove.0),
                             key_range: IndexedDBKeyRange::only(IndexedDBKeyType::Number(1.0)),
@@ -1312,6 +1338,7 @@ mod tests {
                     },
                     KvsOperation {
                         store_name: store_name.to_owned(),
+                        context: Default::default(),
                         operation: AsyncOperation::ReadWrite(AsyncReadWriteOperation::Clear(
                             get_callback(clear.0),
                         )),
