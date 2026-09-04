@@ -61,12 +61,12 @@ impl ServoErrorChannel {
     }
 }
 
-pub(crate) trait AbstractSender {
+pub(crate) trait AbstractSender: Send {
     type Message;
     fn send(&self, value: Self::Message) -> SendResult;
 }
 
-impl<T: Serialize> AbstractSender for GenericSender<T> {
+impl<T: Serialize + Send> AbstractSender for GenericSender<T> {
     type Message = T;
     fn send(&self, value: T) -> SendResult {
         GenericSender::send(self, value)
@@ -82,7 +82,7 @@ impl<T: for<'de> Deserialize<'de> + Serialize + Send + 'static> AbstractSender
     }
 }
 
-impl<T> AbstractSender for TokioSender<T> {
+impl<T: Send> AbstractSender for TokioSender<T> {
     type Message = T;
     fn send(&self, value: T) -> SendResult {
         TokioSender::send(self, value).map_err(|_| SendError::Disconnected)
@@ -97,7 +97,7 @@ impl<T> From<TokioOneshotSender<T>> for OneshotSender<T> {
     }
 }
 
-impl<T> AbstractSender for OneshotSender<T> {
+impl<T: Send> AbstractSender for OneshotSender<T> {
     type Message = T;
     fn send(&self, value: T) -> SendResult {
         let sender = self.0.borrow_mut().take();
@@ -117,26 +117,19 @@ pub(crate) struct AutomaticResponder<T> {
     default_response: Option<T>,
 }
 
-impl<T: Serialize + 'static> AutomaticResponder<T> {
-    pub(crate) fn new(response_sender: GenericSender<T>, default_response: T) -> Self {
-        Self {
-            response_sender: Box::new(response_sender),
-            response_sent: false,
-            default_response: Some(default_response),
-        }
+impl<T> AutomaticResponder<T> {
+    pub(crate) fn send(&mut self, response: T) -> SendResult {
+        let result = self.response_sender.send(response);
+        self.response_sent = true;
+        result
     }
 }
 
-impl<T: 'static> AutomaticResponder<T> {
-    pub(crate) fn new_same_process(
-        response_sender: Box<dyn AbstractSender<Message = T>>,
-        default_response: T,
-    ) -> Self {
-        Self {
-            response_sender,
-            response_sent: false,
-            default_response: Some(default_response),
-        }
+impl<T> AutomaticResponder<T> {
+    pub(crate) fn send(&mut self, response: T) -> SendResult {
+        let result = self.response_sender.send(response);
+        self.response_sent = true;
+        result
     }
 }
 
