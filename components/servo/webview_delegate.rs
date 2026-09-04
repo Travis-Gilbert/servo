@@ -1216,6 +1216,9 @@ mod test {
 
         use crate::responders::ServoErrorChannel;
 
+        fn assert_send<T: Send>() {}
+        assert_send::<WebResourceLoad>();
+
         let web_resource_request = || WebResourceRequest {
             has_body: false,
             method: Method::GET,
