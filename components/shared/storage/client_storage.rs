@@ -223,6 +223,38 @@ pub enum ClientStorageErrorr<T> {
     Internal(T),
 }
 
+pub trait RegistryEngine: Send {
+    fn create_database(
+        &mut self,
+        bottle_id: i64,
+        name: String,
+    ) -> Result<(PathBuf, bool), ClientStorageErrorr<String>>;
+    fn delete_database(
+        &mut self,
+        bottle_id: i64,
+        name: String,
+    ) -> Result<(), ClientStorageErrorr<String>>;
+    fn obtain_a_storage_bottle_map(
+        &mut self,
+        storage_type: StorageType,
+        webview: Option<WebViewId>,
+        storage_identifier: StorageIdentifier,
+        origin: ImmutableOrigin,
+        sender: &GenericSender<ClientStorageThreadMessage>,
+    ) -> Result<StorageProxyMap, ClientStorageErrorr<String>>;
+    fn persisted(&mut self, origin: ImmutableOrigin) -> Result<bool, String>;
+    fn persist(
+        &mut self,
+        origin: ImmutableOrigin,
+        permission_granted: bool,
+    ) -> Result<bool, String>;
+    fn estimate(&mut self, origin: ImmutableOrigin) -> Result<(u64, u64), String>;
+}
+
+pub trait RegistryEngineFactory: Send + Sync {
+    fn open(&self, storage_dir: PathBuf) -> Result<Box<dyn RegistryEngine>, String>;
+}
+
 impl<T> From<T> for ClientStorageErrorr<T> {
     fn from(err: T) -> Self {
         ClientStorageErrorr::Internal(err)

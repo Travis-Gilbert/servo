@@ -2,20 +2,56 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::sync::Arc;
+
 use malloc_size_of::malloc_size_of_is_0;
 use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::{self, GenericCallback, GenericSend, GenericSender, SendResult};
 use servo_url::ImmutableOrigin;
 
-use crate::cache_storage::CacheStorageThreadMessage;
-use crate::client_storage::{ClientStorageThreadHandle, ClientStorageThreadMessage};
-use crate::indexeddb::IndexedDBThreadMsg;
-use crate::webstorage_thread::{OriginDescriptor, WebStorageThreadMsg, WebStorageType};
+use crate::cache_storage::{CacheStorageEngineFactory, CacheStorageThreadMessage};
+use crate::client_storage::{
+    ClientStorageThreadHandle, ClientStorageThreadMessage, RegistryEngineFactory,
+};
+use crate::indexeddb::{IndexedDBThreadMsg, IndexedDbEngineFactory};
+use crate::webstorage_thread::{
+    OriginDescriptor, WebStorageEngineFactory, WebStorageThreadMsg, WebStorageType,
+};
 
 pub mod cache_storage;
 pub mod client_storage;
 pub mod indexeddb;
 pub mod webstorage_thread;
+
+/// Optional storage engine factories supplied by an embedder.
+///
+/// A missing factory selects Servo's built-in backend for that storage API.
+/// This representation keeps the public contracts in the traits crate while
+/// the SQLite implementations remain in the backend crate, avoiding a crate
+/// dependency cycle.
+#[derive(Clone, Default)]
+pub struct StorageEngines {
+    pub indexeddb: Option<Arc<dyn IndexedDbEngineFactory>>,
+    pub registry: Option<Arc<dyn RegistryEngineFactory>>,
+    pub web_storage: Option<Arc<dyn WebStorageEngineFactory>>,
+    pub cache: Option<Arc<dyn CacheStorageEngineFactory>>,
+}
+
+impl StorageEngines {
+    pub fn new(
+        indexeddb: Arc<dyn IndexedDbEngineFactory>,
+        registry: Arc<dyn RegistryEngineFactory>,
+        web_storage: Arc<dyn WebStorageEngineFactory>,
+        cache: Arc<dyn CacheStorageEngineFactory>,
+    ) -> Self {
+        Self {
+            indexeddb: Some(indexeddb),
+            registry: Some(registry),
+            web_storage: Some(web_storage),
+            cache: Some(cache),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StorageThreads {

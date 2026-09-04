@@ -26,22 +26,28 @@ use servo_url::origin::ImmutableOrigin;
 use storage_traits::client_storage::StorageProxyMap;
 use storage_traits::indexeddb::{
     AsyncOperation, BackendError, BackendResult, ConnectionMsg, CreateObjectResult, DatabaseInfo,
-    DbResult, IndexedDBIndex, IndexedDBObjectStore, IndexedDBThreadMsg, IndexedDBTxnMode, KeyPath,
-    SyncOperation, TxnCompleteMsg,
+    DbResult, IndexedDBDescription, IndexedDBIndex, IndexedDBObjectStore, IndexedDBThreadMsg,
+    IndexedDBTxnMode, IndexedDbEngineFactory, KeyPath, KvsEngine, KvsOperation,
+    KvsOperationContext, KvsTransaction, SyncOperation, TxnCompleteMsg,
 };
 use uuid::Uuid;
 
-use crate::indexeddb::engines::{KvsEngine, KvsOperation, KvsTransaction, SqliteEngine};
+use crate::indexeddb::engines::SqliteEngine;
 use crate::shared::is_sqlite_disk_full_error;
 
 pub trait IndexedDBThreadFactory {
-    fn new(mem_profiler_chan: MemProfilerChan, reporter_name: String) -> Self;
+    fn new(
+        mem_profiler_chan: MemProfilerChan,
+        reporter_name: String,
+        factory: Option<Arc<dyn IndexedDbEngineFactory>>,
+    ) -> Self;
 }
 
 impl IndexedDBThreadFactory for GenericSender<IndexedDBThreadMsg> {
     fn new(
         mem_profiler_chan: MemProfilerChan,
         reporter_name: String,
+        factory: Option<Arc<dyn IndexedDbEngineFactory>>,
     ) -> GenericSender<IndexedDBThreadMsg> {
         let (chan, port) = generic_channel::channel().unwrap();
         let chan2 = chan.clone();
@@ -52,7 +58,7 @@ impl IndexedDBThreadFactory for GenericSender<IndexedDBThreadMsg> {
             .name("IndexedDBManager".to_owned())
             .spawn(move || {
                 mem_profiler_chan.run_with_memory_reporting(
-                    || IndexedDBManager::new(port, manager_sender).start(),
+                    || IndexedDBManager::new(port, manager_sender, factory).start(),
                     reporter_name,
                     chan2,
                     IndexedDBThreadMsg::CollectMemoryReport,
@@ -64,11 +70,19 @@ impl IndexedDBThreadFactory for GenericSender<IndexedDBThreadMsg> {
     }
 }
 
-/// A key used to track databases.
-#[derive(Clone, Debug, Eq, Hash, MallocSizeOf, PartialEq)]
-pub struct IndexedDBDescription {
-    pub origin: ImmutableOrigin,
-    pub name: String,
+pub(crate) struct SqliteIndexedDbEngineFactory;
+
+impl IndexedDbEngineFactory for SqliteIndexedDbEngineFactory {
+    fn open(
+        &self,
+        path: std::path::PathBuf,
+        created: bool,
+        description: &IndexedDBDescription,
+    ) -> BackendResult<Box<dyn KvsEngine>> {
+        SqliteEngine::new(path, created, description, ThreadPool::global())
+            .map(|engine| Box::new(engine) as Box<dyn KvsEngine>)
+            .map_err(backend_error_from_sqlite_error)
+    }
 }
 
 #[derive(MallocSizeOf)]
@@ -249,6 +263,7 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
     fn queue_operation(
         &mut self,
         store_name: &str,
+        context: KvsOperationContext,
         serial_number: u64,
         mode: IndexedDBTxnMode,
         operation: AsyncOperation,
@@ -262,6 +277,7 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
                 transaction.requests.push_back(KvsOperation {
                     operation,
                     store_name: String::from(store_name),
+                    context,
                 });
                 if was_empty {
                     // If the queue was empty and we just added work, we must enqueue the txn
@@ -280,6 +296,7 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
                     .push_back(KvsOperation {
                         operation,
                         store_name: String::from(store_name),
+                        context,
                     });
                 enqueue_mode = Some(mode);
             },
@@ -753,7 +770,7 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
         Ok(())
     }
 
-    fn version(&self) -> Result<u64, E::Error> {
+    fn version(&self) -> BackendResult<u64> {
         self.engine.version()
     }
 
@@ -1015,8 +1032,8 @@ struct Connection {
 struct IndexedDBManager {
     port: GenericReceiver<IndexedDBThreadMsg>,
     manager_sender: GenericSender<IndexedDBThreadMsg>,
-    databases: HashMap<IndexedDBDescription, IndexedDBEnvironment<SqliteEngine>>,
-    thread_pool: Arc<ThreadPool>,
+    databases: HashMap<IndexedDBDescription, IndexedDBEnvironment<Box<dyn KvsEngine>>>,
+    engine_factory: Arc<dyn IndexedDbEngineFactory>,
 
     /// A global counter to produce unique transaction ids.
     /// TODO: remove once db connections lifecyle is managed.
@@ -1035,6 +1052,7 @@ impl IndexedDBManager {
     fn new(
         port: GenericReceiver<IndexedDBThreadMsg>,
         manager_sender: GenericSender<IndexedDBThreadMsg>,
+        engine_factory: Option<Arc<dyn IndexedDbEngineFactory>>,
     ) -> IndexedDBManager {
         debug!("New indexedDBManager");
 
@@ -1042,7 +1060,8 @@ impl IndexedDBManager {
             port,
             manager_sender,
             databases: HashMap::new(),
-            thread_pool: ThreadPool::global(),
+            engine_factory: engine_factory
+                .unwrap_or_else(|| Arc::new(SqliteIndexedDbEngineFactory)),
             serial_number_counter: 0,
             connection_queues: Default::default(),
             connections: Default::default(),
@@ -1077,6 +1096,7 @@ impl IndexedDBManager {
                     origin,
                     db_name,
                     store_name,
+                    context,
                     txn,
                     _request_id,
                     mode,
@@ -1084,7 +1104,7 @@ impl IndexedDBManager {
                 ) => {
                     if let Some(db) = self.get_database_mut(origin.clone(), db_name.clone()) {
                         // Queues an operation for a transaction without starting it
-                        db.queue_operation(&store_name, txn, mode, operation);
+                        db.queue_operation(&store_name, context, txn, mode, operation);
                         db.schedule_transactions(origin, &db_name);
                     }
                 },
@@ -1147,6 +1167,7 @@ impl IndexedDBManager {
                         // Queues an operation for a transaction without starting it
                         database.queue_operation(
                             &store_name,
+                            KvsOperationContext::default(),
                             transaction_serial_number,
                             IndexedDBTxnMode::Versionchange,
                             AsyncOperation::Schema(operation),
@@ -1562,7 +1583,7 @@ impl IndexedDBManager {
         &self,
         origin: ImmutableOrigin,
         db_name: String,
-    ) -> Option<&IndexedDBEnvironment<SqliteEngine>> {
+    ) -> Option<&IndexedDBEnvironment<Box<dyn KvsEngine>>> {
         let idb_description = IndexedDBDescription {
             origin,
             name: db_name,
@@ -1575,7 +1596,7 @@ impl IndexedDBManager {
         &mut self,
         origin: ImmutableOrigin,
         db_name: String,
-    ) -> Option<&mut IndexedDBEnvironment<SqliteEngine>> {
+    ) -> Option<&mut IndexedDBEnvironment<Box<dyn KvsEngine>>> {
         let idb_description = IndexedDBDescription {
             origin,
             name: db_name,
@@ -1828,11 +1849,9 @@ impl IndexedDBManager {
                         return;
                     },
                 };
-                let engine = match SqliteEngine::new(path, created, &key, self.thread_pool.clone())
-                {
+                let engine = match self.engine_factory.open(path, created, &key) {
                     Ok(engine) => engine,
-                    Err(err) => {
-                        let error = backend_error_from_sqlite_error(err);
+                    Err(error) => {
                         if let Err(e) = sender.send(ConnectionMsg::DatabaseError {
                             id: *id,
                             name: db_name.clone(),
@@ -1844,12 +1863,10 @@ impl IndexedDBManager {
                         return;
                     },
                 };
-                let created_db_path = engine.created_db_path();
                 let db = IndexedDBEnvironment::new(engine, self.manager_sender.clone());
                 let db_version = match db.version() {
                     Ok(version) => version,
-                    Err(err) => {
-                        let error = backend_error_from_sqlite_error(err);
+                    Err(error) => {
                         if let Err(e) = sender.send(ConnectionMsg::DatabaseError {
                             id: *id,
                             name: db_name.clone(),
@@ -1862,7 +1879,7 @@ impl IndexedDBManager {
                     },
                 };
 
-                *version = if created_db_path {
+                *version = if created {
                     Some(requested_version.unwrap_or(1))
                 } else {
                     Some(requested_version.unwrap_or(db_version))
@@ -1874,8 +1891,7 @@ impl IndexedDBManager {
             Entry::Occupied(db) => {
                 let db_version = match db.get().version() {
                     Ok(version) => version,
-                    Err(err) => {
-                        let error = backend_error_from_sqlite_error(err);
+                    Err(error) => {
                         if let Err(e) = sender.send(ConnectionMsg::DatabaseError {
                             id: *id,
                             name: db_name.clone(),
@@ -2405,14 +2421,14 @@ impl IndexedDBManager {
                         let _ = db.set_version(version);
                     }
                     // erroring out if the version is not upgraded can be and non-replicable
-                    let _ = sender.send(db.version().map_err(backend_error_from_sqlite_error));
+                    let _ = sender.send(db.version());
                 } else {
                     let _ = sender.send(Err(BackendError::DbNotFound));
                 }
             },
             SyncOperation::Version(sender, origin, db_name) => {
                 if let Some(db) = self.get_database(origin, db_name) {
-                    let _ = sender.send(db.version().map_err(backend_error_from_sqlite_error));
+                    let _ = sender.send(db.version());
                 } else {
                     let _ = sender.send(Err(BackendError::DbNotFound));
                 }
@@ -2496,10 +2512,10 @@ mod tests {
     use servo_base::generic_channel;
     use servo_base::threadpool::ThreadPool;
     use servo_url::ImmutableOrigin;
-    use storage_traits::indexeddb::{IndexedDBTxnMode, KeyPath};
+    use storage_traits::indexeddb::{IndexedDBDescription, IndexedDBTxnMode, KeyPath};
     use url::Host;
 
-    use super::{IndexedDBDescription, IndexedDBEnvironment};
+    use super::IndexedDBEnvironment;
     use crate::indexeddb::engines::SqliteEngine;
 
     fn test_origin() -> ImmutableOrigin {

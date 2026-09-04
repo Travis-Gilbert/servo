@@ -4,6 +4,7 @@
 use std::fmt::Debug;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::{fs, thread};
 
 use log::warn;
@@ -13,7 +14,7 @@ use servo_base::id::{BrowsingContextId, WebViewId};
 use servo_url::ImmutableOrigin;
 use storage_traits::client_storage::{
     ClientStorageErrorr, ClientStorageThreadHandle, ClientStorageThreadMessage, Mode,
-    StorageIdentifier, StorageProxyMap, StorageType,
+    RegistryEngine, RegistryEngineFactory, StorageIdentifier, StorageProxyMap, StorageType,
 };
 use uuid::Uuid;
 
@@ -23,7 +24,7 @@ use uuid::Uuid;
 /// limit (<https://developer.mozilla.org/en-US/docs/Web/API/Storage_API/Storage_quotas_and_eviction_criteria>).
 const STORAGE_SHELF_QUOTA_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
-trait RegistryEngine {
+trait RegistryBackend {
     type Error: Debug;
     fn create_database(
         &mut self,
@@ -417,7 +418,7 @@ fn directory_size(path: &PathBuf) -> Result<u64, String> {
     Ok(size)
 }
 
-impl RegistryEngine for SqliteEngine {
+impl RegistryBackend for SqliteEngine {
     type Error = rusqlite::Error;
 
     /// Create a database for the indexedDB endpoint.
@@ -662,12 +663,115 @@ impl RegistryEngine for SqliteEngine {
     }
 }
 
+fn map_registry_error<E: Debug>(error: ClientStorageErrorr<E>) -> ClientStorageErrorr<String> {
+    match error {
+        ClientStorageErrorr::BottleAlreadyExists => ClientStorageErrorr::BottleAlreadyExists,
+        ClientStorageErrorr::BucketDoesNotExist => ClientStorageErrorr::BucketDoesNotExist,
+        ClientStorageErrorr::DatabaseAlreadyExists => ClientStorageErrorr::DatabaseAlreadyExists,
+        ClientStorageErrorr::DatabaseDoesNotExist => ClientStorageErrorr::DatabaseDoesNotExist,
+        ClientStorageErrorr::DirectoryCreationFailed => {
+            ClientStorageErrorr::DirectoryCreationFailed
+        },
+        ClientStorageErrorr::DirectoryDeletionFailed => {
+            ClientStorageErrorr::DirectoryDeletionFailed
+        },
+        ClientStorageErrorr::SessionStorageRequiresWindow => {
+            ClientStorageErrorr::SessionStorageRequiresWindow
+        },
+        ClientStorageErrorr::Internal(error) => {
+            ClientStorageErrorr::Internal(format!("{error:?}"))
+        },
+    }
+}
+
+struct RegistryBackendAdapter<E>(E);
+
+impl<E> RegistryEngine for RegistryBackendAdapter<E>
+where
+    E: RegistryBackend + Send,
+{
+    fn create_database(
+        &mut self,
+        bottle_id: i64,
+        name: String,
+    ) -> Result<(PathBuf, bool), ClientStorageErrorr<String>> {
+        self.0
+            .create_database(bottle_id, name)
+            .map_err(map_registry_error)
+    }
+
+    fn delete_database(
+        &mut self,
+        bottle_id: i64,
+        name: String,
+    ) -> Result<(), ClientStorageErrorr<String>> {
+        self.0
+            .delete_database(bottle_id, name)
+            .map_err(map_registry_error)
+    }
+
+    fn obtain_a_storage_bottle_map(
+        &mut self,
+        storage_type: StorageType,
+        webview: Option<WebViewId>,
+        storage_identifier: StorageIdentifier,
+        origin: ImmutableOrigin,
+        sender: &GenericSender<ClientStorageThreadMessage>,
+    ) -> Result<StorageProxyMap, ClientStorageErrorr<String>> {
+        self.0
+            .obtain_a_storage_bottle_map(
+                storage_type,
+                webview,
+                storage_identifier,
+                origin,
+                sender,
+            )
+            .map_err(map_registry_error)
+    }
+
+    fn persisted(&mut self, origin: ImmutableOrigin) -> Result<bool, String> {
+        self.0.persisted(origin)
+    }
+
+    fn persist(
+        &mut self,
+        origin: ImmutableOrigin,
+        permission_granted: bool,
+    ) -> Result<bool, String> {
+        self.0.persist(origin, permission_granted)
+    }
+
+    fn estimate(&mut self, origin: ImmutableOrigin) -> Result<(u64, u64), String> {
+        self.0.estimate(origin)
+    }
+}
+
+pub(crate) struct SqliteRegistryEngineFactory;
+
+impl RegistryEngineFactory for SqliteRegistryEngineFactory {
+    fn open(&self, storage_dir: PathBuf) -> Result<Box<dyn RegistryEngine>, String> {
+        let engine = SqliteEngine::new(storage_dir).unwrap_or_else(|error| {
+            warn!("Failed to initialize ClientStorage engine into storage dir: {error:?}");
+            SqliteEngine::memory().unwrap()
+        });
+        Ok(Box::new(RegistryBackendAdapter(engine)))
+    }
+}
+
 pub trait ClientStorageThreadFactory {
-    fn new(config_dir: Option<PathBuf>, temporary_storage: bool) -> Self;
+    fn new(
+        config_dir: Option<PathBuf>,
+        temporary_storage: bool,
+        factory: Option<Arc<dyn RegistryEngineFactory>>,
+    ) -> Self;
 }
 
 impl ClientStorageThreadFactory for ClientStorageThreadHandle {
-    fn new(config_dir: Option<PathBuf>, temporary_storage: bool) -> ClientStorageThreadHandle {
+    fn new(
+        config_dir: Option<PathBuf>,
+        temporary_storage: bool,
+        factory: Option<Arc<dyn RegistryEngineFactory>>,
+    ) -> ClientStorageThreadHandle {
         let (generic_sender, generic_receiver) = generic_channel::channel().unwrap();
         let mut temp_dir: Option<tempfile::TempDir> = None;
         let base_dir = config_dir
@@ -692,10 +796,11 @@ impl ClientStorageThreadFactory for ClientStorageThreadHandle {
             .spawn(move || {
                 // Keep temp_dir alive while the thread runs.
                 let _ = temp_dir;
-                let engine = SqliteEngine::new(storage_dir).unwrap_or_else(|error| {
-                    warn!("Failed to initialize ClientStorage engine into storage dir: {error:?}");
-                    SqliteEngine::memory().unwrap()
-                });
+                let factory = factory.unwrap_or_else(|| Arc::new(SqliteRegistryEngineFactory));
+                let Ok(engine) = factory.open(storage_dir) else {
+                    warn!("Failed to initialize ClientStorage engine");
+                    return;
+                };
                 ClientStorageThread::new(sender_clone, generic_receiver, engine).start();
             })
             .expect("Thread spawning failed");
@@ -704,21 +809,18 @@ impl ClientStorageThreadFactory for ClientStorageThreadHandle {
     }
 }
 
-struct ClientStorageThread<E: RegistryEngine> {
+struct ClientStorageThread {
     receiver: GenericReceiver<ClientStorageThreadMessage>,
     sender: GenericSender<ClientStorageThreadMessage>,
-    engine: E,
+    engine: Box<dyn RegistryEngine>,
 }
 
-impl<E> ClientStorageThread<E>
-where
-    E: RegistryEngine,
-{
+impl ClientStorageThread {
     pub fn new(
         sender: GenericSender<ClientStorageThreadMessage>,
         receiver: GenericReceiver<ClientStorageThreadMessage>,
-        engine: E,
-    ) -> ClientStorageThread<E> {
+        engine: Box<dyn RegistryEngine>,
+    ) -> ClientStorageThread {
         ClientStorageThread {
             sender,
             receiver,

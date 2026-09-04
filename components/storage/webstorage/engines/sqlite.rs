@@ -5,13 +5,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use log::error;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use servo_base::threadpool::ThreadPool;
 
 use crate::shared::{DB_IN_MEMORY_INIT_PRAGMAS, DB_IN_MEMORY_PRAGMAS, DB_INIT_PRAGMAS, DB_PRAGMAS};
-use crate::webstorage::OriginEntry;
-use crate::webstorage::engines::WebStorageEngine;
+use storage_traits::webstorage_thread::WebStorageEngine;
 
 pub struct SqliteEngine {
     connection: Connection,
@@ -61,63 +59,85 @@ impl SqliteEngine {
 }
 
 impl WebStorageEngine for SqliteEngine {
-    type Error = rusqlite::Error;
-
-    fn load(&self) -> Result<OriginEntry, Self::Error> {
-        let mut stmt = self.connection.prepare("SELECT key, value FROM data;")?;
-        let rows = stmt.query_map([], |row| {
-            let key: String = row.get(0)?;
-            let value: String = row.get(1)?;
-            Ok((key, value))
-        })?;
-
-        let mut map = OriginEntry::default();
-        for row in rows {
-            let (key, value) = row?;
-            map.insert(key, value);
-        }
-        Ok(map)
-    }
-
-    fn clear(&mut self) -> Result<(), Self::Error> {
-        self.connection.execute("DELETE FROM data;", [])?;
-        Ok(())
-    }
-
-    fn delete(&mut self, key: &str) -> Result<(), Self::Error> {
+    fn len(&self) -> Result<usize, String> {
         self.connection
-            .execute("DELETE FROM data WHERE key = ?;", [key])?;
-        Ok(())
+            .query_row("SELECT COUNT(*) FROM data", [], |row| row.get::<_, i64>(0))
+            .map(|length| length as usize)
+            .map_err(|error| error.to_string())
     }
 
-    fn set(&mut self, key: &str, value: &str) -> Result<(), Self::Error> {
-        // update or insert
-        //
-        // TODO: Replace this with an UPSERT once the schema guarantees a
-        // UNIQUE/PRIMARY KEY constraint on `key`.
-        let tx = self.connection.transaction()?;
-        let rows = tx.execute("UPDATE data SET value = ? WHERE key = ?", [value, key])?;
-        if rows == 0 {
-            tx.execute("INSERT INTO data (key, value) VALUES (?, ?)", [key, value])?;
-        }
-        tx.commit()?;
-        Ok(())
+    fn key(&self, index: usize) -> Result<Option<String>, String> {
+        self.connection
+            .query_row(
+                "SELECT key FROM data ORDER BY key LIMIT 1 OFFSET ?",
+                [index as i64],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())
     }
 
-    fn save(&mut self, data: &OriginEntry) {
-        fn save_inner(conn: &mut Connection, data: &OriginEntry) -> rusqlite::Result<()> {
-            let tx = conn.transaction()?;
-            tx.execute("DELETE FROM data;", [])?;
-            let mut stmt = tx.prepare("INSERT INTO data (key, value) VALUES (?, ?);")?;
-            for (key, value) in data.inner() {
-                stmt.execute(rusqlite::params![key, value])?;
+    fn keys(&self) -> Result<Vec<String>, String> {
+        let load = || -> rusqlite::Result<Vec<String>> {
+            let mut statement = self
+                .connection
+                .prepare("SELECT key FROM data ORDER BY key")?;
+            statement
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()
+        };
+        load().map_err(|error| error.to_string())
+    }
+
+    fn get(&self, key: &str) -> Result<Option<String>, String> {
+        self.connection
+            .query_row("SELECT value FROM data WHERE key = ?", [key], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(|error| error.to_string())
+    }
+
+    fn set(&mut self, key: &str, value: &str) -> Result<Option<String>, String> {
+        let old_value = self.get(key)?;
+        let mut set = || -> rusqlite::Result<()> {
+            // TODO: Replace this with an UPSERT once the schema guarantees a
+            // UNIQUE/PRIMARY KEY constraint on `key`.
+            let tx = self.connection.transaction()?;
+            let rows = tx.execute("UPDATE data SET value = ? WHERE key = ?", [value, key])?;
+            if rows == 0 {
+                tx.execute("INSERT INTO data (key, value) VALUES (?, ?)", [key, value])?;
             }
-            drop(stmt);
             tx.commit()?;
             Ok(())
-        }
-        if let Err(e) = save_inner(&mut self.connection, data) {
-            error!("localstorage save error: {:?}", e);
-        }
+        };
+        set().map(|()| old_value).map_err(|error| error.to_string())
+    }
+
+    fn delete(&mut self, key: &str) -> Result<Option<String>, String> {
+        let old_value = self.get(key)?;
+        self.connection
+            .execute("DELETE FROM data WHERE key = ?", [key])
+            .map(|_| old_value)
+            .map_err(|error| error.to_string())
+    }
+
+    fn clear(&mut self) -> Result<bool, String> {
+        let changed = self.len()? != 0;
+        self.connection
+            .execute("DELETE FROM data", [])
+            .map(|_| changed)
+            .map_err(|error| error.to_string())
+    }
+
+    fn size(&self) -> Result<usize, String> {
+        self.connection
+            .query_row(
+                "SELECT COALESCE(SUM(LENGTH(key) + LENGTH(value)), 0) FROM data",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|size| size as usize)
+            .map_err(|error| error.to_string())
     }
 }

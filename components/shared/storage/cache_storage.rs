@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::ops::{Deref, DerefMut};
+use std::path::PathBuf;
 
 use malloc_size_of_derive::MallocSizeOf;
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,20 @@ use crate::client_storage::StorageProxyMap;
 #[derive(Debug, Deserialize, Serialize)]
 pub enum CacheStorageError<T> {
     Internal(T),
+}
+
+pub trait CacheStorageEngine: Send {
+    /// <https://w3c.github.io/ServiceWorker/#cache-storage-has>
+    fn has_cache(
+        &mut self,
+        origin: &ImmutableOrigin,
+        proxy: &StorageProxyMap,
+        cache_name: &str,
+    ) -> Result<bool, CacheStorageError<String>>;
+}
+
+pub trait CacheStorageEngineFactory: Send + Sync {
+    fn open(&self, storage_dir: PathBuf) -> Result<Box<dyn CacheStorageEngine>, String>;
 }
 
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
