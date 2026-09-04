@@ -249,8 +249,8 @@ sys-locale = "0.3"
 taffy = { version = "0.12.1", default-features = false, features = ["calc", "detailed_layout_info", "grid", "std"] }
 tempfile = "3"
 tendril = { version = "0.5", features = ["encoding_rs"] }
-tikv-jemalloc-sys = "0.6.1"
-tikv-jemallocator = "0.6.1"
+tikv-jemalloc-sys = "0.5.4"
+tikv-jemallocator = "0.5.4"
 time = { package = "time", version = "0.3", features = ["large-dates", "local-offset", "serde"] }
 tokio = "1"
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging"] }
