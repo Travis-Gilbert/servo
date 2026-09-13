@@ -1176,7 +1176,7 @@ mod test {
             index_updates: vec![KvsIndexUpdate {
                 index_name: "by-tag".to_owned(),
                 keys: vec![IndexedDBKeyType::String("rust".to_owned())],
-                keys_are_the_record_key: false,
+                record_key_placement: None,
             }],
         };
         let callback = GenericCallback::new(ProfilerChan(None), |_| {}).unwrap();
