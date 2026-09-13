@@ -170,11 +170,30 @@ impl RequestListener {
 
         if let Ok(data) = result {
             match data {
-                IdbResult::Key(key) => key_type_to_jsval(cx, &key, answer.handle_mut()),
+                IdbResult::Key(key) => {
+                    // A failed key conversion is the same kind of event as a failed
+                    // structured clone below: the request rejects rather than the
+                    // process dying.
+                    if let Err(e) = key_type_to_jsval(cx, &key, answer.handle_mut()) {
+                        warn!("Error converting an IndexedDB key to a value");
+                        Self::handle_async_request_error(&global, cx, request, e, self.request_id);
+                        return;
+                    }
+                },
                 IdbResult::Keys(keys) => {
                     rooted!(&in(cx) let mut array = vec![JSVal::default(); keys.len()]);
                     for (i, key) in keys.into_iter().enumerate() {
-                        key_type_to_jsval(cx, &key, array.handle_mut_at(i));
+                        if let Err(e) = key_type_to_jsval(cx, &key, array.handle_mut_at(i)) {
+                            warn!("Error converting an IndexedDB key to a value");
+                            Self::handle_async_request_error(
+                                &global,
+                                cx,
+                                request,
+                                e,
+                                self.request_id,
+                            );
+                            return;
+                        }
                     }
                     array.safe_to_jsval(cx, answer.handle_mut());
                 },

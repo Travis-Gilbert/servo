@@ -10,8 +10,10 @@
 // https://w3c.github.io/IndexedDB/#keyrange
 [Pref="dom_indexeddb_enabled", Exposed=(Window,Worker)]
 interface IDBKeyRange {
-  readonly attribute any lower;
-  readonly attribute any upper;
+  // Converting a key to a value allocates, so both getters can report an allocation
+  // failure instead of taking the content process down with them.
+  [Throws] readonly attribute any lower;
+  [Throws] readonly attribute any upper;
   readonly attribute boolean lowerOpen;
   readonly attribute boolean upperOpen;
 

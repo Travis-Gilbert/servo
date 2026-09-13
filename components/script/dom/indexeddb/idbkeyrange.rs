@@ -45,16 +45,18 @@ impl IDBKeyRange {
 
 impl IDBKeyRangeMethods<crate::DomTypeHolder> for IDBKeyRange {
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbkeyrange-lower>
-    fn Lower(&self, cx: &mut JSContext, answer: MutableHandleValue) {
-        if let Some(lower) = self.inner.lower.as_ref() {
-            key_type_to_jsval(cx, lower, answer);
+    fn GetLower(&self, cx: &mut JSContext, answer: MutableHandleValue) -> Fallible<()> {
+        match self.inner.lower.as_ref() {
+            Some(lower) => key_type_to_jsval(cx, lower, answer),
+            None => Ok(()),
         }
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbkeyrange-upper>
-    fn Upper(&self, cx: &mut JSContext, answer: MutableHandleValue) {
-        if let Some(upper) = self.inner.upper.as_ref() {
-            key_type_to_jsval(cx, upper, answer);
+    fn GetUpper(&self, cx: &mut JSContext, answer: MutableHandleValue) -> Fallible<()> {
+        match self.inner.upper.as_ref() {
+            Some(upper) => key_type_to_jsval(cx, upper, answer),
+            None => Ok(()),
         }
     }
 

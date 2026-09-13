@@ -19,7 +19,8 @@ use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 use servo_base::generic_channel::{GenericSend, GenericSender};
 use storage_traits::indexeddb::{
     self, AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, AsyncSchemaOperation,
-    IndexedDBKeyType, IndexedDBThreadMsg, KvsIndexUpdate, KvsOperationContext, KvsOperationTarget,
+    IndexedDBKeyRange, IndexedDBKeyType, IndexedDBThreadMsg, KvsIndexUpdate, KvsOperationContext,
+    KvsOperationTarget,
 };
 
 use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::IDBCursorDirection;
@@ -420,6 +421,85 @@ impl IDBObjectStore {
             updates.push(KvsIndexUpdate { index_name, keys });
         }
         Ok(updates)
+    }
+
+    /// <https://w3c.github.io/IndexedDB/#store-a-record-into-an-object-store>
+    ///
+    /// The cursor write path. `IDBCursor.update` has already decided the key: it is the
+    /// cursor's effective key, and a record is already stored under it. None of the key
+    /// generator, out-of-line key, or key injection machinery in `put` applies, which is why
+    /// this is a sibling of `put` rather than another flag through it. What does apply is the
+    /// clone, the in-line key path equality check, and index record extraction.
+    pub(crate) fn store_record_with_known_key(
+        &self,
+        cx: &mut JSContext,
+        value: HandleValue,
+        key: &IndexedDBKeyType,
+    ) -> Fallible<DomRoot<IDBRequest>> {
+        // update() Step 8. Let clone be a clone of value in targetRealm during transaction.
+        rooted!(&in(cx) let mut cloned_js_value = NullValue());
+        self.clone_value_in_target_realm(cx, value, cloned_js_value.handle_mut())?;
+
+        // update() Step 9. If the effective object store uses in-line keys, then the key
+        // extracted from the clone has to equal the key the record is stored under. A record
+        // cannot be moved by rewriting its own key.
+        if let Some(key_path) = self.key_path.as_ref() {
+            match extract_key(cx, cloned_js_value.handle(), key_path, None)? {
+                ExtractionResult::Key(extracted_key) if &extracted_key == key => {},
+                _ => return Err(Error::Data(None)),
+            }
+        }
+
+        let cloned_value = structuredclone::write(cx, cloned_js_value.handle(), None)?;
+        let Ok(serialized_value) = postcard::to_stdvec(&cloned_value) else {
+            return Err(Error::InvalidState(None));
+        };
+
+        // Storing a record also rebuilds its index records, so they are extracted from the
+        // finished clone and travel with the operation, exactly as they do for `put`.
+        let index_updates = self.extract_index_updates(cx, cloned_js_value.handle())?;
+        IDBRequest::execute_async_with_context(
+            cx,
+            self,
+            KvsOperationContext {
+                target: KvsOperationTarget::ObjectStore,
+                index_updates,
+            },
+            |callback| {
+                AsyncOperation::ReadWrite(AsyncReadWriteOperation::PutItem {
+                    callback,
+                    key: Some(key.clone()),
+                    value: serialized_value,
+                    should_overwrite: true,
+                    key_generator_current_number: None,
+                })
+            },
+            None,
+            None,
+        )
+    }
+
+    /// <https://w3c.github.io/IndexedDB/#delete-records-from-an-object-store>
+    ///
+    /// The cursor delete path. The range is the one effective key the cursor is positioned on,
+    /// so there is no query value to convert and nothing left to reject.
+    pub(crate) fn delete_record_with_known_key(
+        &self,
+        cx: &mut JSContext,
+        key: &IndexedDBKeyType,
+    ) -> Fallible<DomRoot<IDBRequest>> {
+        IDBRequest::execute_async(
+            cx,
+            self,
+            |callback| {
+                AsyncOperation::ReadWrite(AsyncReadWriteOperation::RemoveItem {
+                    callback,
+                    key_range: IndexedDBKeyRange::only(key.clone()),
+                })
+            },
+            None,
+            None,
+        )
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#add-or-put>

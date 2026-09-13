@@ -12,20 +12,20 @@
 interface IDBCursor {
   readonly attribute (IDBObjectStore or IDBIndex) source;
   readonly attribute IDBCursorDirection direction;
-  readonly attribute any key;
-  readonly attribute any primaryKey;
+  // Converting a key to a value allocates, so both getters can report an allocation
+  // failure instead of taking the content process down with them.
+  [Throws] readonly attribute any key;
+  [Throws] readonly attribute any primaryKey;
   [SameObject] readonly attribute IDBRequest request;
 
   [Throws] undefined advance([EnforceRange] unsigned long count);
   [Throws] undefined continue(optional any key);
   [Throws] undefined continuePrimaryKey(any key, any primaryKey);
 
-  // update and delete are the cursor's write path. They run "store a record into an object
-  // store" and "delete records from an object store" against the cursor's effective key, which
-  // needs IDBObjectStore's key path, clone and extraction helpers; those are private to that
-  // type today. The three iteration methods above share iterate_cursor and need none of it.
-  // [NewObject, Throws] IDBRequest update(any value);
-  // [NewObject, Throws] IDBRequest delete();
+  // The cursor's write path. Both run against the cursor's effective key through
+  // IDBObjectStore, which owns the key path, clone and index extraction they need.
+  [NewObject, Throws] IDBRequest update(any value);
+  [NewObject, Throws] IDBRequest delete();
 };
 
 enum IDBCursorDirection {

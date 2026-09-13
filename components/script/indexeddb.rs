@@ -27,7 +27,7 @@ use crate::dom::bindings::codegen::UnionTypes::StringOrStringSequence as StrOrSt
 use crate::dom::bindings::conversions::{
     get_property_jsval, root_from_handlevalue, root_from_object,
 };
-use crate::dom::bindings::error::Error;
+use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::bindings::utils::{define_dictionary_property, has_own_property};
 use crate::dom::blob::Blob;
@@ -35,13 +35,19 @@ use crate::dom::file::File;
 use crate::dom::idbkeyrange::IDBKeyRange;
 use crate::dom::idbobjectstore::KeyPath;
 
-// https://www.w3.org/TR/IndexedDB-3/#convert-key-to-value
+/// <https://www.w3.org/TR/IndexedDB-3/#convert-key-to-value>
+///
+/// The spec asserts that each conversion step is not an abrupt completion. Those
+/// assertions hold for the algorithm, not for the allocator: `NewDateObject`,
+/// `ArrayBuffer::create` and `NewArrayObject1` all return null under memory pressure.
+/// Reporting that as `Error::JSFailed` rejects the request the conversion belongs to
+/// rather than killing the content process along with every other page in it.
 #[expect(unsafe_code)]
 pub fn key_type_to_jsval(
     cx: &mut JSContext,
     key: &IndexedDBKeyType,
     mut result: MutableHandleValue,
-) {
+) -> Fallible<()> {
     // Step 1. Let type be key’s type.
     // Step 2. Let value be key’s value.
     // Step 3. Switch on type:
@@ -58,10 +64,9 @@ pub fn key_type_to_jsval(
             let date = NewDateObject(cx, ClippedTime { t: *d });
 
             // Step 3.2. Assert: date is not an abrupt completion.
-            assert!(
-                !date.is_null(),
-                "Failed to convert IndexedDB date key into a Date"
-            );
+            if date.is_null() {
+                return Err(Error::JSFailed);
+            }
 
             // Step 3.3. Return date.
             date.safe_to_jsval(cx, result);
@@ -74,21 +79,18 @@ pub fn key_type_to_jsval(
             // Step 3.2. Let buffer be the result of executing the ECMAScript
             // ArrayBuffer constructor with len.
             rooted!(&in(cx) let mut buffer = ptr::null_mut::<js::jsapi::JSObject>());
-            assert!(
-                ArrayBuffer::create(cx.raw_cx(), CreateWith::Length(len), buffer.handle_mut())
-                    .is_ok(),
-                "Failed to convert IndexedDB binary key into an ArrayBuffer"
-            );
+            ArrayBuffer::create(cx.raw_cx(), CreateWith::Length(len), buffer.handle_mut())
+                .map_err(|()| Error::JSFailed)?;
 
             // Step 3.3. Assert: buffer is not an abrupt completion.
 
             // Step 3.4. Set the entries in buffer’s [[ArrayBufferData]] internal slot to the
             // entries in value.
-            let mut array_buffer = ArrayBuffer::from(buffer.get())
-                .expect("ArrayBuffer::create should create an ArrayBuffer object");
+            let mut array_buffer =
+                ArrayBuffer::from(buffer.get()).map_err(|()| Error::JSFailed)?;
             array_buffer
                 .as_mut_slice_safe(cx.no_gc())
-                .expect("Can't be detached")
+                .ok_or(Error::JSFailed)?
                 .copy_from_slice(b);
 
             // Step 3.5. Return buffer.
@@ -101,10 +103,9 @@ pub fn key_type_to_jsval(
             rooted!(&in(cx) let array = NewArrayObject1(cx.raw_cx(), 0));
 
             // Step 3.2. Assert: array is not an abrupt completion.
-            assert!(
-                !array.get().is_null(),
-                "Failed to convert IndexedDB array key into an Array"
-            );
+            if array.get().is_null() {
+                return Err(Error::JSFailed);
+            }
 
             // Step 3.3. Let len be value’s size.
             let len = a.len();
@@ -117,27 +118,20 @@ pub fn key_type_to_jsval(
                 // Step 3.5.1. Let entry be the result of converting a key to a value with
                 // value[index].
                 rooted!(&in(cx) let mut entry = UndefinedValue());
-                key_type_to_jsval(cx, &a[index], entry.handle_mut());
+                key_type_to_jsval(cx, &a[index], entry.handle_mut())?;
 
                 // Step 3.5.2. Let status be CreateDataProperty(array, index, entry).
-                let index_property = CString::new(index.to_string());
-                assert!(
-                    index_property.is_ok(),
-                    "Failed to convert IndexedDB array index to CString"
-                );
-                let index_property = index_property.unwrap();
-                let status = define_dictionary_property(
+                let index_property =
+                    CString::new(index.to_string()).map_err(|_| Error::JSFailed)?;
+
+                // Step 3.5.3. Assert: status is true.
+                define_dictionary_property(
                     cx,
                     array.handle(),
                     index_property.as_c_str(),
                     entry.handle(),
-                );
-
-                // Step 3.5.3. Assert: status is true.
-                assert!(
-                    status.is_ok(),
-                    "CreateDataProperty on a fresh JS array should not fail"
-                );
+                )
+                .map_err(|()| Error::JSFailed)?;
 
                 // Step 3.5.4. Increase index by 1.
                 index += 1;
@@ -147,6 +141,8 @@ pub fn key_type_to_jsval(
             result.set(ObjectValue(array.get()));
         },
     }
+
+    Ok(())
 }
 
 /// <https://www.w3.org/TR/IndexedDB-3/#valid-key-path>
@@ -261,7 +257,7 @@ pub fn convert_value_to_key(
     // If Type(input) is String:
     if input.is_string() {
         // 3.1. Return a new key with type string and value input.
-        let string_ptr = std::ptr::NonNull::new(input.to_string()).unwrap();
+        let string_ptr = std::ptr::NonNull::new(input.to_string()).ok_or(Error::JSFailed)?;
         let key = unsafe { jsstr_to_string(cx, string_ptr) };
         return Ok(ConversionResult::Valid(IndexedDBKeyType::String(key)));
     }
@@ -320,7 +316,7 @@ pub fn convert_value_to_key(
                         ArrayBufferView::from(*object).map_err(|()| Error::JSFailed)?;
                     array_buffer_view.to_vec()
                 }
-                .expect("Already checked for detached buffers");
+                .ok_or(Error::JSFailed)?;
                 // 3.3. Return a new key with type binary and value bytes.
                 return Ok(ConversionResult::Valid(IndexedDBKeyType::Binary(bytes)));
             }
@@ -562,7 +558,8 @@ pub(crate) fn evaluate_key_path_on_value(
                 // Step 1.3.4. Let p be ! ToString(i).
                 // Step 1.3.5. Let status be CreateDataProperty(result, p, key).
                 // Step 1.3.6. Assert: status is true.
-                let i_cstr = std::ffi::CString::new(i.to_string()).unwrap();
+                let i_cstr =
+                    std::ffi::CString::new(i.to_string()).map_err(|_| Error::JSFailed)?;
                 define_dictionary_property(cx, result.handle(), i_cstr.as_c_str(), key.handle())
                     .map_err(|_| Error::JSFailed)?;
 
@@ -682,7 +679,7 @@ pub(crate) fn evaluate_key_path_on_value(
 
                 rooted!(&in(cx) let object = current_value.to_object());
                 let identifier_name =
-                    CString::new(identifier).expect("Failed to convert str to CString");
+                    CString::new(identifier).map_err(|_| Error::JSFailed)?;
 
                 // Let hop be ! HasOwnProperty(value, identifier).
                 let hop = has_own_property(cx, object.handle(), identifier_name.as_c_str())
@@ -751,8 +748,7 @@ pub(crate) fn can_inject_key_into_value(
         }
 
         rooted!(&in(cx) let current_object = current_value.to_object());
-        let identifier_name =
-            CString::new(identifier).expect("Failed to convert key path identifier to CString");
+        let identifier_name = CString::new(identifier).map_err(|_| Error::JSFailed)?;
 
         // Step 3.2. Let hop be ? HasOwnProperty(value, identifier).
         let hop = has_own_property(cx, current_object.handle(), identifier_name.as_c_str())
@@ -809,8 +805,7 @@ pub(crate) fn inject_key_into_value(
         }
 
         rooted!(&in(cx) let current_object = current_value.to_object());
-        let identifier_name =
-            CString::new(identifier).expect("Failed to convert key path identifier to CString");
+        let identifier_name = CString::new(identifier).map_err(|_| Error::JSFailed)?;
 
         // Step 4.2 Let hop be ! HasOwnProperty(value, identifier).
         let hop = has_own_property(cx, current_object.handle(), identifier_name.as_c_str())
@@ -851,14 +846,14 @@ pub(crate) fn inject_key_into_value(
 
     // Step 6. Let keyValue be the result of converting a key to a value with key.
     rooted!(&in(cx) let mut key_value = UndefinedValue());
-    key_type_to_jsval(cx, key, key_value.handle_mut());
+    key_type_to_jsval(cx, key, key_value.handle_mut())?;
 
     // `current_value` is the parent object where `last` will be defined.
     if !current_value.is_object() {
         return Ok(false);
     }
     rooted!(&in(cx) let parent_object = current_value.to_object());
-    let last_name = CString::new(last).expect("Failed to convert final key path identifier");
+    let last_name = CString::new(last).map_err(|_| Error::JSFailed)?;
 
     // Step 7. Let status be CreateDataProperty(value, last, keyValue).
     define_dictionary_property(

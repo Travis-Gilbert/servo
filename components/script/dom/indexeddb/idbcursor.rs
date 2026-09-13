@@ -20,7 +20,9 @@ use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::{
     IDBCursorDirection, IDBCursorMethods,
 };
 use crate::dom::bindings::codegen::Bindings::IDBIndexBinding::IDBIndexMethods;
-use crate::dom::bindings::codegen::Bindings::IDBTransactionBinding::IDBTransactionMethods;
+use crate::dom::bindings::codegen::Bindings::IDBTransactionBinding::{
+    IDBTransactionMethods, IDBTransactionMode,
+};
 use crate::dom::bindings::codegen::UnionTypes::IDBObjectStoreOrIDBIndex;
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::refcounted::Trusted;
@@ -228,6 +230,54 @@ impl IDBCursor {
         Ok(())
     }
 
+    /// The preconditions `update` and `delete` share: steps 2 through 6 of both algorithms,
+    /// in the order their exceptions are observable in.
+    ///
+    /// Kept separate from `check_transaction_and_source` because the read-only check falls
+    /// between the inactive check and the deleted check, and the three iteration methods have
+    /// no read-only check at all.
+    fn check_writable(&self) -> Fallible<()> {
+        // Step 2. If transaction's state is not active, throw a "TransactionInactiveError"
+        // DOMException.
+        if !self.transaction.is_active() || !self.transaction.is_usable() {
+            return Err(Error::TransactionInactive(None));
+        }
+
+        // Step 3. If transaction is a read-only transaction, throw a "ReadOnlyError"
+        // DOMException.
+        if let IDBTransactionMode::Readonly = self.transaction.get_mode() {
+            return Err(Error::ReadOnly(None));
+        }
+
+        // Step 4. If this's source or effective object store has been deleted, throw an
+        // "InvalidStateError" DOMException.
+        let store = self.effective_object_store();
+        if !self.transaction.Db().object_store_exists(&store.get_name()) {
+            return Err(Error::InvalidState(Some(
+                "The cursor's effective object store has been deleted".to_owned(),
+            )));
+        }
+        if let ObjectStoreOrIndex::Index(index) = &self.source &&
+            !store.has_index(&index.Name())
+        {
+            return Err(Error::InvalidState(Some(
+                "The cursor's source index has been deleted".to_owned(),
+            )));
+        }
+
+        // Step 5. If this's got value flag is false, throw an "InvalidStateError" DOMException.
+        self.check_got_value()?;
+
+        // Step 6. If this's key only flag is true, throw an "InvalidStateError" DOMException.
+        if self.key_only {
+            return Err(Error::InvalidState(Some(
+                "A key-only cursor has no value to write".to_owned(),
+            )));
+        }
+
+        Ok(())
+    }
+
     /// If this's got value flag is false, throw an "InvalidStateError" DOMException.
     ///
     /// The flag is unset while a previous iteration is outstanding, so this is what refuses a
@@ -305,7 +355,7 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbcursor-key>
-    fn Key(&self, cx: &mut JSContext, mut value: MutableHandleValue) {
+    fn GetKey(&self, cx: &mut JSContext, mut value: MutableHandleValue) -> Fallible<()> {
         // The key getter steps are to return the result of converting a key to a value with the cursor’s current key.
         //
         // NOTE: If key returns an object (e.g. a Date or Array), it returns the
@@ -315,20 +365,30 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
         // modify the contents of the database.
         if let Some(cached) = &*self.cached_key.borrow() {
             value.set(cached.get());
-            return;
+            return Ok(());
         }
 
         match self.key.borrow().as_ref() {
-            Some(key) => key_type_to_jsval(cx, key, value.reborrow()),
+            Some(key) => key_type_to_jsval(cx, key, value.reborrow())?,
             None => value.set(UndefinedValue()),
         }
 
+        // The `Heap` is stored before it is set: `Heap::set` registers the slot's own
+        // address with the GC store buffer, so the value has to be written where it
+        // will live rather than moved in afterwards.
         *self.cached_key.borrow_mut() = Some(Heap::default());
-        self.cached_key.borrow().as_ref().unwrap().set(value.get());
+        if let Some(cached) = self.cached_key.borrow().as_ref() {
+            cached.set(value.get());
+        }
+        Ok(())
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbcursor-primarykey>
-    fn PrimaryKey(&self, cx: &mut JSContext, mut value: MutableHandleValue) {
+    fn GetPrimaryKey(
+        &self,
+        cx: &mut JSContext,
+        mut value: MutableHandleValue,
+    ) -> Fallible<()> {
         // NOTE: If primaryKey returns an object (e.g. a Date or Array),
         // it returns the same object instance every time it is inspected,
         // until the cursor’s effective key is changed. This means that if the object is modified,
@@ -336,20 +396,19 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
         // However modifying such an object does not modify the contents of the database.
         if let Some(cached) = &*self.cached_primary_key.borrow() {
             value.set(cached.get());
-            return;
+            return Ok(());
         }
 
         match self.effective_key() {
-            Some(effective_key) => key_type_to_jsval(cx, &effective_key, value.reborrow()),
+            Some(effective_key) => key_type_to_jsval(cx, &effective_key, value.reborrow())?,
             None => value.set(UndefinedValue()),
         }
 
         *self.cached_primary_key.borrow_mut() = Some(Heap::default());
-        self.cached_primary_key
-            .borrow()
-            .as_ref()
-            .unwrap()
-            .set(value.get());
+        if let Some(cached) = self.cached_primary_key.borrow().as_ref() {
+            cached.set(value.get());
+        }
+        Ok(())
     }
 
     /// <https://w3c.github.io/IndexedDB/#dom-idbcursor-request>
@@ -529,6 +588,40 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
         // Step 19. Run asynchronously execute a request with this's source as source, operation
         // as operation and request as request.
         self.run_iteration(cx, Some(key), Some(primary_key), None)
+    }
+
+    /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbcursor-update>
+    fn Update(&self, cx: &mut JSContext, value: HandleValue) -> Fallible<DomRoot<IDBRequest>> {
+        // Steps 1 through 6.
+        self.check_writable()?;
+
+        // Step 7. Let targetRealm be a user-agent defined Realm.
+        // Steps 8 through 11 are the effective object store's, because the clone, the key path
+        // check and the index records all need state that belongs to it.
+        let Some(effective_key) = self.effective_key() else {
+            return Err(Error::InvalidState(Some(
+                "The cursor has no effective key to update".to_owned(),
+            )));
+        };
+        self.effective_object_store()
+            .store_record_with_known_key(cx, value, &effective_key)
+    }
+
+    /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbcursor-delete>
+    fn Delete(&self, cx: &mut JSContext) -> Fallible<DomRoot<IDBRequest>> {
+        // Steps 1 through 6, the same preconditions update() checks and in the same order.
+        self.check_writable()?;
+
+        // Step 7. Let operation be an algorithm to run delete records from an object store with
+        // this's effective object store and this's effective key.
+        // Step 8. Return the result of running asynchronously execute a request.
+        let Some(effective_key) = self.effective_key() else {
+            return Err(Error::InvalidState(Some(
+                "The cursor has no effective key to delete".to_owned(),
+            )));
+        };
+        self.effective_object_store()
+            .delete_record_with_known_key(cx, &effective_key)
     }
 }
 
@@ -769,9 +862,12 @@ pub(crate) fn iterate_cursor(
                     records
                         .iter()
                         .find(|&record| record.key == temp_record.key)
-                        .expect(
-                            "Record with key equal to temp record's key should exist in records",
-                        )
+                        // The search starts from a record that is already in `records`, so a
+                        // reflexive comparison always finds at least that one. Key equality is
+                        // not reflexive for a NaN number key, which script cannot produce but
+                        // stored bytes can, so a corrupt record falls back to itself instead of
+                        // killing the content process.
+                        .unwrap_or(temp_record)
                 }),
         };
 
