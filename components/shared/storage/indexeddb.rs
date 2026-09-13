@@ -515,6 +515,12 @@ pub enum PutItemResult {
     /// A unique index already holds one of the record's index keys for a different primary key.
     /// Carries the index name so the request can report which index refused it.
     IndexConstraintViolated(String),
+    /// The store's key generator can no longer produce a key.
+    ///
+    /// <https://w3c.github.io/IndexedDB/#generate-a-key> returns failure once the generator's
+    /// current number passes 2^53, which an explicit key is allowed to do. The record is not
+    /// stored and the request rejects with a "ConstraintError".
+    KeyGeneratorExhausted,
 }
 
 /// One record's index keys, prepared for the backfill a newly created index needs.
