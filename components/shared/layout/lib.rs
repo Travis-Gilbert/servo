@@ -194,6 +194,8 @@ pub struct TrustedNodeAddress(pub *const c_void);
 #[expect(unsafe_code)]
 unsafe impl Send for TrustedNodeAddress {}
 
+/// Computed values owned by an internal document layout projection.
+#[derive(Clone, Debug, Default)]
 pub struct DocumentLayoutSnapshotComputedStyle {
     pub display: Option<String>,
     pub visibility: Option<String>,
@@ -207,6 +209,9 @@ pub struct DocumentLayoutSnapshotComputedStyle {
     pub font_size: Option<String>,
 }
 
+/// One owned layout/paint record. The address is an internal, short-lived join key that script
+/// replaces with a document-stable handle before constructing the public embedder payload.
+#[derive(Clone, Debug)]
 pub struct DocumentLayoutSnapshotProjectionNode {
     pub node: UntrustedNodeAddress,
     pub bbox: Option<Rect<i32, CSSPixel>>,
@@ -219,6 +224,8 @@ pub struct DocumentLayoutSnapshotProjectionNode {
     pub scrollable: bool,
 }
 
+/// Owned internal projection built from the current FragmentTree and stacking-context tree.
+#[derive(Clone, Debug, Default)]
 pub struct DocumentLayoutSnapshotProjection {
     pub nodes: Vec<DocumentLayoutSnapshotProjectionNode>,
 }
@@ -903,8 +910,9 @@ impl ImageAnimationState {
             return false;
         }
         let time_interval_since_last_update = now - self.frame_start_time;
-        let mut remain_time_interval = time_interval_since_last_update -
-            self.image
+        let mut remain_time_interval = time_interval_since_last_update
+            - self
+                .image
                 .frames
                 .get(self.active_frame)
                 .unwrap()
