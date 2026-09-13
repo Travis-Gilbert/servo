@@ -18,7 +18,7 @@ use servo_base::generic_channel::GenericSend;
 use storage_traits::indexeddb::{
     AsyncOperation, AsyncReadOnlyOperation, BackendError, BackendResult, BackfillIndexResult,
     IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord, IndexedDBThreadMsg, IndexedDBTxnMode,
-    KvsOperationContext, PutItemResult, RecordsShape, SyncOperation,
+    KeyPath, KvsOperationContext, PutItemResult, RecordsShape, SyncOperation,
 };
 use stylo_atoms::Atom;
 
@@ -88,14 +88,9 @@ impl GetAllKind {
     }
 }
 
-/// What the DOM should make of a `Vec<IndexedDBRecord>` answer.
-///
-/// Cursor iteration and the `getAll` family read the same records and so share one wire
-/// payload. This is what tells them apart, and it carries the part of each algorithm the
-/// backend was not told about.
 /// Whether a request may be held back by the transaction's outbound hold.
 #[derive(Clone, Copy)]
-pub(crate) enum OutboundHold {
+enum OutboundHold {
     /// The ordinary case: the hold, when it is set, takes this request.
     Respect,
     /// The request the hold is waiting for. Holding it would stall the transaction on itself.
@@ -115,9 +110,32 @@ enum RequestVisibility {
     /// script a request for it, so no event is fired at either half. A failure runs
     /// `abort a transaction` with the error directly, which is how a unique index over records
     /// that already share a key takes the upgrade transaction down.
-    Internal,
+    Internal(BackfillHalf),
 }
 
+/// Which half of a `create index` backfill a request carries.
+///
+/// The two halves sit on opposite sides of the transaction's outbound hold, so which half a
+/// request is decides both where it goes in the queue and what its answer releases.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum BackfillHalf {
+    /// The read that collects the records the new index has to cover. It takes its ordinary
+    /// place in the outbound queue, because the records it has to see are the ones every
+    /// message ahead of it leaves behind.
+    Read,
+    /// The write that stores the keys extracted from those records. It bypasses the hold,
+    /// because the hold is what it is keeping the rest of the transaction waiting for, and its
+    /// answer is the point at which creating the index has either succeeded or failed. Only
+    /// then may the messages behind it go out: a request script placed after a `createIndex`
+    /// that fails is one the abort answers, not one the backend should ever see.
+    Write,
+}
+
+/// What the DOM should make of a `Vec<IndexedDBRecord>` answer.
+///
+/// Cursor iteration and the `getAll` family read the same records and so share one wire
+/// payload. This is what tells them apart, and it carries the part of each algorithm the
+/// backend was not told about.
 #[derive(Clone)]
 pub(crate) enum RecordsParam {
     /// Move a cursor onto the next record the iteration selects.
@@ -133,12 +151,21 @@ pub(crate) enum RecordsParam {
     ///
     /// This request is not script visible. `create index` needs the index's key path evaluated
     /// against every stored value, and only the script thread can do that, so the read comes
-    /// here and the keys go out again. `store_name` is the name the backend knows the store by,
-    /// carried across the round trip because a rename placed after the `createIndex` is still
-    /// held behind it and so has not reached the backend yet.
+    /// here and the keys go out again.
+    ///
+    /// Everything the second half needs is carried across the round trip rather than read back
+    /// off the object store when the records arrive, because the upgrade transaction goes on
+    /// running while they travel. `store_name` is the name the backend knows the store by, and
+    /// a rename placed after the `createIndex` is still held behind this round trip. The key
+    /// path and the multiEntry flag belong to the index the `createIndex` created, and a
+    /// `deleteIndex` placed after it has already taken that index off the store handle. The key
+    /// path is the storage thread's own, because a `RequestListener` travels to the task queue
+    /// and the DOM's `KeyPath` holds `DOMString`, which does not cross threads.
     IndexBackfill {
         store_name: String,
         index_name: String,
+        key_path: KeyPath,
+        multi_entry: bool,
     },
 }
 
@@ -406,6 +433,17 @@ impl RequestListener {
             .transaction
             .get()
             .expect("Request unexpectedly has no transaction");
+
+        // <https://w3c.github.io/IndexedDB/#abort-a-transaction> step 5 already answered this
+        // request with an `AbortError`, which is what "abort the steps to asynchronously
+        // execute a request" leaves behind: the answer that has just arrived is the one those
+        // steps were told to stop producing, so it is dropped rather than fired at a request
+        // that is already done. The transaction still counts the request as gone.
+        if request.is_settled_by_abort() {
+            transaction.request_finished();
+            return;
+        }
+
         // Substep 1: Set the result of request to result.
         request.set_ready_state_done();
 
@@ -542,6 +580,8 @@ impl RequestListener {
                     Some(RecordsParam::IndexBackfill {
                         store_name,
                         index_name,
+                        key_path,
+                        multi_entry,
                     }) => {
                         // A backfill request is not script visible, so no event is fired at it
                         // and nothing below opens the activity window `fire a success event`
@@ -568,16 +608,18 @@ impl RequestListener {
                             );
                             return;
                         };
-                        if let Err(e) =
-                            store.finish_index_backfill(cx, store_name, index_name, records)
-                        {
+                        if let Err(e) = store.finish_index_backfill(
+                            cx,
+                            store_name,
+                            index_name,
+                            key_path,
+                            *multi_entry,
+                            records,
+                        ) {
                             warn!("Error populating a new index from the store's records");
                             self.handle_async_request_error(&global, cx, request, e);
                             return;
                         }
-                        // The write is on its way, so everything script placed behind it can
-                        // follow, up to the next `createIndex` that queued itself here.
-                        transaction.resume_after_backfill();
                     },
                     // The pairing is asserted where the operation is sent, so reaching here
                     // means the backend answered with records for a request that reads none.
@@ -603,12 +645,17 @@ impl RequestListener {
                 },
             }
 
-            if self.visibility == RequestVisibility::Internal {
+            if let RequestVisibility::Internal(half) = self.visibility {
                 // <https://w3c.github.io/IndexedDB/#dom-idbobjectstore-createindex> keeps the
                 // backfill inside the upgrade transaction without exposing a request for it,
                 // so there is no result to set and no event to fire. The activity window the
                 // continuation above opened is closed here, the way step 8 of
                 // `fire a success event` would have closed it.
+                if half == BackfillHalf::Write {
+                    // Creating the index has landed, so everything script placed behind it can
+                    // follow, up to the next `createIndex` that queued itself here.
+                    transaction.resume_after_backfill();
+                }
                 if transaction.is_active() {
                     transaction.set_active_flag(false);
                 }
@@ -691,7 +738,7 @@ impl RequestListener {
         // Substep 2: Set the error of request to result.
         request.set_error(cx, Some(error.clone()));
 
-        if self.visibility == RequestVisibility::Internal {
+        if matches!(self.visibility, RequestVisibility::Internal(_)) {
             // <https://w3c.github.io/IndexedDB/#dom-idbobjectstore-createindex>: creating an
             // index can only fail after the method has returned, and the algorithm answers that
             // by running `abort a transaction` with the error. Script holds no request for the
@@ -773,6 +820,19 @@ pub struct IDBRequest {
     source: DomRefCell<Option<RequestSource>>,
     transaction: MutNullableDom<IDBTransaction>,
     ready_state: Cell<IDBRequestReadyState>,
+    /// Whether `abort a transaction` has taken this request over.
+    ///
+    /// <https://w3c.github.io/IndexedDB/#abort-a-transaction> step 5 answers every request the
+    /// transaction still owes an answer to, so the answer the backend is still going to send
+    /// for it stops being the answer. The flag is set while the abort runs, which is before
+    /// either answer can be delivered, and it is what tells the late one apart.
+    settled_by_abort: Cell<bool>,
+    /// Whether script holds this request.
+    ///
+    /// <https://w3c.github.io/IndexedDB/#dom-idbobjectstore-createindex> runs its backfill as
+    /// requests the algorithm never exposes, so an abort has nobody to fire their error events
+    /// at.
+    script_visible: Cell<bool>,
 }
 
 impl IDBRequest {
@@ -785,6 +845,8 @@ impl IDBRequest {
             source: Default::default(),
             transaction: Default::default(),
             ready_state: Cell::new(IDBRequestReadyState::Pending),
+            settled_by_abort: Cell::new(false),
+            script_visible: Cell::new(true),
         }
     }
 
@@ -833,6 +895,66 @@ impl IDBRequest {
 
     fn is_done(&self) -> bool {
         self.ready_state.get() == IDBRequestReadyState::Done
+    }
+
+    /// See [`Self::script_visible`].
+    pub(crate) fn hide_from_script(&self) {
+        self.script_visible.set(false);
+    }
+
+    /// See [`Self::settled_by_abort`].
+    pub(crate) fn is_settled_by_abort(&self) -> bool {
+        self.settled_by_abort.get()
+    }
+
+    /// Whether an aborting transaction still owes this request an answer.
+    pub(crate) fn is_awaiting_answer(&self) -> bool {
+        self.script_visible.get() && !self.is_done() && !self.settled_by_abort.get()
+    }
+
+    /// <https://w3c.github.io/IndexedDB/#abort-a-transaction> step 5, for one request.
+    ///
+    /// The transaction is aborting, so the answer to this request is that the transaction took
+    /// it down, whether the backend was about to answer it or, for a request the outbound hold
+    /// was still carrying, was never going to hear about it at all. The request is settled
+    /// synchronously so a reply already on its way is recognised as stale when it lands, and the
+    /// event the abort owes script is queued as a database task.
+    ///
+    /// Step 5.4 is `fire an event`, not `fire an error event`: the transaction is already
+    /// finished, so neither the activity window nor the unhandled-error abort that the latter
+    /// carries has anything left to act on.
+    pub(crate) fn settle_by_abort(&self) {
+        if self.settled_by_abort.get() {
+            return;
+        }
+        self.settled_by_abort.set(true);
+        let this = Trusted::new(self);
+        self.global()
+            .task_manager()
+            .database_access_task_source()
+            .queue(task!(idb_request_aborted: move |cx| {
+                let request = this.root();
+                let global = request.global();
+                let mut realm = enter_auto_realm(cx, &*request);
+                let cx: &mut JSContext = &mut realm;
+                // Step 5.1. Set request's done flag to true.
+                request.set_ready_state_done();
+                // Step 5.2. Set request's result to undefined.
+                rooted!(&in(cx) let undefined = UndefinedValue());
+                request.set_result(undefined.handle());
+                // Step 5.3. Set request's error to a newly created "AbortError" DOMException.
+                request.set_error(cx, Some(Error::Abort(None)));
+                // Step 5.4. Fire an event named error at request with its bubbles and
+                // cancelable attributes initialized to true.
+                let event = Event::new(
+                    cx,
+                    &global,
+                    Atom::from("error"),
+                    EventBubbles::Bubbles,
+                    EventCancelable::Cancelable,
+                );
+                event.fire(cx, request.upcast());
+            }));
     }
 
     pub(crate) fn transaction(&self) -> Option<DomRoot<IDBTransaction>> {
@@ -936,14 +1058,13 @@ impl IDBRequest {
     /// which is the name it had when `createIndex` ran: a rename placed afterwards is still
     /// waiting behind this round trip.
     ///
-    /// The read takes its ordinary place in the outbound queue, because the records it has to
-    /// see are the ones every message ahead of it leaves behind. The write bypasses the hold,
-    /// because the hold is what the write is keeping the rest of the transaction waiting for.
+    /// `half` decides where the request sits relative to the transaction's outbound hold, so
+    /// the two travel together rather than being chosen separately at each call site.
     pub(crate) fn execute_backfill_operation<T, F>(
         cx: &mut JSContext,
         store: &IDBObjectStore,
         store_name: &str,
-        hold: OutboundHold,
+        half: BackfillHalf,
         operation_fn: F,
         records_param: Option<RecordsParam>,
     ) -> Fallible<DomRoot<IDBRequest>>
@@ -951,6 +1072,10 @@ impl IDBRequest {
         T: Into<IdbResult> + for<'a> Deserialize<'a> + Serialize + Send + Sync + 'static,
         F: FnOnce(GenericCallback<BackendResult<T>>) -> AsyncOperation,
     {
+        let hold = match half {
+            BackfillHalf::Read => OutboundHold::Respect,
+            BackfillHalf::Write => OutboundHold::Bypass,
+        };
         Self::execute_async_inner(
             cx,
             store,
@@ -961,7 +1086,7 @@ impl IDBRequest {
             None,
             records_param,
             hold,
-            RequestVisibility::Internal,
+            RequestVisibility::Internal(half),
         )
     }
 
@@ -1048,6 +1173,9 @@ impl IDBRequest {
             new_request.set_transaction(&transaction);
             new_request
         });
+        if matches!(visibility, RequestVisibility::Internal(_)) {
+            request.hide_from_script();
+        }
 
         // Step 4: Add request to the end of transaction’s request list.
         transaction.add_request(&request);

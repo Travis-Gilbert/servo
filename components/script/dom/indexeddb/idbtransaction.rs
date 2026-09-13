@@ -552,6 +552,27 @@ impl IDBTransaction {
         {
             self.error.set(Some(&exception));
         }
+        self.abort_pending_requests();
+    }
+
+    /// <https://w3c.github.io/IndexedDB/#abort-a-transaction> step 5.
+    ///
+    /// Every request the transaction still owes an answer to is answered by the abort instead:
+    /// the answer the backend is still going to send is discarded, and a request the outbound
+    /// hold was carrying, which `discard_held_outbound` has just thrown away, would otherwise
+    /// never be answered at all. The error events are queued here, so they fire ahead of the
+    /// transaction's own `abort` event, which is still waiting on a round trip to the backend.
+    fn abort_pending_requests(&self) {
+        let pending: Vec<DomRoot<IDBRequest>> = self
+            .requests
+            .borrow()
+            .iter()
+            .filter(|request| request.is_awaiting_answer())
+            .map(|request| request.as_rooted())
+            .collect();
+        for request in pending {
+            request.settle_by_abort();
+        }
     }
 
     pub(crate) fn request_backend_abort(&self) {
@@ -628,7 +649,11 @@ impl IDBTransaction {
                     cx,
                     &global,
                     Atom::from("abort"),
-                    EventBubbles::DoesNotBubble,
+                    // <https://w3c.github.io/IndexedDB/#abort-a-transaction> step 6.2 fires
+                    // this one with its bubbles attribute initialized to true, which is how a
+                    // connection's `onabort` hears about a transaction it did not listen to
+                    // directly.
+                    EventBubbles::Bubbles,
                     EventCancelable::NotCancelable,
                 );
                 event.fire(cx, this.upcast());

@@ -46,7 +46,7 @@ use crate::dom::indexeddb::idbcursor::{IDBCursor, IterationParam, ObjectStoreOrI
 use crate::dom::indexeddb::idbcursorwithvalue::IDBCursorWithValue;
 use crate::dom::indexeddb::idbindex::IDBIndex;
 use crate::dom::indexeddb::idbrequest::{
-    GetAllKind, GetAllRequest, IDBRequest, OutboundHold, RecordsParam, RequestSource,
+    BackfillHalf, GetAllKind, GetAllRequest, IDBRequest, RecordsParam, RequestSource,
 };
 use crate::dom::indexeddb::idbtransaction::IDBTransaction;
 use crate::indexeddb::{
@@ -412,12 +412,14 @@ impl IDBObjectStore {
         cx: &mut JSContext,
         store_name: &str,
         index_name: &str,
+        key_path: &indexeddb::KeyPath,
+        multi_entry: bool,
     ) -> Fallible<()> {
         IDBRequest::execute_backfill_operation::<Vec<IndexedDBRecord>, _>(
             cx,
             self,
             store_name,
-            OutboundHold::Respect,
+            BackfillHalf::Read,
             |callback| {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
                     callback,
@@ -429,6 +431,8 @@ impl IDBObjectStore {
             Some(RecordsParam::IndexBackfill {
                 store_name: store_name.to_owned(),
                 index_name: index_name.to_owned(),
+                key_path: key_path.clone(),
+                multi_entry,
             }),
         )?;
         Ok(())
@@ -446,20 +450,16 @@ impl IDBObjectStore {
         cx: &mut JSContext,
         store_name: &str,
         index_name: &str,
+        key_path: &indexeddb::KeyPath,
+        multi_entry: bool,
         records: Vec<IndexedDBRecord>,
     ) -> Fallible<()> {
-        let name = DOMString::from(index_name);
-        let Some((key_path, multi_entry)) = self
-            .index_set
-            .borrow()
-            .get(&name)
-            .map(|index| (index.index_key_path().clone(), index.is_multi_entry()))
-        else {
-            // The same upgrade transaction deleted the index again before its records came
-            // back. There is nothing left to populate.
-            return Ok(());
-        };
-
+        // The key path and the multiEntry flag arrive with the records rather than being read
+        // back off the index set, because a `deleteIndex` placed after the `createIndex` has
+        // already taken the index off this handle by the time they come back. The write still
+        // belongs ahead of that delete on the wire, and the backend drops the records with the
+        // index when the delete reaches it.
+        let key_path = KeyPath::from(key_path.clone());
         let global = self.global();
         let mut entries = Vec::with_capacity(records.len());
         for record in records {
@@ -493,7 +493,7 @@ impl IDBObjectStore {
             cx,
             self,
             store_name,
-            OutboundHold::Bypass,
+            BackfillHalf::Write,
             |callback| {
                 AsyncOperation::ReadWrite(AsyncReadWriteOperation::BackfillIndex {
                     callback,
@@ -1399,10 +1399,11 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
         // Step 11. Let index be a new index in store.
         // Set index’s name to name and key path to keyPath. If unique is set, set index’s unique flag.
         // If multiEntry is set, set index’s multiEntry flag.
+        let stored_key_path: indexeddb::KeyPath = key_path.clone().into();
         let operation = AsyncSchemaOperation::CreateIndex {
             callback: self.transaction.create_abort_callback(),
             index_name: name.to_string(),
-            key_path: key_path.clone().into(),
+            key_path: stored_key_path.clone(),
             unique: options.unique,
             multi_entry: options.multiEntry,
         };
@@ -1438,7 +1439,13 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
         // the backfill's write lands.
         let store_name = self.name.borrow().to_string();
         let index_name = name.to_string();
-        self.start_index_backfill(cx, &store_name, &index_name)?;
+        self.start_index_backfill(
+            cx,
+            &store_name,
+            &index_name,
+            &stored_key_path,
+            index.is_multi_entry(),
+        )?;
         self.transaction.hold_outbound_after_backfill();
 
         // Step 13. Return a new index handle associated with index and this object store handle.

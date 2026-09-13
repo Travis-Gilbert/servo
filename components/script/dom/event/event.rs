@@ -452,7 +452,20 @@ impl Event {
                             .GetRootNode(&GetRootNodeOptions::empty())
                             .is_shadow_including_inclusive_ancestor_of(parent)
                     });
-                if parent.is::<Window>() || root_is_shadow_inclusive_ancestor {
+                // A parent that is not a node was named by an object's own `get the parent`
+                // algorithm rather than reached through a tree, so there is no shadow tree for
+                // the target to be adjusted across and step 6.9.8 has nothing to adjust.
+                // IndexedDB is the one such chain here: an event fired at an `IDBRequest`
+                // travels to its transaction and then to its connection, and script reads the
+                // request back off `event.target` at each of them. Step 6.9.8 would instead
+                // hand those listeners the transaction and then the connection, and would make
+                // both at-target steps, so an event whose `bubbles` is false would reach them
+                // anyway.
+                let parent_is_outside_a_tree = !parent.is::<Node>();
+                if parent.is::<Window>() ||
+                    root_is_shadow_inclusive_ancestor ||
+                    parent_is_outside_a_tree
+                {
                     // Step 6.9.6.1. If isActivationEvent is true, event’s bubbles attribute is true, activationTarget
                     // is null, and parent has activation behavior, then set activationTarget to parent.
                     if is_activation_event &&
