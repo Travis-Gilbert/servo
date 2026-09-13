@@ -415,7 +415,7 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
     }
 
     /// <https://w3c.github.io/IndexedDB/#dom-idbcursor-request>
-    fn Request(&self) -> Fallible<DomRoot<IDBRequest>> {
+    fn GetRequest(&self) -> Fallible<DomRoot<IDBRequest>> {
         // A cursor reaches script only as the result of the request that opened it, and that
         // request is what `set_request` stores, so the getter normally has one. The invariant
         // is established by IDBObjectStore::OpenCursor and IDBIndex::OpenCursor rather than

@@ -897,7 +897,7 @@ impl IDBTransaction {
         let idb_sender = global.storage_threads().sender();
         // A store whose parameters cannot even be asked for reads the same way to the caller as
         // a store the backend could not find, which the `?`s below already report as `None`.
-        let Ok((sender, receiver)) = channel(global.time_profiler_chan().clone()) else {
+        let Some((sender, receiver)) = channel(global.time_profiler_chan().clone()) else {
             warn!("Could not create a channel to read IndexedDB object store parameters.");
             return None;
         };
