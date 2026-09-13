@@ -16,6 +16,7 @@ use script_bindings::reflector::{Reflector, reflect_dom_object};
 use storage_traits::indexeddb::{
     AsyncOperation, AsyncReadOnlyOperation, IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord,
     KvsOperationContext, KvsOperationTarget,
+    AsyncOperation, AsyncReadOnlyOperation, KvsOperationContext, KvsOperationTarget, RecordsShape,
 };
 
 use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::{
@@ -111,6 +112,44 @@ impl IDBCursor {
             object_store_position: DomRefCell::new(None),
             key_only,
             request: Default::default(),
+
+    ) -> Fallible<()> {
+        // Unset this's got value flag.
+        self.got_value.set(false);
+
+        // Let request be this's request. Set request's done flag to false.
+        let request = self.request.get().ok_or(Error::InvalidState(Some(
+            "The cursor has no request".to_owned(),
+        )))?;
+        request.set_ready_state_pending();
+
+        let iteration_param = IterationParam {
+            cursor: Trusted::new(self),
+            key,
+            primary_key,
+            count,
+        };
+        let key_range = self.range.clone();
+
+        // Run the steps to asynchronously execute a request with this as source and the steps
+        // to iterate a cursor as operation, reusing request.
+        IDBRequest::execute_async_with_context(
+            cx,
+            &self.effective_object_store(),
+            self.operation_context(),
+            |callback| {
+                AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
+                    callback,
+                    key_range,
+                    count: None,
+                    shape: RecordsShape::WithValues,
+                })
+            },
+            Some(request),
+            Some(RecordsParam::Cursor(iteration_param)),
+        )
+        .map(|_| ())
+    }
         }
     }
 

@@ -452,6 +452,19 @@ pub struct IndexedDBRecord {
     pub value: Vec<u8>,
 }
 
+/// How much of each record a request reads.
+///
+/// `getAllKeys` never looks at a stored value, and a store of large values makes that the
+/// difference between shipping a list of keys and shipping a copy of the database. The shape
+/// travels with the operation so the engine can leave those bytes in the database.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, MallocSizeOf, PartialEq, Serialize)]
+pub enum RecordsShape {
+    /// Keys and primary keys only. Every record's `value` is empty.
+    KeysOnly,
+    /// Keys, primary keys and stored values.
+    WithValues,
+}
+
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct IndexedDBIndex {
     pub name: String,
@@ -490,33 +503,22 @@ pub enum AsyncReadOnlyOperation {
         key_range: IndexedDBKeyRange,
     },
 
-    GetAllKeys {
-        callback: GenericCallback<BackendResult<Vec<IndexedDBKeyType>>>,
-        key_range: IndexedDBKeyRange,
-        count: Option<u32>,
-    },
-    GetAllItems {
-        callback: GenericCallback<BackendResult<Vec<Vec<u8>>>>,
-        key_range: IndexedDBKeyRange,
-        count: Option<u32>,
-    },
-
     Count {
         callback: GenericCallback<BackendResult<u64>>,
         key_range: IndexedDBKeyRange,
     },
+    /// The records a key range covers, in ascending key order and then, for an index
+    /// request, ascending primary key order.
+    ///
+    /// Cursor iteration and the whole `getAll` family read through this one operation.
+    /// Direction is not applied here; the DOM applies it, the way `IDBCursor` already does,
+    /// because a count pushed down beside a descending direction would truncate the wrong end
+    /// of the range.
     Iterate {
         callback: GenericCallback<BackendResult<Vec<IndexedDBRecord>>>,
         key_range: IndexedDBKeyRange,
-    },
-    /// <https://w3c.github.io/IndexedDB/#dom-idbindex-getallrecords>
-    ///
-    /// Records are returned in ascending key order. Direction is applied by the DOM,
-    /// the way `IDBCursor` already applies it, so no direction type crosses this seam.
-    GetAllRecords {
-        callback: GenericCallback<BackendResult<Vec<IndexedDBRecord>>>,
-        key_range: IndexedDBKeyRange,
         count: Option<u32>,
+        shape: RecordsShape,
     },
 }
 
@@ -525,11 +527,8 @@ impl AsyncReadOnlyOperation {
         let _ = match self {
             Self::GetKey { callback, .. } => callback.send(Err(error)),
             Self::GetItem { callback, .. } => callback.send(Err(error)),
-            Self::GetAllKeys { callback, .. } => callback.send(Err(error)),
-            Self::GetAllItems { callback, .. } => callback.send(Err(error)),
             Self::Count { callback, .. } => callback.send(Err(error)),
             Self::Iterate { callback, .. } => callback.send(Err(error)),
-            Self::GetAllRecords { callback, .. } => callback.send(Err(error)),
         };
     }
 }

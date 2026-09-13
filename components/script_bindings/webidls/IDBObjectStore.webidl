@@ -22,9 +22,9 @@ interface IDBObjectStore {
   [NewObject, Throws] IDBRequest clear();
   [NewObject, Throws] IDBRequest get(any query);
   [NewObject, Throws] IDBRequest getKey(any query);
-  [NewObject, Throws] IDBRequest getAll(optional any query,
+  [NewObject, Throws] IDBRequest getAll(optional any queryOrOptions,
                                 optional [EnforceRange] unsigned long count);
-  [NewObject, Throws] IDBRequest getAllKeys(optional any query,
+  [NewObject, Throws] IDBRequest getAllKeys(optional any queryOrOptions,
                                     optional [EnforceRange] unsigned long count);
   [NewObject, Throws] IDBRequest count(optional any query);
   [NewObject, Throws] IDBRequest getAllRecords(optional IDBGetAllOptions options = {});

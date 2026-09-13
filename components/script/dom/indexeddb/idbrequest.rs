@@ -8,7 +8,7 @@ use std::cell::Cell;
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
-use js::conversions::ToJSValConvertible;
+use js::conversions::{ConversionResult as JsConversionResult, ToJSValConvertible};
 use js::jsapi::Heap;
 use js::jsval::{DoubleValue, JSVal, NullValue, ObjectValue, UndefinedValue};
 use js::rust::HandleValue;
@@ -17,15 +17,16 @@ use script_bindings::reflector::{DomObject, reflect_dom_object_with_cx};
 use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::{GenericSend, SendError};
 use storage_traits::indexeddb::{
-    AsyncOperation, AsyncReadOnlyOperation, BackendError, BackendResult, IndexedDBKeyType,
-    PutItemResult, SyncOperation,
-    IndexedDBRecord, IndexedDBThreadMsg, IndexedDBTxnMode, KvsOperationContext,
+    IndexedDBKeyType, IndexedDBRecord, IndexedDBThreadMsg, IndexedDBTxnMode,
+    KvsOperationContext, PutItemResult, RecordsShape, SyncOperation,
+    AsyncOperation, AsyncReadOnlyOperation, BackendError, BackendResult, IndexedDBKeyRange,
 };
 use stylo_atoms::Atom;
 
 use crate::dom::bindings::codegen::Bindings::IDBRequestBinding::{
     IDBRequestMethods, IDBRequestReadyState,
 };
+use crate::dom::bindings::codegen::Bindings::IDBObjectStoreBinding::IDBGetAllOptions;
 use crate::dom::bindings::codegen::Bindings::IDBTransactionBinding::IDBTransactionMode;
 use crate::dom::bindings::error::{Error, Fallible, create_dom_exception};
 use crate::dom::bindings::inheritance::Castable;
@@ -40,7 +41,9 @@ use crate::dom::indexeddb::idbcursorwithvalue::IDBCursorWithValue;
 use crate::dom::indexeddb::idbobjectstore::IDBObjectStore;
 use crate::dom::indexeddb::idbrecord::IDBRecord;
 use crate::dom::indexeddb::idbtransaction::IDBTransaction;
-use crate::dom::indexeddb::key::key_type_to_jsval;
+use crate::dom::indexeddb::key::{
+    convert_value_to_key_range, is_potentially_valid_key_range, key_type_to_jsval,
+};
 use crate::realms::enter_auto_realm;
 
 #[derive(Clone)]
@@ -56,7 +59,9 @@ pub enum IdbResult {
     Value(Vec<u8>),
     Values(Vec<Vec<u8>>),
     Count(u64),
-    Iterate(Vec<IndexedDBRecord>),
+    /// The records a range covers. Which of the four algorithms that read records this answer
+    /// belongs to is carried by the request's `RecordsParam`, not by the wire.
+    Records(Vec<IndexedDBRecord>),
     Error(Error),
     None,
 }
@@ -99,7 +104,7 @@ impl From<PutItemResult> for IdbResult {
 
 impl From<Vec<IndexedDBRecord>> for IdbResult {
     fn from(value: Vec<IndexedDBRecord>) -> Self {
-        Self::Iterate(value)
+        Self::Records(value)
     }
 }
 
@@ -235,7 +240,7 @@ impl RequestListener {
                 IdbResult::Count(count) => {
                     answer.handle_mut().set(DoubleValue(count as f64));
                 },
-                IdbResult::Iterate(records) => match self.records_param.as_ref() {
+                IdbResult::Records(records) => match self.records_param.as_ref() {
                     Some(RecordsParam::Cursor(param)) => {
                         let cursor = match iterate_cursor(&global, cx, param, records) {
                             Ok(cursor) => cursor,
@@ -268,27 +273,51 @@ impl RequestListener {
                             answer.handle_mut().set(NullValue());
                         }
                     },
-                    Some(RecordsParam::GetAll { direction, count }) => {
+                    Some(RecordsParam::GetAll {
+                        kind,
+                        direction,
+                        count,
+                    }) => {
                         let records = project_records(*direction, *count, records);
                         rooted!(&in(cx) let mut array = vec![JSVal::default(); records.len()]);
                         for (i, record) in records.into_iter().enumerate() {
-                            match IDBRecord::new(cx, &global, record) {
-                                Ok(idb_record) => {
-                                    array.handle_mut_at(i).set(ObjectValue(
-                                        *idb_record.reflector().get_jsobject(),
-                                    ));
+                            let element = match kind {
+                                GetAllKind::Values => postcard::from_bytes(&record.value)
+                                    .map_err(|_| Error::Data(None))
+                                    .and_then(|data| {
+                                        structuredclone::read(
+                                            cx,
+                                            &global,
+                                            data,
+                                            array.handle_mut_at(i),
+                                        )
+                                    })
+                                    // The deserialized message ports belong to the value, which
+                                    // is now rooted in the array. Nothing here owns them.
+                                    .map(|_| ()),
+                                GetAllKind::PrimaryKeys => key_type_to_jsval(
+                                    cx,
+                                    &record.primary_key,
+                                    array.handle_mut_at(i),
+                                ),
+                                GetAllKind::Records => {
+                                    IDBRecord::new(cx, &global, record).map(|idb_record| {
+                                        array.handle_mut_at(i).set(ObjectValue(
+                                            *idb_record.reflector().get_jsobject(),
+                                        ));
+                                    })
                                 },
-                                Err(e) => {
-                                    warn!("Error building an IDBRecord");
-                                    Self::handle_async_request_error(
-                                        &global,
-                                        cx,
-                                        request,
-                                        e,
-                                        self.request_id,
-                                    );
-                                    return;
-                                },
+                            };
+                            if let Err(e) = element {
+                                warn!("Error building a getAll result");
+                                Self::handle_async_request_error(
+                                    &global,
+                                    cx,
+                                    request,
+                                    e,
+                                    self.request_id,
+                                );
+                                return;
                             }
                         }
                         array.to_jsval(cx, answer.handle_mut());
@@ -304,7 +333,6 @@ impl RequestListener {
                         );
                         return;
                     },
-                },
                 },
                 IdbResult::None => {
                     // no-op
@@ -678,18 +706,14 @@ impl IDBRequest {
         let callback = GenericCallback::new(closure).expect("Could not create callback");
         let operation = operation_fn(callback);
 
-        // Both record-reading operations answer with `Vec<IndexedDBRecord>`, so the parameter
+        // Every record-reading request answers with `Vec<IndexedDBRecord>`, so the parameter
         // is the only thing that says which algorithm the answer belongs to. Pairing it with
         // the operation here is what lets the result handler treat a missing one as a protocol
         // error rather than guess.
         match &operation {
             AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate { .. }) => assert!(
-                matches!(records_param, Some(RecordsParam::Cursor(_))),
-                "Iterate must be paired with RecordsParam::Cursor"
-            ),
-            AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllRecords { .. }) => assert!(
-                matches!(records_param, Some(RecordsParam::GetAll { .. })),
-                "GetAllRecords must be paired with RecordsParam::GetAll"
+                records_param.is_some(),
+                "Iterate must carry the RecordsParam that names the algorithm reading it"
             ),
             _ => assert!(
                 records_param.is_none(),
@@ -794,41 +818,119 @@ pub(crate) enum RequestSource {
     Cursor(Dom<IDBCursor>),
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum GetAllKind {
+    /// `getAll`: the stored value of each record.
+    Values,
+    /// `getAllKeys`: the object store key of each record.
+    PrimaryKeys,
+    /// `getAllRecords`: an `IDBRecord` per record.
+    Records,
+}
+
+impl GetAllKind {
+    /// `getAllKeys` never reads a stored value, and over a store of large values that is the
+    /// difference between shipping a list of keys and shipping a copy of the database.
+    pub(crate) fn shape(self) -> RecordsShape {
+        match self {
+            GetAllKind::PrimaryKeys => RecordsShape::KeysOnly,
+            GetAllKind::Values | GetAllKind::Records => RecordsShape::WithValues,
+        }
+    }
+}
+#[derive(Clone)]
 pub(crate) enum RecordsParam {
     /// Move a cursor onto the next record the iteration selects.
     Cursor(IterationParam),
-    /// Project the records into an `IDBRecord` array.
+    /// Project the records the way `kind` names.
     GetAll {
+        kind: GetAllKind,
         direction: IDBCursorDirection,
         count: Option<u32>,
     },
 }
 
-impl RecordsParam {
-    /// Splits a `getAllRecords` options dictionary into what the DOM applies after the read and
-    /// what the backend may apply during it.
+/// A resolved `getAll`, `getAllKeys` or `getAllRecords` request.
+///
+/// <https://w3c.github.io/IndexedDB/#create-request-to-retrieve-multiple-items>
+pub(crate) struct GetAllRequest {
+    /// The range the backend reads.
+    pub(crate) key_range: IndexedDBKeyRange,
+    /// The count the backend may apply during the read, which is not always the count the
+    /// request asked for.
+    pub(crate) count: Option<u32>,
+    /// The projection the DOM applies to the answer.
+    pub(crate) records_param: RecordsParam,
+}
+
+impl GetAllRequest {
+    /// Splits a resolved request into what the DOM applies after the read and what the backend
+    /// may apply during it.
     ///
     /// A count of zero is not a limit. The spec reads it as infinity, and a `LIMIT 0` would
     /// answer with nothing at all. Of the counts that do limit, only `next` may be pushed down:
     /// the backend answers in ascending key order with no duplicate filtering, so for every
     /// other direction a count applied during the read would already have truncated the wrong
     /// end of the range, or dropped records that the unique filter was going to remove anyway.
-    pub(crate) fn get_all(options: &IDBGetAllOptions) -> (Self, Option<u32>) {
-        let count = options.count.filter(|count| *count > 0);
-        let backend_count = match options.direction {
+    fn new(
+        kind: GetAllKind,
+        key_range: IndexedDBKeyRange,
+        direction: IDBCursorDirection,
+        count: Option<u32>,
+    ) -> Self {
+        let count = count.filter(|count| *count > 0);
+        let backend_count = match direction {
             IDBCursorDirection::Next => count,
             _ => None,
         };
-        (
-            RecordsParam::GetAll {
-                direction: options.direction,
+        Self {
+            key_range,
+            count: backend_count,
+            records_param: RecordsParam::GetAll {
+                kind,
+                direction,
                 count,
             },
-            backend_count,
-        )
+        }
+    }
+
+    /// `getAllRecords(options)`, whose single argument needs no disambiguation.
+    pub(crate) fn from_options(
+        cx: &mut JSContext,
+        kind: GetAllKind,
+        options: &IDBGetAllOptions,
+    ) -> Fallible<Self> {
+        let key_range = convert_value_to_key_range(cx, options.query.handle(), None)?;
+        Ok(Self::new(kind, key_range, options.direction, options.count))
+    }
+
+    /// `getAll(queryOrOptions, count)` and `getAllKeys(queryOrOptions, count)`, whose first
+    /// argument is either a query or an `IDBGetAllOptions`.
+    pub(crate) fn resolve(
+        cx: &mut JSContext,
+        kind: GetAllKind,
+        query_or_options: HandleValue,
+        count: Option<u32>,
+    ) -> Fallible<Self> {
+        // Step 8. If running is a potentially valid key range with queryOrOptions is true, the
+        // argument is the query and the direction is "next".
+        if is_potentially_valid_key_range(cx, query_or_options)? {
+            let key_range = convert_value_to_key_range(cx, query_or_options, None)?;
+            return Ok(Self::new(kind, key_range, IDBCursorDirection::Next, count));
+        }
+
+        // Step 9. Otherwise the argument is an IDBGetAllOptions, and the dictionary replaces
+        // the positional count whether or not it carries one of its own.
+        let options = match IDBGetAllOptions::new(cx, query_or_options) {
+            Ok(JsConversionResult::Success(options)) => options,
+            Ok(JsConversionResult::Failure(error)) => {
+                return Err(Error::Type(error.into_owned()));
+            },
+            Err(()) => return Err(Error::JSFailed),
+        };
+        Self::from_options(cx, kind, &options)
     }
 }
-
 /// Applies the direction and count that `getAllRecords` resolves after the read.
 ///
 /// The backend answers in ascending index key order and then ascending primary key order, for
