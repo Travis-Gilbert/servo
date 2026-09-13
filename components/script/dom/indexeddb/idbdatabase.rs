@@ -353,15 +353,18 @@ impl IDBDatabaseMethods<crate::DomTypeHolder> for IDBDatabase {
             auto_increment,
         };
 
-        self.get_idb_thread()
-            .send(IndexedDBThreadMsg::AsyncSchemaOperation {
+        if transaction
+            .send_or_hold(IndexedDBThreadMsg::AsyncSchemaOperation {
                 origin: self.global().origin().immutable().clone(),
                 database_name: self.name.to_string(),
                 store_name: name.to_string(),
                 operation,
                 transaction_serial_number: transaction.get_serial_number(),
             })
-            .unwrap();
+            .is_err()
+        {
+            warn!("Could not send AsyncSchemaOperation");
+        }
 
         self.object_store_names.borrow_mut().push(name);
         transaction.register_object_store_handle(&object_store.get_name(), &object_store);
@@ -404,9 +407,8 @@ impl IDBDatabaseMethods<crate::DomTypeHolder> for IDBDatabase {
         let operation = AsyncSchemaOperation::DeleteObjectStore {
             callback: transaction.create_abort_callback(),
         };
-        if self
-            .get_idb_thread()
-            .send(IndexedDBThreadMsg::AsyncSchemaOperation {
+        if transaction
+            .send_or_hold(IndexedDBThreadMsg::AsyncSchemaOperation {
                 origin: self.global().origin().immutable().clone(),
                 database_name: self.name.to_string(),
                 store_name: name.to_string(),
