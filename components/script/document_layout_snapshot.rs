@@ -31,7 +31,7 @@ use crate::dom::element::Element;
 use crate::dom::html::htmlcanvaselement::HTMLCanvasElement;
 use crate::dom::html::htmlselectelement::HTMLSelectElement;
 use crate::dom::html::htmltextareaelement::HTMLTextAreaElement;
-use crate::dom::html::input_element::HTMLInputElement;
+use crate::dom::html::form_controls::htmlinputelement::HTMLInputElement;
 use crate::dom::node::Node;
 use crate::dom::node::iterators::ShadowIncluding;
 use crate::dom::window::Window;
@@ -138,8 +138,8 @@ fn canvas_fallback_by_node(
             while let Some(candidate) = ancestor {
                 if candidate.is::<HTMLCanvasElement>() {
                     return Some((
-                        node.to_untrusted_node_address(),
-                        candidate.upcast::<Node>().to_untrusted_node_address(),
+                        UntrustedNodeAddress::from(node.to_opaque()),
+                        UntrustedNodeAddress::from(candidate.upcast::<Node>().to_opaque()),
                     ));
                 }
                 ancestor = candidate.upcast::<Node>().GetParentElement();
@@ -156,8 +156,9 @@ fn build_node(
     canvas_fallback_by_node: &FxHashMap<UntrustedNodeAddress, UntrustedNodeAddress>,
 ) -> DocumentLayoutSnapshotNode {
     let node = element.upcast::<Node>();
-    let layout = layout_by_node.get(&node.to_untrusted_node_address());
-    let canvas_fallback = canvas_fallback_by_node.get(&node.to_untrusted_node_address());
+    let node_address = UntrustedNodeAddress::from(node.to_opaque());
+    let layout = layout_by_node.get(&node_address);
+    let canvas_fallback = canvas_fallback_by_node.get(&node_address);
     // Fallback content has no fragments of its own; carry the enclosing canvas's
     // layout record so its bounds are the canvas element's own.
     let canvas_layout = canvas_fallback.and_then(|canvas| layout_by_node.get(canvas));
