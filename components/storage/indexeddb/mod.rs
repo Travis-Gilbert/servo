@@ -25,7 +25,8 @@ use servo_base::threadpool::ThreadPool;
 use servo_url::origin::ImmutableOrigin;
 use storage_traits::client_storage::StorageProxyMap;
 use storage_traits::indexeddb::{
-    AsyncOperation, BackendError, BackendResult, ConnectionMsg, CreateObjectResult, DatabaseInfo,
+    AsyncOperation, AsyncSchemaOperation, BackendError, BackendResult, ConnectionMsg,
+    CreateObjectResult, DatabaseInfo,
     DbResult, DeleteDatabaseMsg, IndexedDBDescription, IndexedDBIndex, IndexedDBObjectStore,
     IndexedDBThreadMsg, IndexedDBTxnMode, IndexedDbEngineFactory, KeyPath, KvsEngine, KvsOperation,
     KvsOperationContext, KvsTransaction, SyncOperation, TxnCompleteMsg,
@@ -677,6 +678,18 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
             .map_err(|err| format!("{err:?}"))
     }
 
+    fn rename_object_store(&self, store_name: &str, new_name: &str) -> DbResult<()> {
+        self.engine
+            .rename_store(store_name, new_name)
+            .map_err(|err| format!("{err:?}"))
+    }
+
+    fn rename_index(&self, store_name: &str, index_name: &str, new_name: &str) -> DbResult<()> {
+        self.engine
+            .rename_index(store_name, index_name, new_name)
+            .map_err(|err| format!("{err:?}"))
+    }
+
     fn create_object_store(
         &mut self,
         store_name: &str,
@@ -1044,12 +1057,34 @@ impl OpenRequest {
     }
 }
 
+/// A schema rename applied during an upgrade transaction.
+///
+/// The revert in `restore_object_stores` matches stores and indexes by name, so a rename
+/// reads there as "one thing gone, another appeared" and it would delete the renamed
+/// store and recreate it empty. Replaying these in reverse before that comparison runs
+/// puts the names back first, so the comparison sees nothing changed and the records stay
+/// where they are.
+#[derive(Clone, MallocSizeOf)]
+enum SchemaRename {
+    ObjectStore {
+        from: String,
+        to: String,
+    },
+    Index {
+        store: String,
+        from: String,
+        to: String,
+    },
+}
+
 #[derive(Clone, MallocSizeOf)]
 struct VersionUpgrade {
     old: u64,
     new: u64,
     transaction: u64,
     object_stores: Vec<IndexedDBObjectStore>,
+    /// Renames applied by this upgrade transaction, in the order they were applied.
+    schema_renames: Vec<SchemaRename>,
 }
 
 /// <https://w3c.github.io/IndexedDB/#connection>
@@ -1194,6 +1229,13 @@ impl IndexedDBManager {
                     operation,
                     transaction_serial_number,
                 } => {
+                    self.record_schema_rename(
+                        &origin,
+                        &database_name,
+                        &store_name,
+                        &operation,
+                        transaction_serial_number,
+                    );
                     if let Some(database) =
                         self.get_database_mut(origin.clone(), database_name.clone())
                     {
@@ -1466,6 +1508,81 @@ impl IndexedDBManager {
     /// already `old`, and restoring object stores that already match are all no-ops.
     /// A caller whose revert failed therefore still holds everything a second attempt
     /// needs, and a partially applied revert converges when it is re-run.
+    /// Append a rename to the pending upgrade's log so an abort can undo it.
+    ///
+    /// A rename that reaches here without a matching pending upgrade cannot be reverted,
+    /// but it also cannot be aborted: `IDBObjectStore.name` and `IDBIndex.name` refuse
+    /// outside an upgrade transaction, so there is nothing to record.
+    fn record_schema_rename(
+        &mut self,
+        origin: &ImmutableOrigin,
+        database_name: &str,
+        store_name: &str,
+        operation: &AsyncSchemaOperation,
+        transaction_serial_number: u64,
+    ) {
+        let rename = match operation {
+            AsyncSchemaOperation::RenameObjectStore { new_name, .. } => {
+                SchemaRename::ObjectStore {
+                    from: store_name.to_owned(),
+                    to: new_name.clone(),
+                }
+            },
+            AsyncSchemaOperation::RenameIndex {
+                index_name,
+                new_name,
+                ..
+            } => SchemaRename::Index {
+                store: store_name.to_owned(),
+                from: index_name.clone(),
+                to: new_name.clone(),
+            },
+            _ => return,
+        };
+
+        let key = IndexedDBDescription {
+            origin: origin.clone(),
+            name: database_name.to_owned(),
+        };
+        let Some(queue) = self.connection_queues.get_mut(&key) else {
+            return;
+        };
+        let Some(OpenRequest::Open {
+            pending_upgrade: Some(pending_upgrade),
+            ..
+        }) = queue.front_mut()
+        else {
+            return;
+        };
+        if pending_upgrade.transaction != transaction_serial_number {
+            return;
+        }
+        pending_upgrade.schema_renames.push(rename);
+    }
+
+    /// Undo the upgrade's renames, newest first, so the name comparison in
+    /// `restore_object_stores` sees the schema it expects.
+    fn revert_schema_renames(&mut self, key: &IndexedDBDescription, upgrade: &VersionUpgrade) {
+        let Some(db) = self.databases.get_mut(key) else {
+            return;
+        };
+        for rename in upgrade.schema_renames.iter().rev() {
+            let result = match rename {
+                SchemaRename::ObjectStore { from, to } => db.rename_object_store(to, from),
+                SchemaRename::Index { store, from, to } => db.rename_index(store, to, from),
+            };
+            if let Err(error) = result {
+                // The name comparison below will fall back to deleting and recreating,
+                // which loses this store's records. Say which rename failed rather than
+                // letting the loss look like a correct revert.
+                error!(
+                    "Failed to undo a rename while reverting the aborted upgrade of {:?}: {error}",
+                    key.name
+                );
+            }
+        }
+    }
+
     fn revert_aborted_upgrade(
         &mut self,
         key: &IndexedDBDescription,
@@ -1495,6 +1612,10 @@ impl IndexedDBManager {
             return response
                 .map_err(|error| format!("Failed to delete database {:?}: {error:?}", key.name));
         }
+
+        // Renames first: `restore_object_stores` compares name sets, so a store still
+        // carrying its new name reads there as a store to delete and a store to create.
+        self.revert_schema_renames(key, upgrade);
 
         let Some(db) = self.databases.get_mut(key) else {
             debug_assert!(false, "Db should have been created");
@@ -1754,6 +1875,7 @@ impl IndexedDBManager {
                 new: new_version,
                 transaction,
                 object_stores,
+                schema_renames: Vec::new(),
             });
             db.set_version(new_version)?;
             Ok(old_version)

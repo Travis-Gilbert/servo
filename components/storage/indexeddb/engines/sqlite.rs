@@ -1213,6 +1213,21 @@ impl KvsEngine for SqliteEngine {
             .map_err(backend_error_from_sqlite_error)
     }
 
+    fn rename_store(&self, store_name: &str, new_name: &str) -> BackendResult<()> {
+        Self::rename_store(&self.connection, store_name, new_name)
+            .map_err(backend_error_from_sqlite_error)
+    }
+
+    fn rename_index(
+        &self,
+        store_name: &str,
+        index_name: &str,
+        new_name: &str,
+    ) -> BackendResult<()> {
+        Self::rename_index(&self.connection, store_name, index_name, new_name)
+            .map_err(backend_error_from_sqlite_error)
+    }
+
     fn version(&self) -> BackendResult<u64> {
         self.connection
             .query_row("SELECT version FROM database LIMIT 1", [], |row| row.get(0))

@@ -41,6 +41,13 @@ pub(crate) struct IDBIndex {
     multi_entry: bool,
     unique: bool,
     key_path: KeyPath,
+    /// <https://w3c.github.io/IndexedDB/#abort-an-upgrade-transaction>
+    /// An index created during the upgrade transaction leaves the store's index set when
+    /// the transaction aborts. One that existed before it gets its name back instead.
+    newly_created_during_transaction: bool,
+    /// The name this index carried when the upgrade transaction began, recorded on the
+    /// first rename so the abort has something to restore.
+    rollback_name: DomRefCell<Option<DOMString>>,
 }
 
 impl IDBIndex {
@@ -50,6 +57,7 @@ impl IDBIndex {
         multi_entry: bool,
         unique: bool,
         key_path: KeyPath,
+        newly_created_during_transaction: bool,
     ) -> IDBIndex {
         IDBIndex {
             reflector_: Reflector::new(),
@@ -58,9 +66,29 @@ impl IDBIndex {
             multi_entry,
             unique,
             key_path,
+            newly_created_during_transaction,
+            rollback_name: DomRefCell::new(None),
         }
     }
 
+    /// Whether an aborting upgrade transaction should drop this handle rather than
+    /// restore it.
+    pub(crate) fn was_newly_created_during_transaction(&self) -> bool {
+        self.newly_created_during_transaction
+    }
+
+    /// <https://w3c.github.io/IndexedDB/#abort-an-upgrade-transaction>
+    /// Step 6: if the index was not newly created during the transaction, set the
+    /// handle's name back to the index's name. Returns the name the handle now carries,
+    /// which is the key the store's index set has to file it under.
+    pub(crate) fn restore_name_after_abort(&self) -> DOMString {
+        if let Some(name) = self.rollback_name.borrow_mut().take() {
+            *self.name.borrow_mut() = name;
+        }
+        self.name.borrow().clone()
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cx: &mut JSContext,
         global: &GlobalScope,
@@ -69,6 +97,7 @@ impl IDBIndex {
         multi_entry: bool,
         unique: bool,
         key_path: KeyPath,
+        newly_created_during_transaction: bool,
     ) -> DomRoot<IDBIndex> {
         reflect_dom_object_with_cx(
             Box::new(IDBIndex::new_inherited(
@@ -77,6 +106,7 @@ impl IDBIndex {
                 multi_entry,
                 unique,
                 key_path,
+                newly_created_during_transaction,
             )),
             global,
             cx,
@@ -277,6 +307,14 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
         }
 
         // Step 9: Set index’s name to name.
+        // An aborting upgrade transaction has to put the first name back, not the name of
+        // whatever rename happened to be last.
+        {
+            let mut rollback_name = self.rollback_name.borrow_mut();
+            if rollback_name.is_none() {
+                *rollback_name = Some(stored_name.clone());
+            }
+        }
         self.object_store.rename_index(&stored_name, &name);
 
         // Step 10: Set this’s name to name.

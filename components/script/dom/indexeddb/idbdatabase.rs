@@ -395,14 +395,18 @@ impl IDBDatabaseMethods<crate::DomTypeHolder> for IDBDatabase {
             .borrow_mut()
             .retain(|store_name| *store_name != name);
 
-        // Step 6
-        // FIXME:(arihant2math) Remove from index set ...
+        // Step 6. If there is an object store handle associated with store and
+        // transaction, remove all entries from its index set.
+        if let Some(store) = transaction.object_store_handle(&name) {
+            store.clear_index_set();
+        }
 
         // Step 7
         let operation = AsyncSchemaOperation::DeleteObjectStore {
             callback: transaction.create_abort_callback(),
         };
-        self.get_idb_thread()
+        if self
+            .get_idb_thread()
             .send(IndexedDBThreadMsg::AsyncSchemaOperation {
                 origin: self.global().origin().immutable().clone(),
                 database_name: self.name.to_string(),
@@ -410,7 +414,10 @@ impl IDBDatabaseMethods<crate::DomTypeHolder> for IDBDatabase {
                 operation,
                 transaction_serial_number: transaction.get_serial_number(),
             })
-            .unwrap();
+            .is_err()
+        {
+            warn!("Could not send AsyncSchemaOperation");
+        }
 
         Ok(())
     }

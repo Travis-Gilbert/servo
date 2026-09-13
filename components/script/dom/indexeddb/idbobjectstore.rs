@@ -211,16 +211,44 @@ impl IDBObjectStore {
 
         // Step 5.2. Set handle’s index set to the set of indexes that reference
         // its object store.
+        // Step 6. For each index handle handle associated with transaction, if handle’s
+        // index was not newly created during transaction, set handle’s name to its
+        // index’s name.
+        //
+        // The handles script is already holding have to be the ones that come back, so a
+        // surviving index keeps its `IDBIndex` object and only gets its name restored. An
+        // index created during the transaction leaves the set, and one deleted during it
+        // has no handle left, so it is rebuilt from the metadata the store started with.
+        let handles = self
+            .index_set
+            .borrow()
+            .values()
+            .map(|index| index.as_rooted())
+            .collect::<Vec<_>>();
         self.index_set.borrow_mut().clear();
+        for handle in handles {
+            if handle.was_newly_created_during_transaction() {
+                continue;
+            }
+            let name = handle.restore_name_after_abort();
+            self.index_set
+                .borrow_mut()
+                .insert(name, Dom::from_ref(&*handle));
+        }
         for index in abort_state.rollback_indexes {
+            let name: DOMString = index.name.clone().into();
+            if self.index_set.borrow().contains_key(&name) {
+                continue;
+            }
             self.add_index(
                 cx,
-                index.name.clone().into(),
+                name,
                 &IDBIndexParameters {
                     multiEntry: index.multi_entry,
                     unique: index.unique,
                 },
                 index.key_path.clone().into(),
+                false,
             );
         }
 
@@ -307,11 +335,9 @@ impl IDBObjectStore {
         };
 
         // Step 2. Let value be the value of key.
-        let mut value = *number;
         // Step 3. Set value to the minimum of value and 2^53 (9007199254740992).
-        value = value.min(9_007_199_254_740_992.0);
         // Step 4. Set value to the largest integer not greater than value.
-        value = value.floor();
+        let value = number.min(9_007_199_254_740_992.0).floor();
         // Step 5. Let generator be store's key generator.
         let current_number = self.key_generator_current_number.get()?;
         // Step 6. If value is greater than or equal to generator's current number,
@@ -320,11 +346,13 @@ impl IDBObjectStore {
             return None;
         }
 
-        let next = value + 1.0;
-        if next > i64::MAX as f64 {
-            return Some(i64::MAX);
-        }
-        Some(next as i64)
+        // The clamp above leaves value at 2^53 or below, and an f64 holds every integer
+        // up to 2^53 exactly, so the increment moves into integer space here. Adding 1
+        // in f64 would land on 2^53 + 1, which is not representable and rounds straight
+        // back down to 2^53. A generator an explicit key had maxed out therefore came
+        // back one short of the value that makes the next `generate a key` fail, and it
+        // kept handing out 2^53 instead.
+        Some(value as i64 + 1)
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#object-store-in-line-keys>
@@ -745,6 +773,7 @@ impl IDBObjectStore {
         name: DOMString,
         options: &IDBIndexParameters,
         key_path: KeyPath,
+        newly_created_during_transaction: bool,
     ) -> DomRoot<IDBIndex> {
         let index = IDBIndex::new(
             cx,
@@ -754,11 +783,19 @@ impl IDBObjectStore {
             options.multiEntry,
             options.unique,
             key_path,
+            newly_created_during_transaction,
         );
         self.index_set
             .borrow_mut()
             .insert(name, Dom::from_ref(&index));
         index
+    }
+
+    /// <https://w3c.github.io/IndexedDB/#dom-idbdatabase-deleteobjectstore>
+    /// Step 6: remove every entry from the handle's index set. An aborted upgrade puts
+    /// them back through `restore_metadata_after_abort`.
+    pub(crate) fn clear_index_set(&self) {
+        self.index_set.borrow_mut().clear();
     }
 
     pub(crate) fn has_index(&self, name: &DOMString) -> bool {
@@ -1266,7 +1303,7 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
         }
 
         // Step 12. Add index to this object store handle's index set.
-        let index = self.add_index(cx, name, options, key_path);
+        let index = self.add_index(cx, name, options, key_path, true);
 
         // Step 13. Return a new index handle associated with index and this object store handle.
         Ok(index)

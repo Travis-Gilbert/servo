@@ -235,8 +235,14 @@ impl IDBTransaction {
         self.committing.get()
     }
 
+    /// <https://w3c.github.io/IndexedDB/#transaction-lifetime>
+    /// Step 6: when a transaction is committed or aborted, its state is set to finished.
+    /// <https://w3c.github.io/IndexedDB/#abort-a-transaction> sets that state at step 6,
+    /// before the task that fires the `abort` event, so the state has to follow the
+    /// initiation rather than the task. `finalize_abort` and `finalize_commit` still read
+    /// the field, because they are what queues those tasks.
     pub(crate) fn is_finished(&self) -> bool {
-        self.finished.get()
+        self.finished.get() || self.abort_initiated.get()
     }
 
     pub(crate) fn set_cleanup_event_loop(&self) {
@@ -274,6 +280,15 @@ impl IDBTransaction {
         self.store_handles
             .borrow_mut()
             .insert(name.to_string(), Dom::from_ref(store));
+    }
+
+    /// The object store handle associated with `name` and this transaction, if script has
+    /// already asked for one.
+    pub(crate) fn object_store_handle(&self, name: &DOMString) -> Option<DomRoot<IDBObjectStore>> {
+        self.store_handles
+            .borrow()
+            .get(&name.to_string())
+            .map(|store| DomRoot::from_ref(&**store))
     }
 
     pub(crate) fn rename_object_store_handle_cache(
@@ -818,6 +833,7 @@ impl IDBTransactionMethods<crate::DomTypeHolder> for IDBTransaction {
                         unique: index.unique,
                     },
                     index.key_path.into(),
+                    false,
                 );
             }
         }
@@ -842,7 +858,10 @@ impl IDBTransactionMethods<crate::DomTypeHolder> for IDBTransaction {
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbtransaction-abort>
     fn Abort(&self, cx: &mut JSContext) -> Fallible<()> {
-        if self.finished.get() || self.committing.get() {
+        // Step 1. If this's state is committing or finished, throw an "InvalidStateError"
+        // DOMException. An abort that has been initiated already finished the state, so a
+        // second abort() throws rather than running the algorithm twice.
+        if self.finished.get() || self.abort_initiated.get() || self.committing.get() {
             return Err(Error::InvalidState(None));
         }
         self.active.set(false);
