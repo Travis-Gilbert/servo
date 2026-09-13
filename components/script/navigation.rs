@@ -156,6 +156,9 @@ pub(crate) struct InProgressLoad {
     /// The opener, if this is an auxiliary.
     #[no_trace]
     pub(crate) opener: Option<BrowsingContextId>,
+    /// The browsing context's target name, for a `WindowProxy` this script
+    /// thread has yet to create.
+    pub(crate) browsing_context_name: String,
     /// The current window size associated with this pipeline.
     #[no_trace]
     pub(crate) viewport_details: ViewportDetails,
@@ -200,6 +203,7 @@ impl InProgressLoad {
             webview_state,
             parent_info: new_pipeline_info.parent_info,
             opener: new_pipeline_info.opener,
+            browsing_context_name: new_pipeline_info.browsing_context_name,
             viewport_details: new_pipeline_info.viewport_details,
             activity: DocumentActivity::FullyActive,
             throttled: false,

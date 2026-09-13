@@ -752,6 +752,81 @@ impl ScriptThread {
         with_script_thread(|script_thread| script_thread.window_proxies.clone())
     }
 
+    /// Find the browsing context with the given target name that `source` is familiar
+    /// with. The constellation answers, so contexts owned by other script threads are
+    /// found as well; one of those is materialized as a dissimilar-origin window proxy.
+    /// The reply is awaited synchronously: the constellation answers from its own
+    /// state without contacting any script thread, so this cannot deadlock.
+    /// <https://html.spec.whatwg.org/multipage/#find-a-navigable-by-target-name>
+    pub(crate) fn find_window_proxy_by_name(
+        cx: &mut JSContext,
+        source: &WindowProxy,
+        global_to_clone: &GlobalScope,
+        name: &DOMString,
+    ) -> Option<DomRoot<WindowProxy>> {
+        with_script_thread(|script_thread| {
+            let (result_sender, result_receiver) = generic_channel::channel()?;
+            let msg = ScriptToConstellationMessage::FindBrowsingContextByName(
+                source.browsing_context_id(),
+                name.to_string(),
+                result_sender,
+            );
+            script_thread
+                .senders
+                .pipeline_to_constellation_sender
+                .send((source.webview_id(), global_to_clone.pipeline_id(), msg))
+                .ok()?;
+            let found = result_receiver.recv().ok()??;
+            if let Some(window_proxy) = script_thread
+                .window_proxies
+                .find_window_proxy(found.browsing_context_id)
+            {
+                return Some(window_proxy);
+            }
+            script_thread.window_proxies.remote_window_proxy(
+                cx,
+                &script_thread.senders,
+                global_to_clone,
+                found.webview_id,
+                found.pipeline_id,
+                None,
+            )
+        })
+    }
+
+    /// The worklet will use the given `ImageCache`.
+    pub(crate) fn worklet_thread_pool(image_cache: Arc<dyn ImageCache>) -> Rc<WorkletThreadPool> {
+        with_optional_script_thread(|script_thread| {
+            let script_thread = script_thread.unwrap();
+            script_thread
+                .worklet_thread_pool
+                .borrow_mut()
+                .get_or_insert_with(|| {
+                    let init = WorkletGlobalScopeInit {
+                        to_script_thread_sender: script_thread.senders.self_sender.clone(),
+                        resource_threads: script_thread.resource_threads.clone(),
+                        storage_threads: script_thread.storage_threads.clone(),
+                        mem_profiler_chan: script_thread.senders.memory_profiler_sender.clone(),
+                        time_profiler_chan: script_thread.senders.time_profiler_sender.clone(),
+                        devtools_chan: script_thread.senders.devtools_server_sender.clone(),
+                        script_to_constellation_sender: script_thread
+                            .senders
+                            .pipeline_to_constellation_sender
+                            .clone(),
+                        to_embedder_sender: script_thread
+                            .senders
+                            .pipeline_to_embedder_sender
+                            .clone(),
+                        image_cache,
+                        #[cfg(feature = "webgpu")]
+                        gpu_id_hub: script_thread.gpu_id_hub.clone(),
+                    };
+                    Rc::new(WorkletThreadPool::spawn(init))
+                })
+                .clone()
+        })
+    }
+
     fn handle_register_paint_worklet(
         &self,
         pipeline_id: PipelineId,
@@ -3094,6 +3169,7 @@ impl ScriptThread {
             // is no need to pass along existing opener information that
             // will be discarded.
             None,
+            DOMString::new(),
         );
     }
 
@@ -3703,6 +3779,7 @@ impl ScriptThread {
             parent_info,
             iframe,
             incomplete.opener,
+            DOMString::from(incomplete.browsing_context_name.clone()),
         );
         if let Some(name) = incomplete.frame_name {
             window_proxy.set_name(DOMString::from(name));
