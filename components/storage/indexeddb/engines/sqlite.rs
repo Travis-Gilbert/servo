@@ -2187,10 +2187,10 @@ mod tests {
             PutItemResult::Key(IndexedDBKeyType::Number(1.0))
         );
         let get_result = get_item_some.1.recv().unwrap();
-        let value = get_result.unwrap();
+        let value = get_result.unwrap().map(|record| record.value);
         assert_eq!(value, Some(vec![13, 14, 15]));
         let get_result = get_item_none.1.recv().unwrap();
-        let value = get_result.unwrap();
+        let value = get_result.unwrap().map(|record| record.value);
         assert_eq!(value, None);
         let all_items: Vec<Vec<u8>> = get_all_items
             .1
@@ -2403,7 +2403,7 @@ mod tests {
                     }),
                 }],
             );
-            rx.recv().unwrap().unwrap()
+            rx.recv().unwrap().unwrap().map(|record| record.value)
         };
 
         assert_eq!(read(1.0), Some(vec![1, 2, 3]), "an overwrite was undone");
