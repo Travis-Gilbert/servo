@@ -10,14 +10,15 @@ use js::context::JSContext;
 use js::conversions::{ToJSValConvertible, jsstr_to_string};
 use js::jsapi::{
     ClippedTime, IsArrayBufferObject, IsDetachedArrayBufferObject, JS_GetArrayBufferViewBuffer,
-    JS_GetStringLength, JS_IsArrayBufferViewObject, NewArrayObject1, PropertyKey,
+    JS_GetStringLength, JS_IsArrayBufferViewObject, JSPROP_ENUMERATE, NewArrayObject1, PropertyKey,
 };
 use js::jsval::{DoubleValue, ObjectValue, UndefinedValue};
 use js::rust::wrappers2::{
-    GetArrayLength, IsArrayObject, JS_HasOwnPropertyById, JS_IndexToId, JS_IsIdentifier,
-    JS_NewObject, NewDateObject, ObjectIsDate, SameValue,
+    GetArrayLength, IsArrayObject, JS_DefinePropertyById2, JS_GetPropertyById,
+    JS_HasOwnPropertyById, JS_IndexToId, JS_IsIdentifier, JS_NewObject, JS_StringToId,
+    NewDateObject, ObjectIsDate, SameValue,
 };
-use js::rust::{HandleValue, MutableHandleValue};
+use js::rust::{HandleId, HandleObject, HandleValue, MutableHandleId, MutableHandleValue};
 use js::typedarray::{ArrayBuffer, ArrayBufferView, CreateWith};
 use storage_traits::indexeddb::{BackendError, IndexedDBKeyRange, IndexedDBKeyType};
 
@@ -29,7 +30,7 @@ use crate::dom::bindings::conversions::{
 };
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::str::DOMString;
-use crate::dom::bindings::utils::{define_dictionary_property, has_own_property};
+use crate::dom::bindings::utils::define_dictionary_property;
 use crate::dom::blob::Blob;
 use crate::dom::file::File;
 use crate::dom::idbkeyrange::IDBKeyRange;
@@ -599,6 +600,73 @@ pub(crate) enum EvaluationResult {
     Failure,
 }
 
+/// The property key for one key path identifier.
+///
+/// The `const char*` JSAPI overloads read their bytes as Latin-1: `js::Atomize` in
+/// `js/src/vm/JSAtomUtils.cpp` casts the pointer straight to `Latin1Char`. Handing one a
+/// UTF-8 `CString` therefore names a different property whenever the identifier is not
+/// ASCII, so the key path `my.køi` asked `{my: {køi: 5}}` for `kÃ¸i`, found nothing, and
+/// every store or index with a non-ASCII key path answered `DataError` for every value it
+/// was given. A key path identifier is any ECMAScript `IdentifierName`, so the lookup goes
+/// through UTF-16 and the three operations below take the key rather than a byte string.
+#[expect(unsafe_code)]
+fn key_path_identifier_key(
+    cx: &mut JSContext,
+    identifier: &str,
+    id: MutableHandleId,
+) -> Result<(), Error> {
+    rooted!(&in(cx) let mut value = UndefinedValue());
+    identifier.safe_to_jsval(cx, value.handle_mut());
+    rooted!(&in(cx) let string = value.to_string());
+
+    if unsafe { !JS_StringToId(cx, string.handle(), id) } {
+        return Err(Error::JSFailed);
+    }
+    Ok(())
+}
+
+/// `HasOwnProperty(object, id)`.
+#[expect(unsafe_code)]
+fn has_own_property_by_id(
+    cx: &mut JSContext,
+    object: HandleObject,
+    id: HandleId,
+) -> Result<bool, Error> {
+    let mut found = false;
+    if unsafe { !JS_HasOwnPropertyById(cx, object, id, &mut found) } {
+        return Err(Error::JSFailed);
+    }
+    Ok(found)
+}
+
+/// `Get(object, id)`.
+#[expect(unsafe_code)]
+fn get_property_by_id(
+    cx: &mut JSContext,
+    object: HandleObject,
+    id: HandleId,
+    rval: MutableHandleValue,
+) -> Result<(), Error> {
+    if unsafe { !JS_GetPropertyById(cx, object, id, rval) } {
+        return Err(Error::JSFailed);
+    }
+    Ok(())
+}
+
+/// `CreateDataProperty(object, id, value)`, enumerable as the algorithm requires.
+#[expect(unsafe_code)]
+fn define_property_by_id(
+    cx: &mut JSContext,
+    object: HandleObject,
+    id: HandleId,
+    value: HandleValue,
+) -> Result<(), Error> {
+    if unsafe { !JS_DefinePropertyById2(cx, object, id, value, JSPROP_ENUMERATE as u32) } {
+        return Err(Error::JSFailed);
+    }
+    Ok(())
+}
+
 /// <https://www.w3.org/TR/IndexedDB-3/#evaluate-a-key-path-on-a-value>
 #[expect(unsafe_code)]
 pub(crate) fn evaluate_key_path_on_value(
@@ -762,12 +830,11 @@ pub(crate) fn evaluate_key_path_on_value(
                 }
 
                 rooted!(&in(cx) let object = current_value.to_object());
-                let identifier_name =
-                    CString::new(identifier).map_err(|_| Error::JSFailed)?;
+                rooted!(&in(cx) let mut id: PropertyKey);
+                key_path_identifier_key(cx, identifier, id.handle_mut())?;
 
                 // Let hop be ! HasOwnProperty(value, identifier).
-                let hop = has_own_property(cx, object.handle(), identifier_name.as_c_str())
-                    .map_err(|_| Error::JSFailed)?;
+                let hop = has_own_property_by_id(cx, object.handle(), id.handle())?;
 
                 // If hop is false, return failure.
                 if !hop {
@@ -775,12 +842,7 @@ pub(crate) fn evaluate_key_path_on_value(
                 }
 
                 // Let value be ! Get(value, identifier).
-                get_property_jsval(
-                    cx,
-                    object.handle(),
-                    identifier_name.as_c_str(),
-                    current_value.handle_mut(),
-                )?;
+                get_property_by_id(cx, object.handle(), id.handle(), current_value.handle_mut())?;
 
                 // If value is undefined, return failure.
                 if current_value.get().is_undefined() {
@@ -832,11 +894,11 @@ pub(crate) fn can_inject_key_into_value(
         }
 
         rooted!(&in(cx) let current_object = current_value.to_object());
-        let identifier_name = CString::new(identifier).map_err(|_| Error::JSFailed)?;
+        rooted!(&in(cx) let mut id: PropertyKey);
+        key_path_identifier_key(cx, identifier, id.handle_mut())?;
 
         // Step 3.2. Let hop be ? HasOwnProperty(value, identifier).
-        let hop = has_own_property(cx, current_object.handle(), identifier_name.as_c_str())
-            .map_err(|_| Error::JSFailed)?;
+        let hop = has_own_property_by_id(cx, current_object.handle(), id.handle())?;
 
         // Step 3.3. If hop is false, set value to a new Object created as if by the expression
         // ({}).
@@ -847,10 +909,10 @@ pub(crate) fn can_inject_key_into_value(
         }
 
         // Step 3.4. Set value to ? Get(value, identifier).
-        get_property_jsval(
+        get_property_by_id(
             cx,
             current_object.handle(),
-            identifier_name.as_c_str(),
+            id.handle(),
             current_value.handle_mut(),
         )?;
     }
@@ -889,11 +951,11 @@ pub(crate) fn inject_key_into_value(
         }
 
         rooted!(&in(cx) let current_object = current_value.to_object());
-        let identifier_name = CString::new(identifier).map_err(|_| Error::JSFailed)?;
+        rooted!(&in(cx) let mut id: PropertyKey);
+        key_path_identifier_key(cx, identifier, id.handle_mut())?;
 
         // Step 4.2 Let hop be ! HasOwnProperty(value, identifier).
-        let hop = has_own_property(cx, current_object.handle(), identifier_name.as_c_str())
-            .map_err(|_| Error::JSFailed)?;
+        let hop = has_own_property_by_id(cx, current_object.handle(), id.handle())?;
 
         // Step 4.3 If hop is false, then:
         if !hop {
@@ -903,22 +965,16 @@ pub(crate) fn inject_key_into_value(
             o.safe_to_jsval(cx, o_value.handle_mut());
 
             // Step 4.3.2 Let status be CreateDataProperty(value, identifier, o).
-            define_dictionary_property(
-                cx,
-                current_object.handle(),
-                identifier_name.as_c_str(),
-                o_value.handle(),
-            )
-            .map_err(|_| Error::JSFailed)?;
+            define_property_by_id(cx, current_object.handle(), id.handle(), o_value.handle())?;
 
             // Step 4.3.3 Assert: status is true.
         }
 
         // Step 4.3 Let value be ! Get(value, identifier).
-        get_property_jsval(
+        get_property_by_id(
             cx,
             current_object.handle(),
-            identifier_name.as_c_str(),
+            id.handle(),
             current_value.handle_mut(),
         )?;
 
@@ -937,16 +993,16 @@ pub(crate) fn inject_key_into_value(
         return Ok(false);
     }
     rooted!(&in(cx) let parent_object = current_value.to_object());
-    let last_name = CString::new(last).map_err(|_| Error::JSFailed)?;
+    rooted!(&in(cx) let mut last_id: PropertyKey);
+    key_path_identifier_key(cx, last, last_id.handle_mut())?;
 
     // Step 7. Let status be CreateDataProperty(value, last, keyValue).
-    define_dictionary_property(
+    define_property_by_id(
         cx,
         parent_object.handle(),
-        last_name.as_c_str(),
+        last_id.handle(),
         key_value.handle(),
-    )
-    .map_err(|_| Error::JSFailed)?;
+    )?;
 
     // Step 8. Assert: status is true.
     // The JS_DefineProperty success check above enforces this assertion.
