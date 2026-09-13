@@ -15,6 +15,7 @@ use net_traits::pub_domains::reg_suffix;
 use net_traits::request::{CredentialsMode, Referrer};
 use script_bindings::reflector::reflect_dom_object_with_proto;
 use servo_base::generic_channel;
+use servo_base::id::PipelineId;
 use servo_constellation_traits::{MessagePortImpl, WorkerScriptLoadOrigin};
 use servo_url::{Host, ImmutableOrigin, ServoUrl};
 use uuid::Uuid;
@@ -138,6 +139,17 @@ enum SharedWorkerRegistryState {
 struct SharedWorkerRegistryEntry {
     key: SharedWorkerKey,
     state: SharedWorkerRegistryState,
+    /// The pipelines of the documents that own the worker.
+    /// <https://html.spec.whatwg.org/multipage/#concept-WorkerGlobalScope-owner-set>
+    owners: Vec<PipelineId>,
+}
+
+impl SharedWorkerRegistryEntry {
+    fn add_owner(&mut self, owner: PipelineId) {
+        if !self.owners.contains(&owner) {
+            self.owners.push(owner);
+        }
+    }
 }
 
 // A `SharedWorkerGlobalScope` object has associated constructor origin (an origin), constructor URL (a URL record), and credentials (a credentials mode), and extended lifetime (a boolean).
@@ -150,7 +162,7 @@ struct SharedWorkerRegistration {
     worker_is_secure_context: bool,
     closing: Arc<AtomicBool>,
     sender: Sender<SharedWorkerScriptMsg>,
-    _control_sender: Sender<SharedWorkerControlMsg>,
+    control_sender: Sender<SharedWorkerControlMsg>,
 }
 
 // A user agent has an associated shared worker manager which is the result of starting a new parallel queue.
@@ -194,7 +206,7 @@ fn find_matching_shared_worker(
 
 /// <https://html.spec.whatwg.org/multipage/#dom-sharedworker>
 /// <https://html.spec.whatwg.org/multipage/#shared-worker-manager>
-fn find_or_claim_shared_worker(key: SharedWorkerKey) -> SharedWorkerClaimResult {
+fn find_or_claim_shared_worker(key: SharedWorkerKey, owner: PipelineId) -> SharedWorkerClaimResult {
     let (workers, ready) = &*SHARED_WORKERS;
     let mut workers = workers.lock().expect("SharedWorker registry poisoned");
 
@@ -204,10 +216,14 @@ fn find_or_claim_shared_worker(key: SharedWorkerKey) -> SharedWorkerClaimResult 
         workers.push(SharedWorkerRegistryEntry {
             key,
             state: SharedWorkerRegistryState::Creating { waiters: 0 },
+            owners: vec![owner],
         });
         return SharedWorkerClaimResult::Claimed;
     };
 
+    // Step 11.5.8. Append the relevant owner to add given outsideSettings to
+    // workerGlobalScope's owner set.
+    workers[index].add_owner(owner);
     match &mut workers[index].state {
         SharedWorkerRegistryState::Creating { waiters } => *waiters += 1,
         SharedWorkerRegistryState::Created(registration) => {
@@ -223,6 +239,7 @@ fn find_or_claim_shared_worker(key: SharedWorkerKey) -> SharedWorkerClaimResult 
             return SharedWorkerClaimResult::Failed;
         };
 
+        workers[index].add_owner(owner);
         match &mut workers[index].state {
             SharedWorkerRegistryState::Creating { .. } => {},
             SharedWorkerRegistryState::Created(registration) => {
@@ -314,6 +331,45 @@ fn send_connect_to_created_worker(
 }
 
 impl SharedWorker {
+    /// Remove the document of `pipeline_id` from every shared worker's owner set
+    /// and terminate the workers left without an owner: a worker whose owner set
+    /// is empty is not a permissible worker unless its lifetime is extended.
+    /// <https://html.spec.whatwg.org/multipage/#permissible-worker>
+    /// <https://html.spec.whatwg.org/multipage/#terminate-a-worker>
+    pub(crate) fn document_discarded(pipeline_id: PipelineId) {
+        let (workers, ready) = &*SHARED_WORKERS;
+        let mut workers = workers.lock().expect("SharedWorker registry poisoned");
+        let old_len = workers.len();
+        workers.retain_mut(|entry| {
+            entry.owners.retain(|owner| *owner != pipeline_id);
+            if !entry.owners.is_empty() {
+                return true;
+            }
+            match &entry.state {
+                SharedWorkerRegistryState::Created(registration)
+                    if !registration.extended_lifetime =>
+                {
+                    // Step 1. Set the worker's WorkerGlobalScope object's closing flag to true.
+                    registration.closing.store(true, Ordering::SeqCst);
+                    // Wake the worker's event loop so it observes the flag and tears
+                    // its global down, which releases what the global holds.
+                    if registration
+                        .control_sender
+                        .send(SharedWorkerControlMsg::Exit)
+                        .is_err()
+                    {
+                        warn!("Couldn't send an exit message to a shared worker.");
+                    }
+                    false
+                },
+                _ => true,
+            }
+        });
+        if workers.len() != old_len {
+            ready.notify_all();
+        }
+    }
+
     pub(crate) fn unregister_shared_worker(id: Uuid) {
         let (workers, ready) = &*SHARED_WORKERS;
         let mut workers = workers.lock().expect("SharedWorker registry poisoned");
@@ -482,7 +538,8 @@ impl SharedWorkerMethods<crate::DomTypeHolder> for SharedWorker {
         // Servo also atomically records a Creating entry here when no matching
         // scope exists, so another same-key constructor cannot race into the
         // Step 11.6 fresh-worker path.
-        let shared_worker = find_or_claim_shared_worker(shared_worker_key.clone());
+        let shared_worker =
+            find_or_claim_shared_worker(shared_worker_key.clone(), global.pipeline_id());
 
         match shared_worker {
             SharedWorkerClaimResult::Created(registration) => {
@@ -523,7 +580,7 @@ impl SharedWorkerMethods<crate::DomTypeHolder> for SharedWorker {
                 if send_connect_to_created_worker(&registration, inside_port_impl) {
                     SharedWorker::queue_simple_error(global, worker_addr);
                 }
-                // TODO Step 11.5.8. Append the relevant owner to add given outsideSettings to workerGlobalScope's owner set.
+                // Step 11.5.8 ran inside find_or_claim_shared_worker, under the registry lock.
                 return Ok(worker);
             },
             SharedWorkerClaimResult::Failed => {
@@ -649,7 +706,7 @@ impl SharedWorkerMethods<crate::DomTypeHolder> for SharedWorker {
             worker_is_secure_context,
             closing,
             sender,
-            _control_sender: control_sender,
+            control_sender,
         };
 
         if !transition_creating_to_created(&shared_worker_key, registration.clone()) {

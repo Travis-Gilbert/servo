@@ -328,6 +328,12 @@ impl WorkerMethods<crate::DomTypeHolder> for Worker {
         if let Some(cx) = self.context_for_interrupt.borrow().as_ref() {
             cx.request_interrupt_callback()
         }
+
+        // An idle worker is blocked in its event loop select and only observes the
+        // closing flag once a message arrives. Wake it so the loop exits and the
+        // global's teardown (which releases its web locks) runs now rather than at
+        // parent teardown.
+        let _ = self.sender.send(DedicatedWorkerScriptMsg::WakeUp);
     }
 
     // https://html.spec.whatwg.org/multipage/#handler-worker-onmessage

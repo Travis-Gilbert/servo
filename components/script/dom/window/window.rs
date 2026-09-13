@@ -179,6 +179,7 @@ use crate::dom::scrolling_box::{ScrollingBox, ScrollingBoxSource};
 use crate::dom::selection::Selection;
 use crate::dom::serviceworker::cachestorage::CacheStorage;
 use crate::dom::shadowroot::ShadowRoot;
+use crate::dom::sharedworker::SharedWorker;
 use crate::dom::storage::Storage;
 #[cfg(feature = "bluetooth")]
 use crate::dom::testrunner::TestRunner;
@@ -532,6 +533,7 @@ impl Window {
     pub(crate) fn clear_js_runtime_for_script_deallocation(&self) {
         self.as_global_scope()
             .remove_web_messaging_and_dedicated_workers_infra();
+        SharedWorker::document_discarded(self.pipeline_id());
         unsafe {
             *self.js_runtime.borrow_for_script_deallocation() = None;
             self.window_proxy.set(None);
@@ -2472,6 +2474,10 @@ impl Window {
     pub(crate) fn clear_js_runtime(&self) {
         self.as_global_scope()
             .remove_web_messaging_and_dedicated_workers_infra();
+
+        // This document is discarded: leave the owner set of every shared worker it
+        // created, terminating the ones left without an owner.
+        SharedWorker::document_discarded(self.pipeline_id());
 
         // Clean up any active promises
         // https://github.com/servo/servo/issues/15318
