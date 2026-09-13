@@ -256,8 +256,8 @@ impl RequestListener {
                                 return;
                             },
                         };
-                        if let Some(cursor) = cursor {
-                            match cursor.downcast::<IDBCursorWithValue>() {
+                        match cursor {
+                            Some(cursor) => match cursor.downcast::<IDBCursorWithValue>() {
                                 Some(cursor_with_value) => {
                                     answer.handle_mut().set(ObjectValue(
                                         *cursor_with_value.reflector().get_jsobject(),
@@ -268,9 +268,9 @@ impl RequestListener {
                                         .handle_mut()
                                         .set(ObjectValue(*cursor.reflector().get_jsobject()));
                                 },
-                            }
-                        } else {
-                            answer.handle_mut().set(NullValue());
+                            },
+                            // An exhausted cursor returns null rather than undefined.
+                            None => answer.handle_mut().set(NullValue()),
                         }
                     },
                     Some(RecordsParam::GetAll {
@@ -322,6 +322,7 @@ impl RequestListener {
                         }
                         array.to_jsval(cx, answer.handle_mut());
                     },
+
                     None => {
                         warn!("IndexedDB answered with records for a request that reads none");
                         Self::handle_async_request_error(

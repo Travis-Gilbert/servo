@@ -12,7 +12,7 @@ use script_bindings::reflector::reflect_dom_object_with_cx;
 use servo_base::generic_channel::GenericSend;
 use servo_url::origin::ImmutableOrigin;
 use storage_traits::client_storage::StorageProxyMap;
-use storage_traits::indexeddb::{BackendResult, IndexedDBThreadMsg, SyncOperation};
+use storage_traits::indexeddb::{DeleteDatabaseMsg, IndexedDBThreadMsg, SyncOperation};
 use stylo_atoms::Atom;
 use uuid::Uuid;
 
@@ -41,7 +41,21 @@ struct OpenRequestListener {
 impl OpenRequestListener {
     /// The continuation of the parallel steps of
     /// <https://www.w3.org/TR/IndexedDB/#dom-idbfactory-deletedatabase>
-    fn handle_delete_db(&self, cx: &mut JSContext, result: BackendResult<u64>) {
+    fn handle_delete_db(&self, cx: &mut JSContext, message: DeleteDatabaseMsg) {
+        let result = match message {
+            // <https://www.w3.org/TR/IndexedDB/#delete-a-database>
+            // Step 8: fire a version change event named blocked at request with db's
+            // version and null. The request is not done, so the delete continues.
+            DeleteDatabaseMsg::Blocked { old_version } => {
+                let open_request = self.open_request.root();
+                let mut realm = enter_auto_realm(cx, &*open_request);
+                let cx = &mut realm.current_realm();
+                open_request.dispatch_blocked(cx, old_version, None);
+                return;
+            },
+            DeleteDatabaseMsg::Done(result) => result,
+        };
+
         // Step 4.1: Let result be the result of deleting a database, with storageKey, name, and request.
         // Note: done with the `result` argument.
 
