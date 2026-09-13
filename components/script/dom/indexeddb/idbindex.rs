@@ -5,6 +5,8 @@ use dom_struct::dom_struct;
 use js::context::JSContext;
 use js::conversions::ToJSValConvertible;
 use js::gc::MutableHandleValue;
+use js::jsapi::Heap;
+use js::jsval::JSVal;
 use js::rust::HandleValue;
 use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericBindings::IDBIndexBinding::IDBIndexMethods;
@@ -48,6 +50,10 @@ pub(crate) struct IDBIndex {
     /// The name this index carried when the upgrade transaction began, recorded on the
     /// first rename so the abort has something to restore.
     rollback_name: DomRefCell<Option<DOMString>>,
+    /// `keyPath` converted to a value, kept so the attribute hands back the same object
+    /// every time it is read. An index's key path never changes, so this is written once.
+    #[ignore_malloc_size_of = "mozjs"]
+    cached_key_path: DomRefCell<Option<Heap<JSVal>>>,
 }
 
 impl IDBIndex {
@@ -68,6 +74,7 @@ impl IDBIndex {
             key_path,
             newly_created_during_transaction,
             rollback_name: DomRefCell::new(None),
+            cached_key_path: DomRefCell::new(None),
         }
     }
 
@@ -338,14 +345,32 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
     }
 
     /// <https://www.w3.org/TR/IndexedDB/#dom-idbindex-keypath>
-    fn KeyPath(&self, cx: &mut JSContext, retval: MutableHandleValue) {
+    fn KeyPath(&self, cx: &mut JSContext, mut retval: MutableHandleValue) {
+        // A sequence key path converts to a fresh Array on every call, so converting on
+        // each read would hand script a different object each time it looked. The value is
+        // converted once and kept; `idbindex_keyPath.any.js` asserts both halves of that,
+        // that one index answers with the same object and that two index handles onto the
+        // same index answer with different ones.
+        if let Some(cached) = self.cached_key_path.borrow().as_ref() {
+            retval.set(cached.get());
+            return;
+        }
+
         match &self.key_path {
             KeyPath::String(string) => {
-                string.safe_to_jsval(cx, retval);
+                string.safe_to_jsval(cx, retval.reborrow());
             },
             KeyPath::StringSequence(sequence) => {
-                sequence.safe_to_jsval(cx, retval);
+                sequence.safe_to_jsval(cx, retval.reborrow());
             },
+        }
+
+        // The `Heap` is stored before it is set: `Heap::set` registers the slot's own
+        // address with the GC store buffer, so the value has to be written where it will
+        // live rather than moved in afterwards.
+        *self.cached_key_path.borrow_mut() = Some(Heap::default());
+        if let Some(cached) = self.cached_key_path.borrow().as_ref() {
+            cached.set(retval.get());
         }
     }
 
