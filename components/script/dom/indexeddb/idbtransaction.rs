@@ -107,10 +107,10 @@ pub struct IDBTransaction {
 pub(crate) enum HeldOutbound {
     /// A message waiting for the hold to lift.
     Message(IndexedDBThreadMsg),
-    /// A `createIndex` that ran while an earlier backfill was still in flight. Its read is
-    /// issued when the hold drains down to it, and everything behind it keeps waiting, because
-    /// the messages ahead of it may still change the records the read is going to see.
-    Backfill { store_name: String, index_name: String },
+    /// The end of a `createIndex` backfill's read. Draining stops here: the read ahead of it
+    /// has gone out, and everything behind it keeps waiting until that backfill's write is on
+    /// its way, because the write has to be ordered ahead of them.
+    Barrier,
 }
 
 impl IDBTransaction {
@@ -747,28 +747,25 @@ impl IDBTransaction {
         self.get_idb_thread().send(message).map_err(|_| ())
     }
 
-    /// Claim the outbound hold for a `createIndex` backfill of `index_name` on `store_name`.
+    /// Hold everything script places from here on, for a `createIndex` backfill whose read has
+    /// just been placed.
     ///
-    /// Returns whether the caller should issue the backfill read now. A false answer means an
-    /// earlier backfill is still running and this one is queued behind the messages script has
-    /// placed since, which may still change the records the read would see.
-    pub(crate) fn hold_outbound_for_backfill(&self, store_name: &str, index_name: &str) -> bool {
+    /// A second `createIndex` while an earlier backfill is still running leaves its read in the
+    /// queue and marks the queue behind it, so the drain stops there and that backfill takes
+    /// the hold in turn.
+    pub(crate) fn hold_outbound_after_backfill(&self) {
         if self.outbound_held.get() {
             self.held_outbound
                 .borrow_mut()
-                .push_back(HeldOutbound::Backfill {
-                    store_name: store_name.to_owned(),
-                    index_name: index_name.to_owned(),
-                });
-            return false;
+                .push_back(HeldOutbound::Barrier);
+            return;
         }
         self.outbound_held.set(true);
-        true
     }
 
     /// A backfill's write has been sent. Release the messages held behind it, stopping at the
-    /// next queued backfill and starting that one instead.
-    pub(crate) fn resume_after_backfill(&self, cx: &mut JSContext) {
+    /// next queued backfill's read.
+    pub(crate) fn resume_after_backfill(&self) {
         loop {
             let entry = self.held_outbound.borrow_mut().pop_front();
             match entry {
@@ -777,24 +774,8 @@ impl IDBTransaction {
                         warn!("Could not send a held IndexedDB message");
                     }
                 },
-                Some(HeldOutbound::Backfill {
-                    store_name,
-                    index_name,
-                }) => {
-                    // The hold stays claimed; this backfill owns it now.
-                    let store = self.object_store_handle(&DOMString::from(store_name));
-                    match store {
-                        Some(store) => {
-                            if let Err(error) = store.start_index_backfill(cx, &index_name) {
-                                warn!("Could not start a queued index backfill: {error:?}");
-                                continue;
-                            }
-                        },
-                        // The store handle is gone, so nothing can read the index either.
-                        None => continue,
-                    }
-                    return;
-                },
+                // The read just sent belongs to the next backfill, which owns the hold now.
+                Some(HeldOutbound::Barrier) => return,
                 None => {
                     self.outbound_held.set(false);
                     return;

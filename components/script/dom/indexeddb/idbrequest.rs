@@ -95,11 +95,27 @@ impl GetAllKind {
 /// backend was not told about.
 /// Whether a request may be held back by the transaction's outbound hold.
 #[derive(Clone, Copy)]
-enum OutboundHold {
+pub(crate) enum OutboundHold {
     /// The ordinary case: the hold, when it is set, takes this request.
     Respect,
     /// The request the hold is waiting for. Holding it would stall the transaction on itself.
     Bypass,
+}
+
+/// Whether the answer to a request is reported to script.
+#[derive(Clone, Copy, PartialEq)]
+enum RequestVisibility {
+    /// The ordinary case: the answer arrives as a `success` or an `error` event fired at the
+    /// request, and an unhandled error event's default action aborts the transaction.
+    Script,
+    /// A half of a `create index` backfill.
+    ///
+    /// <https://w3c.github.io/IndexedDB/#dom-idbobjectstore-createindex> processes index
+    /// creation as an asynchronous request inside the upgrade transaction but never hands
+    /// script a request for it, so no event is fired at either half. A failure runs
+    /// `abort a transaction` with the error directly, which is how a unique index over records
+    /// that already share a key takes the upgrade transaction down.
+    Internal,
 }
 
 #[derive(Clone)]
@@ -117,8 +133,13 @@ pub(crate) enum RecordsParam {
     ///
     /// This request is not script visible. `create index` needs the index's key path evaluated
     /// against every stored value, and only the script thread can do that, so the read comes
-    /// here and the keys go out again.
-    IndexBackfill { index_name: String },
+    /// here and the keys go out again. `store_name` is the name the backend knows the store by,
+    /// carried across the round trip because a rename placed after the `createIndex` is still
+    /// held behind it and so has not reached the backend yet.
+    IndexBackfill {
+        store_name: String,
+        index_name: String,
+    },
 }
 
 /// A resolved `getAll`, `getAllKeys` or `getAllRecords` request.
@@ -248,6 +269,7 @@ struct RequestListener {
     request: Trusted<IDBRequest>,
     records_param: Option<RecordsParam>,
     request_id: u64,
+    visibility: RequestVisibility,
 }
 
 pub enum IdbResult {
@@ -292,9 +314,14 @@ impl From<PutItemResult> for IdbResult {
         match value {
             PutItemResult::Key(key) => Self::Key(key),
             PutItemResult::CannotOverwrite => Self::Error(Error::Constraint(None)),
-            PutItemResult::IndexConstraintViolated(index_name) => Self::Error(Error::Constraint(
-                Some(format!("Unique index \"{index_name}\" already holds that key")),
-            )),
+            PutItemResult::IndexConstraintViolated(index_name) => {
+                Self::Error(Error::Constraint(Some(format!(
+                    "Unique index \"{index_name}\" already holds that key"
+                ))))
+            },
+            PutItemResult::KeyGeneratorExhausted => Self::Error(Error::Constraint(Some(
+                "The object store's key generator has reached its maximum value".into(),
+            ))),
         }
     }
 }
@@ -309,10 +336,10 @@ impl From<BackfillIndexResult> for IdbResult {
     fn from(value: BackfillIndexResult) -> Self {
         match value {
             BackfillIndexResult::Done => Self::None,
-            // <https://w3c.github.io/IndexedDB/#dom-idbobjectstore-createindex>: the request
-            // is not script visible, so nothing calls `preventDefault` on the error event it
-            // fires and the upgrade transaction aborts with this error, which is what the
-            // algorithm asks for when a unique index cannot hold the store's records.
+            // <https://w3c.github.io/IndexedDB/#dom-idbobjectstore-createindex>: a unique
+            // index that cannot hold the store's records aborts the upgrade transaction with
+            // this error. The request carrying it is not script visible, so the abort is run
+            // directly rather than as an error event's default action.
             BackfillIndexResult::UniqueConstraintViolated => Self::Error(Error::Constraint(Some(
                 "A unique index cannot be created over records that already share a key".into(),
             ))),
@@ -394,7 +421,7 @@ impl RequestListener {
                     // process dying.
                     if let Err(e) = key_type_to_jsval(cx, &key, answer.handle_mut()) {
                         warn!("Error converting an IndexedDB key to a value");
-                        Self::handle_async_request_error(&global, cx, request, e, self.request_id);
+                        self.handle_async_request_error(&global, cx, request, e);
                         return;
                     }
                 },
@@ -403,13 +430,7 @@ impl RequestListener {
                     for (i, key) in keys.into_iter().enumerate() {
                         if let Err(e) = key_type_to_jsval(cx, &key, array.handle_mut_at(i)) {
                             warn!("Error converting an IndexedDB key to a value");
-                            Self::handle_async_request_error(
-                                &global,
-                                cx,
-                                request,
-                                e,
-                                self.request_id,
-                            );
+                            self.handle_async_request_error(&global, cx, request, e);
                             return;
                         }
                     }
@@ -423,7 +444,7 @@ impl RequestListener {
                         });
                     if let Err(e) = result {
                         warn!("Error reading structuredclone data");
-                        Self::handle_async_request_error(&global, cx, request, e, self.request_id);
+                        self.handle_async_request_error(&global, cx, request, e);
                         return;
                     };
                 },
@@ -437,13 +458,7 @@ impl RequestListener {
                             });
                         if let Err(e) = result {
                             warn!("Error reading structuredclone data");
-                            Self::handle_async_request_error(
-                                &global,
-                                cx,
-                                request,
-                                e,
-                                self.request_id,
-                            );
+                            self.handle_async_request_error(&global, cx, request, e);
                             return;
                         };
                     }
@@ -458,13 +473,7 @@ impl RequestListener {
                             Ok(cursor) => cursor,
                             Err(e) => {
                                 warn!("Error reading structuredclone data");
-                                Self::handle_async_request_error(
-                                    &global,
-                                    cx,
-                                    request,
-                                    e,
-                                    self.request_id,
-                                );
+                                self.handle_async_request_error(&global, cx, request, e);
                                 return;
                             },
                         };
@@ -524,23 +533,21 @@ impl RequestListener {
                             };
                             if let Err(e) = element {
                                 warn!("Error building a getAll result");
-                                Self::handle_async_request_error(
-                                    &global,
-                                    cx,
-                                    request,
-                                    e,
-                                    self.request_id,
-                                );
+                                self.handle_async_request_error(&global, cx, request, e);
                                 return;
                             }
                         }
                         array.safe_to_jsval(cx, answer.handle_mut());
                     },
-                    Some(RecordsParam::IndexBackfill { index_name }) => {
-                        // A backfill request is not script visible, so there is no listener
-                        // below to open the activity window `fire a success event` step 6
-                        // opens. The continuation places the backfill write against the
-                        // transaction, so it opens that window here; step 8 below closes it.
+                    Some(RecordsParam::IndexBackfill {
+                        store_name,
+                        index_name,
+                    }) => {
+                        // A backfill request is not script visible, so no event is fired at it
+                        // and nothing below opens the activity window `fire a success event`
+                        // step 6 opens. The continuation places the backfill write against the
+                        // transaction, so it opens that window here; the internal tail closes
+                        // it again.
                         if transaction.is_inactive() {
                             transaction.set_active_flag(true);
                         }
@@ -553,43 +560,35 @@ impl RequestListener {
                         // aborts, and the messages the hold is carrying go with it.
                         let Some(store) = store else {
                             warn!("An index backfill answered a request with no object store");
-                            transaction.discard_held_outbound();
-                            Self::handle_async_request_error(
+                            self.handle_async_request_error(
                                 &global,
                                 cx,
                                 request,
                                 Error::InvalidState(None),
-                                self.request_id,
                             );
                             return;
                         };
-                        if let Err(e) = store.finish_index_backfill(cx, index_name, records) {
+                        if let Err(e) =
+                            store.finish_index_backfill(cx, store_name, index_name, records)
+                        {
                             warn!("Error populating a new index from the store's records");
-                            transaction.discard_held_outbound();
-                            Self::handle_async_request_error(
-                                &global,
-                                cx,
-                                request,
-                                e,
-                                self.request_id,
-                            );
+                            self.handle_async_request_error(&global, cx, request, e);
                             return;
                         }
                         // The write is on its way, so everything script placed behind it can
                         // follow, up to the next `createIndex` that queued itself here.
-                        transaction.resume_after_backfill(cx);
+                        transaction.resume_after_backfill();
                     },
                     // The pairing is asserted where the operation is sent, so reaching here
                     // means the backend answered with records for a request that reads none.
                     // The request rejects; it is not a reason to end the content process.
                     None => {
                         warn!("IndexedDB answered with records for a request that reads none");
-                        Self::handle_async_request_error(
+                        self.handle_async_request_error(
                             &global,
                             cx,
                             request,
                             Error::InvalidState(None),
-                            self.request_id,
                         );
                         return;
                     },
@@ -599,9 +598,23 @@ impl RequestListener {
                 },
                 IdbResult::Error(error) => {
                     // Substep 2
-                    Self::handle_async_request_error(&global, cx, request, error, self.request_id);
+                    self.handle_async_request_error(&global, cx, request, error);
                     return;
                 },
+            }
+
+            if self.visibility == RequestVisibility::Internal {
+                // <https://w3c.github.io/IndexedDB/#dom-idbobjectstore-createindex> keeps the
+                // backfill inside the upgrade transaction without exposing a request for it,
+                // so there is no result to set and no event to fire. The activity window the
+                // continuation above opened is closed here, the way step 8 of
+                // `fire a success event` would have closed it.
+                if transaction.is_active() {
+                    transaction.set_active_flag(false);
+                }
+                transaction.request_finished();
+                Self::send_request_handled(cx, &transaction, self.request_id);
+                return;
             }
 
             // Substep 3.1: Set the result of request to answer.
@@ -653,25 +666,20 @@ impl RequestListener {
         } else {
             // FIXME:(arihant2math) dispatch correct error
             // Substep 2
-            Self::handle_async_request_error(
-                &global,
-                cx,
-                request,
-                Error::Data(None),
-                self.request_id,
-            );
+            self.handle_async_request_error(&global, cx, request, Error::Data(None));
         }
     }
 
     // https://www.w3.org/TR/IndexedDB-3/#async-execute-request
     // Implements Step 5.4.2
     fn handle_async_request_error(
+        &self,
         global: &GlobalScope,
         cx: &mut JSContext,
         request: DomRoot<IDBRequest>,
         error: Error,
-        request_id: u64,
     ) {
+        let request_id = self.request_id;
         let transaction = request
             .transaction
             .get()
@@ -682,6 +690,22 @@ impl RequestListener {
 
         // Substep 2: Set the error of request to result.
         request.set_error(cx, Some(error.clone()));
+
+        if self.visibility == RequestVisibility::Internal {
+            // <https://w3c.github.io/IndexedDB/#dom-idbobjectstore-createindex>: creating an
+            // index can only fail after the method has returned, and the algorithm answers that
+            // by running `abort a transaction` with the error. Script holds no request for the
+            // backfill, so firing an error event here would instead surface the failure at the
+            // transaction and the connection, where the algorithm never puts it.
+            if transaction.is_active() {
+                transaction.set_active_flag(false);
+            }
+            transaction.initiate_abort(cx, error);
+            transaction.request_backend_abort();
+            transaction.request_finished();
+            Self::send_request_handled(cx, &transaction, request_id);
+            return;
+        }
 
         // https://w3c.github.io/IndexedDB/#fire-error-event
         // Step 1: Let event be the result of creating an event using Event.
@@ -859,12 +883,14 @@ impl IDBRequest {
         Self::execute_async_inner(
             cx,
             store,
+            String::from(store.get_name()),
             Some(source),
             context,
             operation_fn,
             request,
             records_param,
             OutboundHold::Respect,
+            RequestVisibility::Script,
         )
     }
 
@@ -892,23 +918,32 @@ impl IDBRequest {
         Self::execute_async_inner(
             cx,
             store,
+            String::from(store.get_name()),
             None,
             context,
             operation_fn,
             request,
             records_param,
             OutboundHold::Respect,
+            RequestVisibility::Script,
         )
     }
 
-    /// `asynchronously execute a request` for a request the transaction's outbound hold must
-    /// not delay.
+    /// `asynchronously execute a request` for one half of a `create index` backfill.
     ///
-    /// A `createIndex` backfill's read and write are the two requests the hold exists for.
-    /// Holding either of them would stall the transaction on itself.
-    pub(crate) fn execute_async_bypassing_hold<T, F>(
+    /// Neither half is script visible, so neither fires an event and a failure aborts the
+    /// upgrade transaction outright. `store_name` is the name the backend knows the store by,
+    /// which is the name it had when `createIndex` ran: a rename placed afterwards is still
+    /// waiting behind this round trip.
+    ///
+    /// The read takes its ordinary place in the outbound queue, because the records it has to
+    /// see are the ones every message ahead of it leaves behind. The write bypasses the hold,
+    /// because the hold is what the write is keeping the rest of the transaction waiting for.
+    pub(crate) fn execute_backfill_operation<T, F>(
         cx: &mut JSContext,
         store: &IDBObjectStore,
+        store_name: &str,
+        hold: OutboundHold,
         operation_fn: F,
         records_param: Option<RecordsParam>,
     ) -> Fallible<DomRoot<IDBRequest>>
@@ -919,25 +954,76 @@ impl IDBRequest {
         Self::execute_async_inner(
             cx,
             store,
+            store_name.to_owned(),
             None,
             KvsOperationContext::default(),
             operation_fn,
             None,
             records_param,
-            OutboundHold::Bypass,
+            hold,
+            RequestVisibility::Internal,
         )
+    }
+
+    /// `asynchronously execute a request` for an operation that has already failed.
+    ///
+    /// <https://w3c.github.io/IndexedDB/#asynchronously-execute-a-request> runs the operation in
+    /// parallel and reports its failure by firing an error event at the request, so an operation
+    /// that cannot even start still answers asynchronously rather than throwing out of the method
+    /// that created the request. `store a record into an object store` fails this way when the
+    /// store's key generator can no longer produce a key.
+    pub(crate) fn execute_async_failure(
+        cx: &mut JSContext,
+        store: &IDBObjectStore,
+        error: Error,
+    ) -> Fallible<DomRoot<IDBRequest>> {
+        // Step 1. Let transaction be the transaction associated with source.
+        let transaction = store.transaction();
+        let global = transaction.global();
+        // Step 2. Assert: transaction is active.
+        if !transaction.is_active() || !transaction.is_usable() {
+            return Err(Error::TransactionInactive(None));
+        }
+
+        let request_id = transaction.allocate_request_id();
+        // Step 3. Let request be a new request with source as source.
+        let request = IDBRequest::new(cx, &global);
+        request.set_source(RequestSource::ObjectStore(Dom::from_ref(store)));
+        request.set_transaction(&transaction);
+        // Step 4. Add request to the end of transaction's request list.
+        transaction.add_request(&request);
+
+        // Step 5. The answer is already known, so the returning task is queued here instead of
+        // by a backend reply. It still reports the request id as handled, which is what keeps
+        // the transaction's commit bookkeeping in step with the requests script placed.
+        let listener = RequestListener {
+            request: Trusted::new(&request),
+            records_param: None,
+            request_id,
+            visibility: RequestVisibility::Script,
+        };
+        global.task_manager().database_access_task_source().queue(
+            task!(idb_request_failed: move |cx| {
+                listener.handle_async_request_finished(cx, Ok(IdbResult::Error(error)));
+            }),
+        );
+
+        // Step 6. Return request.
+        Ok(request)
     }
 
     #[allow(clippy::too_many_arguments)]
     fn execute_async_inner<T, F>(
         cx: &mut JSContext,
         store: &IDBObjectStore,
+        store_name: String,
         source: Option<RequestSource>,
         context: KvsOperationContext,
         operation_fn: F,
         request: Option<DomRoot<IDBRequest>>,
         records_param: Option<RecordsParam>,
         hold: OutboundHold,
+        visibility: RequestVisibility,
     ) -> Fallible<DomRoot<IDBRequest>>
     where
         T: Into<IdbResult> + for<'a> Deserialize<'a> + Serialize + Send + Sync + 'static,
@@ -978,6 +1064,7 @@ impl IDBRequest {
             request: Trusted::new(&request),
             records_param: records_param.clone(),
             request_id,
+            visibility,
         };
 
         let task_source = global
@@ -1022,7 +1109,7 @@ impl IDBRequest {
         let message = IndexedDBThreadMsg::Async(
             global.origin().immutable().clone(),
             String::from(transaction.get_db_name()),
-            String::from(store.get_name()),
+            store_name,
             context,
             transaction.get_serial_number(),
             request_id,
@@ -1082,20 +1169,17 @@ impl IDBRequestMethods<crate::DomTypeHolder> for IDBRequest {
     fn GetSource(&self) -> Option<IDBObjectStoreOrIDBIndexOrIDBCursor> {
         // A cursor's reflector is the `IDBCursorWithValue` object when the cursor has one, so
         // rooting it as an `IDBCursor` still hands script back the object it already holds.
-        self.source
-            .borrow()
-            .as_ref()
-            .map(|source| match source {
-                RequestSource::ObjectStore(store) => {
-                    IDBObjectStoreOrIDBIndexOrIDBCursor::IDBObjectStore(store.as_rooted())
-                },
-                RequestSource::Index(index) => {
-                    IDBObjectStoreOrIDBIndexOrIDBCursor::IDBIndex(index.as_rooted())
-                },
-                RequestSource::Cursor(cursor) => {
-                    IDBObjectStoreOrIDBIndexOrIDBCursor::IDBCursor(cursor.as_rooted())
-                },
-            })
+        self.source.borrow().as_ref().map(|source| match source {
+            RequestSource::ObjectStore(store) => {
+                IDBObjectStoreOrIDBIndexOrIDBCursor::IDBObjectStore(store.as_rooted())
+            },
+            RequestSource::Index(index) => {
+                IDBObjectStoreOrIDBIndexOrIDBCursor::IDBIndex(index.as_rooted())
+            },
+            RequestSource::Cursor(cursor) => {
+                IDBObjectStoreOrIDBIndexOrIDBCursor::IDBCursor(cursor.as_rooted())
+            },
+        })
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbrequest-transaction>

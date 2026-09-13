@@ -928,6 +928,10 @@ impl KvsEngine for SqliteEngine {
                     }) => {
                         let (key, key_generator_current_number) = match key {
                             Some(key) => (key, key_generator_current_number),
+                            // <https://w3c.github.io/IndexedDB/#generate-a-key>. A store
+                            // that has no key generator holds 0 here; every generator starts at
+                            // 1 and only ever grows, so the one column carries both the flag and
+                            // the generator's current number.
                             None => {
                                 if object_store.auto_increment == 0 {
                                     if let Err(error) = callback.send(Err(BackendError::DbErr(
@@ -937,21 +941,21 @@ impl KvsEngine for SqliteEngine {
                                     }
                                     continue;
                                 }
-                                let Some(next_key_generator_current_number) =
-                                    object_store.auto_increment.checked_add(1)
-                                else {
-                                    if let Err(error) = callback.send(Err(BackendError::DbErr(
-                                        "Key generator overflow".to_string(),
-                                    ))) {
-                                        warn!(
-                                            "Failed to send PutItem key generator overflow error: {error:?}"
-                                        );
-                                    }
+                                // Step 3. If key is greater than 2^53 (9007199254740992), then
+                                // return failure. An explicit key is allowed to push the
+                                // generator one past that maximum, and this is what makes the
+                                // next generated key fail instead of repeating 2^53 forever.
+                                if object_store.auto_increment > 9_007_199_254_740_992 {
+                                    let _ =
+                                        callback.send(Ok(PutItemResult::KeyGeneratorExhausted));
                                     continue;
-                                };
+                                }
                                 (
                                     IndexedDBKeyType::Number(object_store.auto_increment as f64),
-                                    Some(next_key_generator_current_number),
+                                    // Step 4. Increase the generator's current number by 1. The
+                                    // check above leaves it at 2^53 or below, so this cannot
+                                    // overflow an i64.
+                                    Some(object_store.auto_increment + 1),
                                 )
                             },
                         };

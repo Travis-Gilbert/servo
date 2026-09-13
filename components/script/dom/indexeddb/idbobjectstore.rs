@@ -46,7 +46,7 @@ use crate::dom::indexeddb::idbcursor::{IDBCursor, IterationParam, ObjectStoreOrI
 use crate::dom::indexeddb::idbcursorwithvalue::IDBCursorWithValue;
 use crate::dom::indexeddb::idbindex::IDBIndex;
 use crate::dom::indexeddb::idbrequest::{
-    GetAllKind, GetAllRequest, IDBRequest, RecordsParam, RequestSource,
+    GetAllKind, GetAllRequest, IDBRequest, OutboundHold, RecordsParam, RequestSource,
 };
 use crate::dom::indexeddb::idbtransaction::IDBTransaction;
 use crate::indexeddb::{
@@ -401,12 +401,23 @@ impl IDBObjectStore {
     /// A new index has to hold a record for each of them, and the index key comes out of the
     /// JavaScript value the key path is evaluated against. Only the script thread holds that
     /// value, so the records make a round trip: out through this read, back through
-    /// [`Self::finish_index_backfill`] as index keys. The read bypasses the transaction's
-    /// outbound hold, because it is one of the two requests the hold is waiting for.
-    pub(crate) fn start_index_backfill(&self, cx: &mut JSContext, index_name: &str) -> Fallible<()> {
-        IDBRequest::execute_async_bypassing_hold::<Vec<IndexedDBRecord>, _>(
+    /// [`Self::finish_index_backfill`] as index keys.
+    ///
+    /// `store_name` is the name the backend knows the store by. It is passed in rather than
+    /// read from the handle, because the round trip outlives the call that started it and a
+    /// rename placed in the same upgrade transaction changes the handle's name while the
+    /// backend is still holding the old one.
+    pub(crate) fn start_index_backfill(
+        &self,
+        cx: &mut JSContext,
+        store_name: &str,
+        index_name: &str,
+    ) -> Fallible<()> {
+        IDBRequest::execute_backfill_operation::<Vec<IndexedDBRecord>, _>(
             cx,
             self,
+            store_name,
+            OutboundHold::Respect,
             |callback| {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
                     callback,
@@ -416,6 +427,7 @@ impl IDBObjectStore {
                 })
             },
             Some(RecordsParam::IndexBackfill {
+                store_name: store_name.to_owned(),
                 index_name: index_name.to_owned(),
             }),
         )?;
@@ -432,6 +444,7 @@ impl IDBObjectStore {
     pub(crate) fn finish_index_backfill(
         &self,
         cx: &mut JSContext,
+        store_name: &str,
         index_name: &str,
         records: Vec<IndexedDBRecord>,
     ) -> Fallible<()> {
@@ -476,9 +489,11 @@ impl IDBObjectStore {
             });
         }
 
-        IDBRequest::execute_async_bypassing_hold::<BackfillIndexResult, _>(
+        IDBRequest::execute_backfill_operation::<BackfillIndexResult, _>(
             cx,
             self,
+            store_name,
+            OutboundHold::Bypass,
             |callback| {
                 AsyncOperation::ReadWrite(AsyncReadWriteOperation::BackfillIndex {
                     callback,
@@ -719,7 +734,19 @@ impl IDBObjectStore {
 
                         // Prepares the generated key and injected clone here so Step 12 can
                         // pass the final key/value pair to the storage backend.
-                        let (generated_key, next_current_number) = self.generate_key_for_put()?;
+                        //
+                        // `generate a key` belongs to the operation, not to `put` itself, so an
+                        // exhausted generator rejects the request asynchronously. Throwing here
+                        // would take the whole upgrade transaction down instead of letting the
+                        // error handler the caller attached cancel the default abort.
+                        let (generated_key, next_current_number) = match self.generate_key_for_put()
+                        {
+                            Ok(generated) => generated,
+                            Err(error @ Error::Constraint(_)) => {
+                                return IDBRequest::execute_async_failure(cx, self, error);
+                            },
+                            Err(error) => return Err(error),
+                        };
                         if !inject_key_into_value(
                             cx,
                             cloned_js_value.handle(),
@@ -1399,18 +1426,20 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
 
         // Step 11's operation: the index has to hold a record for every record the store
         // already has, and the index keys come out of the stored JavaScript values, so the
-        // records make a round trip through the script thread. The transaction holds every
-        // request script places behind that round trip; without the hold a request placed in
-        // this same turn would reach the backend first and be ordered ahead of the index
-        // records, so the index would read as empty right after it was made.
+        // records make a round trip through the script thread. The read goes out here, in the
+        // place in the outbound queue this `createIndex` occupies, and the transaction then
+        // holds everything script places after it: without the hold a later request would
+        // reach the backend first and be ordered ahead of the index records, so the index
+        // would read as empty right after it was made.
+        //
+        // The store name is captured now rather than when the round trip finishes. It names
+        // the store the backend has, and a rename placed later in this same transaction is
+        // held behind the round trip, so the backend still knows the store by this name when
+        // the backfill's write lands.
         let store_name = self.name.borrow().to_string();
         let index_name = name.to_string();
-        if self
-            .transaction
-            .hold_outbound_for_backfill(&store_name, &index_name)
-        {
-            self.start_index_backfill(cx, &index_name)?;
-        }
+        self.start_index_backfill(cx, &store_name, &index_name)?;
+        self.transaction.hold_outbound_after_backfill();
 
         // Step 13. Return a new index handle associated with index and this object store handle.
         Ok(index)

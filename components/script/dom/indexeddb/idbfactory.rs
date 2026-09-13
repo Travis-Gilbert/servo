@@ -276,11 +276,21 @@ impl IDBFactory {
                 let connection = request.get_or_init_connection(
                     cx,
                     &self.global(),
-                    name,
+                    name.clone(),
                     version,
                     object_store_names,
                     upgraded,
                 );
+
+                // <https://w3c.github.io/IndexedDB/#open-a-database-connection> step 10.7. If
+                // connection was closed, return a newly created "AbortError" DOMException.
+                // `close()` called from inside `upgradeneeded` leaves the upgrade transaction
+                // to commit on its own, so the transaction fires `complete` first and the open
+                // request only then reports that the connection it would have returned is gone.
+                if connection.is_close_pending() {
+                    self.dispatch_error(cx, name, id, Error::Abort(None));
+                    return;
+                }
 
                 // Step 2.2: Otherwise,
                 // set request’s result to result,

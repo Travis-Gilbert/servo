@@ -177,6 +177,14 @@ impl IDBDatabase {
         );
     }
 
+    /// Whether this connection is <https://w3c.github.io/IndexedDB/#connection-closed>.
+    ///
+    /// A connection is closed once its close pending flag is set, so this is the question
+    /// `open a database connection` step 10.7 asks before handing the connection back.
+    pub(crate) fn is_close_pending(&self) -> bool {
+        self.close_pending.get()
+    }
+
     /// <https://w3c.github.io/IndexedDB/#close-a-database-connection>
     pub(crate) fn close_a_database_connection(&self, _forced: bool) {
         // Step 1: Set connection’s close pending flag to true.
