@@ -589,7 +589,16 @@ pub(crate) fn evaluate_key_path_on_value(
         // Step 1. If keyPath is a list of strings, then:
         KeyPath::StringSequence(key_path) => {
             // Step 1.1. Let result be a new Array object created as if by the expression [].
-            rooted!(&in(cx) let mut result = unsafe { JS_NewObject(cx, ptr::null()) });
+            // Note: it must be an Array and not a plain object. The caller runs `convert a
+            // value to a key` on this result, and a plain object is not a valid key, so a
+            // store or index with a sequence key path answered DataError for every value.
+            rooted!(&in(cx) let mut result = unsafe { NewArrayObject1(cx.raw_cx(), 0) });
+
+            // The allocator can fail where the algorithm asserts it cannot. Rejecting the
+            // request beats killing the content process.
+            if result.get().is_null() {
+                return Err(Error::JSFailed);
+            }
 
             // Step 1.2. Let i be 0.
             // Step 1.3. For each item in keyPath:

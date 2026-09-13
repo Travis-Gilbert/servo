@@ -283,11 +283,14 @@ impl IDBObjectStore {
             return Err(Error::Data(None));
         };
         // Step 2. Let key be generator's current number.
-        let key = current_number as f64;
         // Step 3. If key is greater than 2^53 (9007199254740992), then return failure.
-        if key > 9_007_199_254_740_992.0 {
+        // The comparison stays in integer space. 2^53 + 1 is not representable as an f64
+        // and rounds back down to 2^53, so a generator that an explicit key had already
+        // pushed past its maximum kept handing out 2^53 instead of failing.
+        if current_number > 9_007_199_254_740_992 {
             return Err(Error::Constraint(None));
         }
+        let key = current_number as f64;
         // Step 4. Increase generator's current number by 1.
         let next_current_number = current_number
             .checked_add(1)
@@ -1142,6 +1145,28 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
         }
 
         // Step 9. Set store’s name to name.
+        // The store also has to be renamed in the backend, which keys a store's rows and
+        // every later request against it by name. Without this the rename lived only on
+        // the handle, and the first request issued after the upgrade transaction
+        // committed failed against a store the backend still held under the old name.
+        let operation = AsyncSchemaOperation::RenameObjectStore {
+            callback: self.transaction.create_abort_callback(),
+            new_name: name.to_string(),
+        };
+        if self
+            .get_idb_thread()
+            .send(IndexedDBThreadMsg::AsyncSchemaOperation {
+                origin: self.global().origin().immutable().clone(),
+                database_name: self.db_name.to_string(),
+                store_name: old_name.to_string(),
+                operation,
+                transaction_serial_number: self.transaction.get_serial_number(),
+            })
+            .is_err()
+        {
+            warn!("Could not send AsyncSchemaOperation");
+        }
+
         transaction
             .Db()
             .rename_object_store_name(&old_name, name.clone());

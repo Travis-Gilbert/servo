@@ -655,6 +655,26 @@ impl SqliteEngine {
         }
     }
 
+    /// <https://www.w3.org/TR/IndexedDB/#dom-idbobjectstore-name>
+    /// Step 9. Set store's name to name.
+    /// Every row that belongs to the store keys off the store's id, so nothing below the
+    /// `object_store` row moves with it.
+    fn rename_store(
+        connection: &Connection,
+        store_name: &str,
+        new_name: &str,
+    ) -> Result<(), Error> {
+        let object_store = Self::object_store_by_name(connection, store_name)?;
+        let rows_affected = connection.execute(
+            "UPDATE object_store SET name = ? WHERE id = ?",
+            params![new_name, object_store.id],
+        )?;
+        if rows_affected == 0 {
+            return Err(Error::QueryReturnedNoRows);
+        }
+        Ok(())
+    }
+
     fn create_index(
         connection: &Connection,
         store_name: &str,
@@ -1061,6 +1081,11 @@ impl KvsEngine for SqliteEngine {
                     },
                     AsyncOperation::Schema(AsyncSchemaOperation::DeleteObjectStore { callback }) => {
                         if let Err(error) = Self::delete_store(&connection, &request.store_name) {
+                            let _ = callback.send(BackendError::DbErr(format!("{error:?}")));
+                        }
+                    },
+                    AsyncOperation::Schema(AsyncSchemaOperation::RenameObjectStore { new_name, callback }) => {
+                        if let Err(error) = Self::rename_store(&connection, &request.store_name, &new_name) {
                             let _ = callback.send(BackendError::DbErr(format!("{error:?}")));
                         }
                     },
