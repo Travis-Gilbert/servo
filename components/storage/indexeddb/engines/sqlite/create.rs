@@ -37,19 +37,7 @@ create table object_data (
 ) WITHOUT ROWID;"#;
     conn.execute(OBJECT_DATA, [])?;
 
-    const OBJECT_STORE_INDEX: &str = r#"
-create table object_store_index (
-    id                integer        not null
-    primary key autoincrement,
-    object_store_id   integer        not null
-    references object_store,
-    name              varchar        not null,
-    key_path          varbinary_blob not null,
-    unique_index      boolean        not null,
-    multi_entry_index boolean        not null,
-    unique(object_store_id, name)
-);"#;
-    conn.execute(OBJECT_STORE_INDEX, [])?;
+    conn.execute(&object_store_index_table(OBJECT_STORE_INDEX), [])?;
 
     const INDEX_DATA: &str = r#"
 CREATE TABLE index_data (
@@ -79,4 +67,37 @@ CREATE TABLE unique_index_data (
 ) WITHOUT ROWID;"#;
     conn.execute(UNIQUE_INDEX_DATA, [])?;
     Ok(())
+}
+
+/// The name the `object_store_index` table has in a database that is done migrating.
+pub(crate) const OBJECT_STORE_INDEX: &str = "object_store_index";
+
+/// The columns copied when the table is rebuilt, in the order this schema declares them.
+pub(crate) const OBJECT_STORE_INDEX_COLUMNS: &str =
+    "id, object_store_id, name, key_path, unique_index, multi_entry_index";
+
+/// The `object_store_index` table, under whichever name the caller needs.
+///
+/// A rebuild has to create the replacement under a temporary name before it can take the real
+/// one, so the shape is written once here rather than once per caller.
+pub(crate) fn object_store_index_table(table: &str) -> String {
+    format!(
+        r#"
+create table {table} (
+    id                integer        not null
+    primary key autoincrement,
+    object_store_id   integer        not null
+    references object_store,
+    name              varchar        not null,
+    key_path          varbinary_blob not null,
+    unique_index      boolean        not null,
+    multi_entry_index boolean        not null,
+    -- An index name is scoped to its object store, so two stores in one database may each have
+    -- an index of the same name. The Firefox schema this file is adapted from spells that as a
+    -- table-level `UNIQUE (object_store_id, name)`; writing `unique` on the column alone makes
+    -- the name unique across the whole database, so the second store's index is refused with a
+    -- constraint violation the specification has no error for.
+    unique (object_store_id, name)
+);"#
+    )
 }
