@@ -304,6 +304,7 @@ impl HTMLIFrameElement {
                     browsing_context_id,
                     webview_id,
                     opener: None,
+                    browsing_context_name: String::new(),
                     load_data,
                     viewport_details,
                     user_content_manager_id: None,

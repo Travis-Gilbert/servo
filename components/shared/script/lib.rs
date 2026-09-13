@@ -73,6 +73,12 @@ pub struct NewPipelineInfo {
     pub webview_id: WebViewId,
     /// Id of the opener, if any
     pub opener: Option<BrowsingContextId>,
+    /// The browsing context's target name. A script thread that meets this
+    /// browsing context for the first time creates its `WindowProxy` with the
+    /// name the constellation already holds, so a top-level navigation into a
+    /// new event loop does not lose it.
+    /// <https://html.spec.whatwg.org/multipage/#browsing-context-name>
+    pub browsing_context_name: String,
     /// Network request data which will be initiated by the script thread.
     pub load_data: LoadData,
     /// Initial [`ViewportDetails`] for this layout.

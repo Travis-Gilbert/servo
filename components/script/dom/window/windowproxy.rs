@@ -146,8 +146,9 @@ impl WindowProxy {
         parent: Option<&WindowProxy>,
         opener: Option<BrowsingContextId>,
         creator: CreatorBrowsingContextInfo,
+        name: DOMString,
     ) -> WindowProxy {
-        let name = frame_element.map_or(DOMString::new(), |e| {
+        let name = frame_element.map_or(name, |e| {
             e.get_string_attribute(&local_name!("name"))
         });
         WindowProxy {
@@ -180,6 +181,7 @@ impl WindowProxy {
         parent: Option<&WindowProxy>,
         opener: Option<BrowsingContextId>,
         creator: CreatorBrowsingContextInfo,
+        name: DOMString,
     ) -> DomRoot<WindowProxy> {
         unsafe {
             let handler = window.windowproxy_handler();
@@ -209,6 +211,7 @@ impl WindowProxy {
                 parent,
                 opener,
                 creator,
+                name,
             ));
 
             // The window proxy owns the browsing context.
@@ -231,7 +234,11 @@ impl WindowProxy {
             window_proxy
                 .reflector
                 .init_reflector::<WindowProxy>(js_proxy.get());
-            DomRoot::from_ref(&*Box::into_raw(window_proxy))
+            let window_proxy = DomRoot::from_ref(&*Box::into_raw(window_proxy));
+            if !window_proxy.name.borrow().is_empty() {
+                window_proxy.notify_constellation_of_name(window);
+            }
+            window_proxy
         }
     }
 
@@ -257,6 +264,7 @@ impl WindowProxy {
                 parent,
                 opener,
                 creator,
+                DOMString::new(),
             ));
 
             // Create a new dissimilar-origin window.
@@ -336,6 +344,15 @@ impl WindowProxy {
             SandboxingFlagSet::empty()
         };
 
+        // Step 5. Let targetName be the empty string.
+        // Step 6. If name is not an ASCII case-insensitive match for "_blank",
+        // then set targetName to name.
+        let target_name = if name.str().eq_ignore_ascii_case("_blank") {
+            DOMString::new()
+        } else {
+            name
+        };
+
         let blank_url = ServoUrl::parse("about:blank").ok().unwrap();
         let load_data = LoadData::new(
             LoadOrigin::Script(document.origin().snapshot()),
@@ -355,6 +372,7 @@ impl WindowProxy {
             load_data: load_data.clone(),
             opener_webview_id: window.webview_id(),
             opener_pipeline_id: self.currently_active.get().unwrap(),
+            noopener,
             response_sender,
         };
         let constellation_msg = ScriptToConstellationMessage::CreateAuxiliaryWebView(load_info);
@@ -368,6 +386,7 @@ impl WindowProxy {
             browsing_context_id: new_browsing_context_id,
             webview_id: response.new_webview_id,
             opener: Some(self.browsing_context_id),
+            browsing_context_name: target_name.to_string(),
             load_data,
             viewport_details: window.viewport_details(),
             user_content_manager_id: response.user_content_manager_id,
@@ -384,11 +403,11 @@ impl WindowProxy {
             script_thread.spawn_pipeline(cx, new_pipeline_info);
         });
 
+        // Step 7 and 8. The new traversable was created with targetName as its
+        // browsing context's name: the `WindowProxy` took it from the pipeline
+        // info when the script thread loaded the initial about:blank document.
         let new_window_proxy = ScriptThread::find_document(response.new_pipeline_id)
             .and_then(|doc| doc.browsing_context())?;
-        if name.to_lowercase() != "_blank" {
-            new_window_proxy.set_name(name);
-        }
         if noopener {
             new_window_proxy.disown();
         } else {
@@ -540,9 +559,10 @@ impl WindowProxy {
         };
         // TODO Step 15.2, Set up browsing context features for targetNavigable's
         // active browsing context given tokenizedFeatures.
-        let target_document = match chosen.document() {
-            Some(target_document) => target_document,
-            None => return Ok(None),
+        let Some(target_document) = chosen.document() else {
+            // The chosen browsing context's active document lives in another script
+            // thread, so it is navigated through the constellation.
+            return self.open_in_remote_browsing_context(&chosen, url, noreferrer, noopener);
         };
         let has_trustworthy_ancestor_origin = if new {
             target_document.has_trustworthy_ancestor_or_current_origin()
@@ -620,6 +640,77 @@ impl WindowProxy {
         Ok(target_document.browsing_context())
     }
 
+    /// Step 15.5 of the window open steps for a browsing context found by name whose
+    /// active document is owned by another script thread.
+    /// <https://html.spec.whatwg.org/multipage/#window-open-steps>
+    fn open_in_remote_browsing_context(
+        &self,
+        chosen: &WindowProxy,
+        url: USVString,
+        noreferrer: bool,
+        noopener: bool,
+    ) -> Fallible<Option<DomRoot<WindowProxy>>> {
+        if !url.is_empty() {
+            let existing_document = self
+                .currently_active
+                .get()
+                .and_then(ScriptThread::find_document)
+                .unwrap();
+            let url = match existing_document.url().join(&url) {
+                Ok(url) => url,
+                Err(_) => return Err(Error::Syntax(None)),
+            };
+            let referrer = if noreferrer {
+                Referrer::NoReferrer
+            } else {
+                existing_document.global().get_referrer()
+            };
+            chosen.navigate_from_other_thread(
+                &existing_document,
+                url,
+                referrer,
+                NavigationHistoryBehavior::Push,
+            );
+        }
+        // Step 17.
+        if noopener {
+            return Ok(None);
+        }
+        // Step 18.
+        Ok(Some(DomRoot::from_ref(chosen)))
+    }
+
+    /// Navigate this browsing context, whose active document is owned by another
+    /// script thread, on behalf of `source_document`. The constellation resolves the
+    /// current pipeline and routes the load like a script-initiated `LoadUrl`.
+    pub(crate) fn navigate_from_other_thread(
+        &self,
+        source_document: &Document,
+        url: ServoUrl,
+        referrer: Referrer,
+        history_handling: NavigationHistoryBehavior,
+    ) {
+        let load_data = LoadData::new(
+            LoadOrigin::Script(source_document.origin().snapshot()),
+            url,
+            None,
+            Some(source_document.window().pipeline_id()),
+            referrer,
+            source_document.get_referrer_policy(),
+            None,
+            None,
+            false,
+            SandboxingFlagSet::empty(),
+        );
+        source_document.window().send_to_constellation(
+            ScriptToConstellationMessage::LoadUrlInBrowsingContext(
+                self.browsing_context_id,
+                load_data,
+                history_handling,
+            ),
+        );
+    }
+
     // https://html.spec.whatwg.org/multipage/#the-rules-for-choosing-a-browsing-context-given-a-browsing-context-name
     pub(crate) fn choose_browsing_context(
         &self,
@@ -648,11 +739,18 @@ impl WindowProxy {
                 true,
             ),
             _ => {
-                // Step 6.
-                // TODO: expand the search to all 'familiar' bc,
-                // including auxiliaries familiar by way of their opener.
-                // See https://html.spec.whatwg.org/multipage/#familiar-with
-                match ScriptThread::find_window_proxy_by_name(&name) {
+                // Step 7. Find a navigable by target name. The constellation searches
+                // this context's tree and then the familiar contexts of its browsing
+                // context group, including ones owned by other script threads.
+                let global = self
+                    .currently_active
+                    .get()
+                    .and_then(ScriptThread::find_document)
+                    .map(|document| document.global());
+                let found = global.as_deref().and_then(|global| {
+                    ScriptThread::find_window_proxy_by_name(cx, self, global, &name)
+                });
+                match found {
                     Some(proxy) => (Some(proxy), false),
                     None => (
                         self.create_auxiliary_browsing_context(cx, name, noopener),
@@ -820,6 +918,18 @@ impl WindowProxy {
 
     pub(crate) fn set_name(&self, name: DOMString) {
         *self.name.borrow_mut() = name;
+        if let Some(document) = self.currently_active.get().and_then(ScriptThread::find_document) {
+            self.notify_constellation_of_name(document.window());
+        }
+    }
+
+    /// Tell the constellation this browsing context's target name, so that named
+    /// lookups from any script thread can find it.
+    fn notify_constellation_of_name(&self, window: &Window) {
+        window.send_to_constellation(ScriptToConstellationMessage::SetBrowsingContextName(
+            self.browsing_context_id,
+            self.name.borrow().to_string(),
+        ));
     }
 }
 

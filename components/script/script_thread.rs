@@ -770,9 +770,45 @@ impl ScriptThread {
         with_script_thread(|script_thread| script_thread.window_proxies.clone())
     }
 
-    pub(crate) fn find_window_proxy_by_name(name: &DOMString) -> Option<DomRoot<WindowProxy>> {
+    /// Find the browsing context with the given target name that `source` is familiar
+    /// with. The constellation answers, so contexts owned by other script threads are
+    /// found as well; one of those is materialized as a dissimilar-origin window proxy.
+    /// The reply is awaited synchronously: the constellation answers from its own
+    /// state without contacting any script thread, so this cannot deadlock.
+    /// <https://html.spec.whatwg.org/multipage/#find-a-navigable-by-target-name>
+    pub(crate) fn find_window_proxy_by_name(
+        cx: &mut JSContext,
+        source: &WindowProxy,
+        global_to_clone: &GlobalScope,
+        name: &DOMString,
+    ) -> Option<DomRoot<WindowProxy>> {
         with_script_thread(|script_thread| {
-            script_thread.window_proxies.find_window_proxy_by_name(name)
+            let (result_sender, result_receiver) = generic_channel::channel()?;
+            let msg = ScriptToConstellationMessage::FindBrowsingContextByName(
+                source.browsing_context_id(),
+                name.to_string(),
+                result_sender,
+            );
+            script_thread
+                .senders
+                .pipeline_to_constellation_sender
+                .send((source.webview_id(), global_to_clone.pipeline_id(), msg))
+                .ok()?;
+            let found = result_receiver.recv().ok()??;
+            if let Some(window_proxy) = script_thread
+                .window_proxies
+                .find_window_proxy(found.browsing_context_id)
+            {
+                return Some(window_proxy);
+            }
+            script_thread.window_proxies.remote_window_proxy(
+                cx,
+                &script_thread.senders,
+                global_to_clone,
+                found.webview_id,
+                found.pipeline_id,
+                None,
+            )
         })
     }
 
@@ -3132,6 +3168,7 @@ impl ScriptThread {
             // is no need to pass along existing opener information that
             // will be discarded.
             None,
+            DOMString::new(),
         );
     }
 
@@ -3680,6 +3717,7 @@ impl ScriptThread {
             incomplete.webview_id,
             incomplete.parent_info,
             incomplete.opener,
+            DOMString::from(incomplete.browsing_context_name.clone()),
         );
         if window_proxy.parent().is_some() {
             // https://html.spec.whatwg.org/multipage/#navigating-across-documents:delaying-load-events-mode-2

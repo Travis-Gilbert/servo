@@ -33,18 +33,6 @@ impl ScriptWindowProxies {
             .map(|context| DomRoot::from_ref(&**context))
     }
 
-    pub(crate) fn find_window_proxy_by_name(
-        &self,
-        name: &DOMString,
-    ) -> Option<DomRoot<WindowProxy>> {
-        for (_, proxy) in self.map.borrow().iter() {
-            if proxy.get_name() == *name {
-                return Some(DomRoot::from_ref(&**proxy));
-            }
-        }
-        None
-    }
-
     pub(crate) fn insert(&self, id: BrowsingContextId, proxy: &WindowProxy) {
         self.map.borrow_mut().insert(id, Dom::from_ref(proxy));
     }
@@ -115,6 +103,7 @@ impl ScriptWindowProxies {
         webview_id: WebViewId,
         parent_info: Option<PipelineId>,
         opener: Option<BrowsingContextId>,
+        name: DOMString,
     ) -> DomRoot<WindowProxy> {
         if let Some(window_proxy) = self.find_window_proxy(browsing_context_id) {
             // Note: we do not set the window to be the currently-active one,
@@ -155,6 +144,7 @@ impl ScriptWindowProxies {
             parent_browsing_context.as_deref(),
             opener,
             creator,
+            name,
         );
         self.insert(browsing_context_id, &window_proxy);
         window_proxy

@@ -504,5 +504,23 @@ pub(crate) fn follow_hyperlink(
             .task_manager()
             .dom_manipulation_task_source()
             .queue(task);
-    };
+    } else {
+        // The target's active document lives in another script thread, so the
+        // navigation is routed through the constellation.
+        let mut href = subject
+            .get_attribute_string_value(&local_name!("href"))
+            .unwrap();
+        if let Some(suffix) = hyperlink_suffix {
+            href.push_str(&suffix);
+        }
+        let Ok(url) = document.encoding_parse_a_url(&href) else {
+            return;
+        };
+        let referrer = if relations.contains(LinkRelations::NO_REFERRER) {
+            Referrer::NoReferrer
+        } else {
+            window.as_global_scope().get_referrer()
+        };
+        chosen.navigate_from_other_thread(&document, url, referrer, history_handling);
+    }
 }

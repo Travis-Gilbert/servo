@@ -544,8 +544,23 @@ pub struct AuxiliaryWebViewCreationRequest {
     pub opener_webview_id: WebViewId,
     /// The pipeline opener browsing context.
     pub opener_pipeline_id: PipelineId,
+    /// Whether the new top-level traversable is created with no opener, in which
+    /// case it gets a browsing context group of its own.
+    /// <https://html.spec.whatwg.org/multipage/#creating-a-new-top-level-traversable>
+    pub noopener: bool,
     /// Sender for the constellation’s response to our request.
     pub response_sender: GenericSender<Option<AuxiliaryWebViewCreationResponse>>,
+}
+
+/// The constellation's answer to a named browsing context lookup.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct NamedBrowsingContextInfo {
+    /// The browsing context whose target name matched.
+    pub browsing_context_id: BrowsingContextId,
+    /// The top-level ancestor of that browsing context.
+    pub webview_id: WebViewId,
+    /// The pipeline of that browsing context's current session history entry.
+    pub pipeline_id: PipelineId,
 }
 
 /// Constellation’s response to auxiliary browsing context creation requests.
@@ -788,6 +803,22 @@ pub enum ScriptToConstellationMessage {
     FocusRemoteBrowsingContext(BrowsingContextId, RemoteFocusOperation),
     /// Get the top-level browsing context info for a given browsing context.
     GetTopForBrowsingContext(BrowsingContextId, GenericSender<Option<WebViewId>>),
+    /// Record the target name of a browsing context, so that named lookups can be
+    /// answered for every script thread.
+    /// <https://html.spec.whatwg.org/multipage/#navigable-target-name>
+    SetBrowsingContextName(BrowsingContextId, String),
+    /// Find a browsing context by target name, starting from the given browsing
+    /// context: its subtree, then its whole tree, then the other top-level browsing
+    /// contexts of its group that it is familiar with.
+    /// <https://html.spec.whatwg.org/multipage/#find-a-navigable-by-target-name>
+    FindBrowsingContextByName(
+        BrowsingContextId,
+        String,
+        GenericSender<Option<NamedBrowsingContextInfo>>,
+    ),
+    /// Navigate a browsing context whose active document lives in another script
+    /// thread, as when a link or `window.open` targets it by name.
+    LoadUrlInBrowsingContext(BrowsingContextId, LoadData, NavigationHistoryBehavior),
     /// Get the browsing context id of the browsing context in which pipeline is
     /// embedded and the parent pipeline id of that browsing context.
     GetBrowsingContextInfo(

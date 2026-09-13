@@ -45,6 +45,10 @@ pub struct BrowsingContext {
     /// The browsing context id.
     pub id: BrowsingContextId,
 
+    /// The target name of this browsing context, used by named lookups.
+    /// <https://html.spec.whatwg.org/multipage/#navigable-target-name>
+    pub name: String,
+
     /// The top-level browsing context ancestor
     pub webview_id: WebViewId,
 
@@ -93,6 +97,7 @@ impl BrowsingContext {
         BrowsingContext {
             bc_group_id,
             id,
+            name: String::new(),
             webview_id,
             viewport_details,
             is_private,
