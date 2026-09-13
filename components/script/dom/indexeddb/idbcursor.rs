@@ -40,7 +40,18 @@ pub(crate) enum ObjectStoreOrIndex {
     Index(Dom<IDBIndex>),
 }
 
-#[dom_struct]
+impl ObjectStoreOrIndex {
+    /// The object store the records come from, whichever surface the request addressed.
+    ///
+    /// An index request reads the object store's values, so the store is the one that knows
+    /// whether a stored value is missing the key it was generated under.
+    pub(crate) fn object_store(&self) -> DomRoot<IDBObjectStore> {
+        match self {
+            ObjectStoreOrIndex::ObjectStore(store) => store.as_rooted(),
+            ObjectStoreOrIndex::Index(index) => index.object_store(),
+        }
+    }
+}
 pub(crate) struct IDBCursor {
     reflector_: Reflector,
 
@@ -89,45 +100,10 @@ impl IDBCursor {
         }
     }
 
-    /// The preconditions `update` and `delete` share: steps 2 through 6 of both algorithms,
-    /// in the order their exceptions are observable in.
-    ///
-    /// Kept separate from `check_transaction_and_source` because the read-only check falls
-    /// between the inactive check and the deleted check, and the three iteration methods have
-    /// no read-only check at all.
-
-    ) -> IDBCursor {
-        IDBCursor {
-            reflector_: Reflector::new(),
-            transaction: Dom::from_ref(transaction),
-            range,
-            source,
-            direction,
-            position: DomRefCell::new(None),
-            key: DomRefCell::new(None),
-            cached_key: DomRefCell::new(None),
-            cached_primary_key: DomRefCell::new(None),
-            value: Heap::default(),
-            got_value: Cell::new(got_value),
-            object_store_position: DomRefCell::new(None),
-            key_only,
-            request: Default::default(),
-
-    ) -> Fallible<()> {
-        // Unset this's got value flag.
-        self.got_value.set(false);
-
-        // Let request be this's request. Set request's done flag to false.
-        let request = self.request.get().ok_or(Error::InvalidState(Some(
-            "The cursor has no request".to_owned(),
-        )))?;
-        request.set_ready_state_pending();
-
-        let iteration_param = IterationParam {
-            cursor: Trusted::new(self),
-            key,
-            primary_key,
-            count,
+    /// The object store or index this cursor was opened on.
+    pub(crate) fn source(&self) -> &ObjectStoreOrIndex {
+        &self.source
+    }
         };
         let key_range = self.range.clone();
 
@@ -1030,6 +1006,13 @@ pub(crate) fn iterate_cursor(
             .and_then(|data| {
                 structuredclone::read(cx, global, data, new_cursor_value.handle_mut())
             })?;
+        // A store that generates keys into an in-line key path does not store the key inside the
+        // value, so it goes back in before script sees the cursor's value.
+        source.object_store().inject_record_key_if_absent(
+            cx,
+            new_cursor_value.handle(),
+            &found_record.primary_key,
+        )?;
         cursor.value.set(new_cursor_value.get());
     }
 
