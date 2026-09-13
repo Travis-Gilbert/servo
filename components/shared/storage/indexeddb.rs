@@ -114,6 +114,13 @@ pub struct KvsIndexUpdate {
 pub struct KvsTransaction {
     pub mode: IndexedDBTxnMode,
     pub requests: VecDeque<KvsOperation>,
+    /// Which DOM transaction these requests belong to.
+    ///
+    /// A transaction reaches the engine as a series of batches rather than as one call,
+    /// because script may place further requests while an earlier batch is still running. The
+    /// engine needs the number to attribute the writes of every batch to one transaction, so
+    /// that [`KvsEngine::rollback_transaction`] can undo all of them together.
+    pub serial_number: u64,
 }
 
 /// The backend contract used by Servo's IndexedDB transaction scheduler.
@@ -174,6 +181,24 @@ pub trait KvsEngine: MallocSizeOf + Send {
 
     fn version(&self) -> BackendResult<u64>;
     fn set_version(&self, version: u64) -> BackendResult<()>;
+
+    /// <https://w3c.github.io/IndexedDB/#abort-a-transaction>
+    ///
+    /// > When a transaction is aborted the implementation must undo (roll back) any changes
+    /// > that were made to the database during that transaction.
+    ///
+    /// The scheduler calls this once per aborted transaction, after the last batch it had in
+    /// flight has finished, so an engine may assume no writes of its own are still running.
+    /// Answering `Ok` for a transaction that wrote nothing is correct: a readonly transaction
+    /// and a transaction whose requests all failed both reach here.
+    fn rollback_transaction(&self, serial_number: u64) -> BackendResult<()>;
+
+    /// Release whatever [`KvsEngine::rollback_transaction`] would have needed.
+    ///
+    /// The transaction ended without aborting, so its writes stand and the engine may discard
+    /// the means of undoing them. Like the rollback, this is called once, after the
+    /// transaction's last batch.
+    fn commit_transaction(&self, serial_number: u64) -> BackendResult<()>;
 }
 
 impl<T> KvsEngine for Box<T>
@@ -264,6 +289,14 @@ where
 
     fn set_version(&self, version: u64) -> BackendResult<()> {
         (**self).set_version(version)
+    }
+
+    fn rollback_transaction(&self, serial_number: u64) -> BackendResult<()> {
+        (**self).rollback_transaction(serial_number)
+    }
+
+    fn commit_transaction(&self, serial_number: u64) -> BackendResult<()> {
+        (**self).commit_transaction(serial_number)
     }
 }
 
@@ -1005,8 +1038,8 @@ mod test {
             on_complete();
         }
 
-        fn key_generator_current_number(&self, _store_name: &str) -> Option<i64> {
-            None
+        fn key_generator_current_number(&self, _store_name: &str) -> BackendResult<Option<i64>> {
+            Ok(None)
         }
 
         fn set_key_generator_current_number(
@@ -1017,8 +1050,8 @@ mod test {
             Ok(())
         }
 
-        fn key_path(&self, _store_name: &str) -> Option<KeyPath> {
-            None
+        fn key_path(&self, _store_name: &str) -> BackendResult<Option<KeyPath>> {
+            Ok(None)
         }
 
         fn object_store_names(&self) -> BackendResult<Vec<String>> {
@@ -1044,11 +1077,32 @@ mod test {
             Ok(())
         }
 
+        fn rename_store(&self, _store_name: &str, _new_name: &str) -> BackendResult<()> {
+            Ok(())
+        }
+
+        fn rename_index(
+            &self,
+            _store_name: &str,
+            _index_name: &str,
+            _new_name: &str,
+        ) -> BackendResult<()> {
+            Ok(())
+        }
+
         fn version(&self) -> BackendResult<u64> {
             Ok(0)
         }
 
         fn set_version(&self, _version: u64) -> BackendResult<()> {
+            Ok(())
+        }
+
+        fn rollback_transaction(&self, _serial_number: u64) -> BackendResult<()> {
+            Ok(())
+        }
+
+        fn commit_transaction(&self, _serial_number: u64) -> BackendResult<()> {
             Ok(())
         }
     }
@@ -1089,6 +1143,7 @@ mod test {
         engine.process_transaction(
             KvsTransaction {
                 mode: IndexedDBTxnMode::Readwrite,
+                serial_number: 0,
                 requests: VecDeque::from([KvsOperation {
                     store_name: "documents".to_owned(),
                     context: expected.clone(),

@@ -145,6 +145,70 @@ fn append_range_predicate(
     }
 }
 
+/// One table a readwrite transaction may change, described well enough to undo a change to it.
+///
+/// The three record tables are all `WITHOUT ROWID`, so an undo statement has to name a row by
+/// its declared primary key rather than by a rowid the table does not have.
+struct UndoLoggedTable {
+    name: &'static str,
+    /// Every column, in the order an `INSERT` lists them.
+    columns: &'static [&'static str],
+    /// The primary key columns, which are what a row is found by afterwards.
+    key_columns: &'static [&'static str],
+}
+
+/// The tables whose contents belong to a readwrite transaction.
+///
+/// `object_store` is deliberately absent. Its `auto_increment` column carries the key
+/// generator's current number, and the scheduler already snapshots that when the transaction is
+/// registered and writes it back when the transaction aborts; logging it here as well would
+/// revert it twice.
+const UNDO_LOGGED_TABLES: [UndoLoggedTable; 3] = [
+    UndoLoggedTable {
+        name: "object_data",
+        columns: &["object_store_id", "key", "data"],
+        key_columns: &["object_store_id", "key"],
+    },
+    UndoLoggedTable {
+        name: "index_data",
+        columns: &[
+            "index_id",
+            "value",
+            "object_data_key",
+            "object_store_id",
+            "value_locale",
+        ],
+        key_columns: &["index_id", "value", "object_data_key"],
+    },
+    UndoLoggedTable {
+        name: "unique_index_data",
+        columns: &[
+            "index_id",
+            "value",
+            "object_store_id",
+            "object_data_key",
+            "value_locale",
+        ],
+        key_columns: &["index_id", "value"],
+    },
+];
+
+/// Build the SQL expression a trigger body concatenates to name one row of `table`.
+///
+/// `row` is `new` or `old`, whichever alias holds the row the undo statement has to find.
+fn undo_where_clause(table: &UndoLoggedTable, row: &str) -> String {
+    table
+        .key_columns
+        .iter()
+        .enumerate()
+        .map(|(position, column)| {
+            let separator = if position == 0 { " WHERE " } else { " AND " };
+            format!("'{separator}{column}=' || quote({row}.{column})")
+        })
+        .collect::<Vec<_>>()
+        .join(" || ")
+}
+
 pub struct SqliteEngine {
     db_path: PathBuf,
     connection: Connection,
@@ -164,6 +228,92 @@ impl SqliteEngine {
         )
     }
 
+    /// The table holding the statements that would undo the writes of each live transaction.
+    ///
+    /// It is created outside [`Self::init_db`] because that returns early for a database that
+    /// already exists, and a database written by an earlier build has every other table but not
+    /// this one.
+    fn create_undo_log(connection: &Connection) -> Result<(), Error> {
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS undo_log (
+                seq                INTEGER PRIMARY KEY AUTOINCREMENT,
+                transaction_serial INTEGER NOT NULL,
+                statement          TEXT    NOT NULL
+            )",
+            [],
+        )?;
+        // A transaction that was live when the process died left its undo statements behind.
+        // They describe a state the database no longer has any transaction waiting to return
+        // to, and replaying them later against whatever a new transaction reuses the number for
+        // would corrupt it, so the log starts empty.
+        connection.execute("DELETE FROM undo_log", [])?;
+        Ok(())
+    }
+
+    /// Record, for the duration of this connection, how to undo every row `serial_number`
+    /// writes.
+    ///
+    /// This is SQLite's own undo/redo recipe: a trigger per table per statement kind writes the
+    /// SQL text that would put the row back, and [`Self::rollback_transaction`] runs those
+    /// statements in reverse. `quote()` renders a blob, a NULL and a string the way SQL reads
+    /// them back, which is what lets the undo travel as text.
+    ///
+    /// The triggers are `TEMP`, so they belong to this connection alone and end with it. The
+    /// scheduler's own connection therefore never has them, and the writes it makes while
+    /// reverting are not themselves logged.
+    fn install_undo_log_triggers(connection: &Connection, serial_number: u64) -> Result<(), Error> {
+        // Conflict resolution inside `INSERT OR REPLACE` deletes the row it replaces, and that
+        // deletion only reaches a delete trigger when recursive triggers are on. The index
+        // tables are written that way, so without this an index record could be replaced with
+        // no record of what it held.
+        connection.execute_batch("PRAGMA recursive_triggers = ON;")?;
+
+        let serial = i64::from_ne_bytes(serial_number.to_ne_bytes());
+        for table in &UNDO_LOGGED_TABLES {
+            let name = table.name;
+            let columns = table.columns.join(",");
+            let restored_values = table
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(position, column)| {
+                    let separator = if position == 0 { "" } else { "," };
+                    format!("'{separator}' || quote(old.{column})")
+                })
+                .collect::<Vec<_>>()
+                .join(" || ");
+            let restored_assignments = table
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(position, column)| {
+                    let separator = if position == 0 { " SET " } else { "," };
+                    format!("'{separator}{column}=' || quote(old.{column})")
+                })
+                .collect::<Vec<_>>()
+                .join(" || ");
+            // An insert and an update are both undone against the row as it now stands, so
+            // both find it by the `new` alias. A delete has no row left to find.
+            let find_row = undo_where_clause(table, "new");
+
+            connection.execute_batch(&format!(
+                "CREATE TEMP TRIGGER undo_{name}_insert AFTER INSERT ON {name} BEGIN
+                     INSERT INTO undo_log (transaction_serial, statement)
+                     VALUES ({serial}, 'DELETE FROM {name}' || {find_row});
+                 END;
+                 CREATE TEMP TRIGGER undo_{name}_delete AFTER DELETE ON {name} BEGIN
+                     INSERT INTO undo_log (transaction_serial, statement)
+                     VALUES ({serial}, 'INSERT INTO {name} ({columns}) VALUES (' || {restored_values} || ')');
+                 END;
+                 CREATE TEMP TRIGGER undo_{name}_update AFTER UPDATE ON {name} BEGIN
+                     INSERT INTO undo_log (transaction_serial, statement)
+                     VALUES ({serial}, 'UPDATE {name}' || {restored_assignments} || {find_row});
+                 END;"
+            ))?;
+        }
+        Ok(())
+    }
+
     // TODO: intake dual pools
     pub fn new(
         path: PathBuf,
@@ -173,6 +323,7 @@ impl SqliteEngine {
     ) -> Result<Self, Error> {
         let db_path = path.join("indexeddb.sqlite");
         let connection = Self::init_db(&db_path, db_info)?;
+        Self::create_undo_log(&connection)?;
 
         for stmt in DB_PRAGMAS {
             // TODO: Handle errors properly
@@ -860,6 +1011,8 @@ impl KvsEngine for SqliteEngine {
             self.write_pool.clone()
         };
         let path = self.db_path.clone();
+        let serial_number = transaction.serial_number;
+        let undo_logged = transaction.mode == IndexedDBTxnMode::Readwrite;
         spawning_pool.spawn(move || {
             let connection = match Connection::open(path) {
                 Ok(connection) => connection,
@@ -873,6 +1026,24 @@ impl KvsEngine for SqliteEngine {
                     return;
                 },
             };
+            // Only a readwrite transaction is undone row by row. An upgrade transaction is
+            // reverted by rebuilding the schema it started from, which gives stores it
+            // recreates new identifiers, so rows carrying the old ones have nothing to go back
+            // to; reverting the records an upgrade wrote is a separate piece of work. A
+            // readonly transaction writes nothing to undo.
+            if undo_logged {
+                if let Err(error) = Self::install_undo_log_triggers(&connection, serial_number) {
+                    // Without the triggers the transaction would look like it could be aborted
+                    // and then silently keep its writes, so it is refused instead.
+                    for request in transaction.requests {
+                        request
+                            .operation
+                            .notify_error(BackendError::DbErr(format!("{error:?}")));
+                    }
+                    on_complete();
+                    return;
+                }
+            }
             for request in transaction.requests {
                 // The pinned SQLite implementation has schema support for indexes but no index
                 // request methods or index-record maintenance. Preserve its behavior by handling
@@ -1314,6 +1485,61 @@ impl KvsEngine for SqliteEngine {
         };
         update().map_err(backend_error_from_sqlite_error)
     }
+
+    fn rollback_transaction(&self, serial_number: u64) -> BackendResult<()> {
+        let serial = i64::from_ne_bytes(serial_number.to_ne_bytes());
+        let replay = || -> Result<(), Error> {
+            // The statements undo one write each, so they have to run against the database the
+            // write after them has already been taken back out of: newest first.
+            let statements = self
+                .connection
+                .prepare(
+                    "SELECT statement FROM undo_log \
+                     WHERE transaction_serial = ? ORDER BY seq DESC",
+                )
+                .and_then(|mut stmt| {
+                    stmt.query_map(params![serial], |row| row.get::<_, String>(0))?
+                        .collect::<Result<Vec<String>, Error>>()
+                })?;
+            for statement in statements {
+                self.connection.execute_batch(&statement)?;
+            }
+            self.connection.execute(
+                "DELETE FROM undo_log WHERE transaction_serial = ?",
+                params![serial],
+            )?;
+            Ok(())
+        };
+
+        // A half-applied undo is a state no transaction ever wrote, so the replay either lands
+        // whole or leaves the database as the abort found it and says why.
+        self.connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(backend_error_from_sqlite_error)?;
+        match replay() {
+            Ok(()) => self
+                .connection
+                .execute_batch("COMMIT")
+                .map_err(backend_error_from_sqlite_error),
+            Err(error) => {
+                if let Err(rollback_error) = self.connection.execute_batch("ROLLBACK") {
+                    warn!("Failed to roll back a failed undo replay: {rollback_error:?}");
+                }
+                Err(backend_error_from_sqlite_error(error))
+            },
+        }
+    }
+
+    fn commit_transaction(&self, serial_number: u64) -> BackendResult<()> {
+        let serial = i64::from_ne_bytes(serial_number.to_ne_bytes());
+        self.connection
+            .execute(
+                "DELETE FROM undo_log WHERE transaction_serial = ?",
+                params![serial],
+            )
+            .map(|_| ())
+            .map_err(backend_error_from_sqlite_error)
+    }
 }
 
 fn get_db_status(connection: &Connection, op: i32) -> Result<i32, i32> {
@@ -1691,6 +1917,7 @@ mod tests {
         db.process_transaction(
             KvsTransaction {
                 mode: IndexedDBTxnMode::Readwrite,
+                serial_number: 0,
                 requests: VecDeque::from(vec![
                     KvsOperation {
                         store_name: store_name.to_owned(),
@@ -1928,5 +2155,121 @@ mod tests {
             remaining_keys_after_delete(3, 8, true, true),
             vec![1, 2, 3, 8, 9, 10]
         );
+    }
+
+    /// <https://w3c.github.io/IndexedDB/#abort-a-transaction>
+    ///
+    /// > When a transaction is aborted the implementation must undo (roll back) any changes
+    /// > that were made to the database during that transaction.
+    ///
+    /// One transaction lays down two records and commits. A second one overwrites one of them,
+    /// adds a record of its own and removes the other, then aborts. All three of those are
+    /// taken back, which is the difference between `count()` reading 1 and reading 0 in
+    /// `idb-explicit-commit`.
+    #[test]
+    fn test_rollback_transaction_undoes_a_readwrite_transaction() {
+        fn ignored_callback<T>() -> GenericCallback<T>
+        where
+            T: for<'de> Deserialize<'de> + Serialize + Send + Sync,
+        {
+            GenericCallback::new(ProfilerChan(None), |_| {}).expect("Could not construct callback")
+        }
+
+        fn run(db: &SqliteEngine, serial_number: u64, requests: Vec<KvsOperation>) {
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            db.process_transaction(
+                KvsTransaction {
+                    mode: IndexedDBTxnMode::Readwrite,
+                    serial_number,
+                    requests: VecDeque::from(requests),
+                },
+                Box::new(move || {
+                    let _ = done_tx.send(());
+                }),
+            );
+            done_rx.recv().unwrap();
+        }
+
+        fn put(store_name: &str, key: f64, value: Vec<u8>) -> KvsOperation {
+            KvsOperation {
+                store_name: store_name.to_owned(),
+                context: Default::default(),
+                operation: AsyncOperation::ReadWrite(AsyncReadWriteOperation::PutItem {
+                    callback: ignored_callback(),
+                    key: Some(IndexedDBKeyType::Number(key)),
+                    value,
+                    should_overwrite: true,
+                    key_generator_current_number: None,
+                }),
+            }
+        }
+
+        let (_temp_dir, path, created, _proxy_map, _handle) = create_db("test_db".to_string());
+        let db = SqliteEngine::new(
+            path,
+            created,
+            &IndexedDBDescription {
+                name: "test_db".to_string(),
+                origin: test_origin(),
+            },
+            get_pool(),
+        )
+        .unwrap();
+        let store_name = "test_store";
+        db.create_store(store_name, None, false)
+            .expect("Failed to create store");
+
+        run(
+            &db,
+            1,
+            vec![
+                put(store_name, 1.0, vec![1, 2, 3]),
+                put(store_name, 3.0, vec![7, 8, 9]),
+            ],
+        );
+        db.commit_transaction(1).expect("Failed to commit");
+
+        run(
+            &db,
+            2,
+            vec![
+                put(store_name, 1.0, vec![9, 9, 9]),
+                put(store_name, 2.0, vec![4, 5, 6]),
+                KvsOperation {
+                    store_name: store_name.to_owned(),
+                    context: Default::default(),
+                    operation: AsyncOperation::ReadWrite(AsyncReadWriteOperation::RemoveItem {
+                        callback: ignored_callback(),
+                        key_range: IndexedDBKeyRange::only(IndexedDBKeyType::Number(3.0)),
+                    }),
+                },
+            ],
+        );
+        db.rollback_transaction(2).expect("Failed to roll back");
+
+        let read = |key: f64| {
+            let (tx, rx) = generic_channel::channel().unwrap();
+            let callback = GenericCallback::new(ProfilerChan(None), move |result| {
+                assert!(tx.send(result.unwrap()).is_ok());
+            })
+            .expect("Could not construct callback");
+            run(
+                &db,
+                3,
+                vec![KvsOperation {
+                    store_name: store_name.to_owned(),
+                    context: Default::default(),
+                    operation: AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetItem {
+                        callback,
+                        key_range: IndexedDBKeyRange::only(IndexedDBKeyType::Number(key)),
+                    }),
+                }],
+            );
+            rx.recv().unwrap().unwrap()
+        };
+
+        assert_eq!(read(1.0), Some(vec![1, 2, 3]), "an overwrite was undone");
+        assert_eq!(read(2.0), None, "an added record was undone");
+        assert_eq!(read(3.0), Some(vec![7, 8, 9]), "a removal was undone");
     }
 }

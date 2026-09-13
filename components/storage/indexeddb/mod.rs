@@ -201,6 +201,7 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
             .or_insert_with(|| KvsTransaction {
                 requests: VecDeque::new(),
                 mode,
+                serial_number: txn,
             });
         Ok(())
     }
@@ -302,6 +303,7 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
                     .insert(KvsTransaction {
                         requests: VecDeque::new(),
                         mode: mode.clone(),
+                        serial_number,
                     })
                     .requests
                     .push_back(KvsOperation {
@@ -431,7 +433,11 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
 
         let manager_sender = self.manager_sender.clone();
         self.engine.process_transaction(
-            KvsTransaction { mode, requests },
+            KvsTransaction {
+                mode,
+                requests,
+                serial_number: txn,
+            },
             Box::new(move || {
                 // Notify the manager thread when the engine finishes so it can:
                 // - clear running_readonly / running_readwrite
@@ -497,6 +503,14 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
         }
     }
 
+    /// Whether `txn` is a readwrite transaction, which is the only kind whose writes the engine
+    /// records an undo for.
+    fn is_readwrite(&self, txn: u64) -> bool {
+        self.txn_info
+            .get(&txn)
+            .is_some_and(|info| info.mode == IndexedDBTxnMode::Readwrite)
+    }
+
     fn can_commit_now(&self, txn: u64) -> bool {
         self.can_start_by_spec(txn) && self.can_notify_txn_maybe_commit(txn)
     }
@@ -534,6 +548,15 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
     }
 
     fn finish_transaction(&mut self, txn: u64) {
+        // The transaction's writes stand, so what would have undone them is no longer needed.
+        // An aborted transaction reaches here too, after `abort_transaction` has already
+        // replayed and discarded them, and this then has nothing left to discard.
+        if self.is_readwrite(txn) {
+            if let Err(error) = self.engine.commit_transaction(txn) {
+                error!("Failed to release the undo record of transaction {txn}: {error:?}");
+            }
+        }
+
         if let Some(info) = self.txn_info.get_mut(&txn) {
             info.live = false;
         }
@@ -553,6 +576,21 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
     }
 
     fn abort_transaction(&mut self, txn: u64) {
+        // <https://w3c.github.io/IndexedDB/#abort-a-transaction>
+        // > When a transaction is aborted the implementation must undo (roll back) any changes
+        // > that were made to the database during that transaction.
+        //
+        // `handle_abort` holds the abort back until the transaction has no batch in flight, so
+        // everything the engine is going to write for it has been written by the time this
+        // runs. A failure here leaves writes standing that script has already been told were
+        // taken back, which is worth saying out loud rather than asserting about in debug
+        // builds alone.
+        if self.is_readwrite(txn) {
+            if let Err(error) = self.engine.rollback_transaction(txn) {
+                error!("Failed to roll back transaction {txn}: {error:?}");
+            }
+        }
+
         let key_generator_snapshots = self
             .txn_info
             .get(&txn)
@@ -815,7 +853,10 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
     /// This only aborts the transaction if one was previously queued by adding an abort
     /// callback to [`Self::pending_abort_callbacks`].
     ///
-    /// TODO: implement the abort algorithm and rollback for the engine.
+    /// The rollback itself is [`Self::abort_transaction`], below. An upgrade transaction is
+    /// still reverted by rebuilding the schema it started from rather than row by row, so the
+    /// records an upgrade wrote to a store that already existed are the one thing this does
+    /// not take back.
     fn abort(&mut self, origin: &ImmutableOrigin, database_name: &str, transaction: u64) -> bool {
         let message = || TxnCompleteMsg {
             origin: origin.clone(),
