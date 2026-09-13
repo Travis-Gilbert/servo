@@ -228,6 +228,56 @@ impl SqliteEngine {
         )
     }
 
+    /// Widen `object_store_index`'s uniqueness from the name alone to the pair the
+    /// specification scopes a name by.
+    ///
+    /// A database created before [`create::object_store_index_table`] carried the table-level
+    /// constraint has `unique` on the `name` column, which refuses a second object store an
+    /// index name the first store already uses. That constraint lives in an implicit index
+    /// SQLite will not let `drop index` remove and `alter table` cannot rewrite, so the only
+    /// way out is the rebuild SQLite documents: create the replacement under a temporary name,
+    /// copy the rows across, drop the original, and rename the replacement into its place.
+    ///
+    /// The replacement is created first and renamed last so that no `references` clause is ever
+    /// rewritten: `index_data` and `unique_index_data` both point at `object_store_index`, and
+    /// renaming that table out of the way instead would move those references with it.
+    fn scope_index_names_to_their_store(connection: &Connection) -> Result<(), Error> {
+        // The old constraint is exactly a unique index whose only column is `name`. Asking the
+        // schema what indexes exist answers that without depending on how the original
+        // `create table` text happened to be spelled or spaced.
+        let unscoped: bool = connection.query_row(
+            "SELECT EXISTS (
+                 SELECT 1 FROM pragma_index_list(?) AS idx
+                 WHERE idx.\"unique\" = 1
+                   AND (SELECT count(*) FROM pragma_index_info(idx.name)) = 1
+                   AND (SELECT col.name FROM pragma_index_info(idx.name) AS col) = 'name'
+             )",
+            [create::OBJECT_STORE_INDEX],
+            |row| row.get(0),
+        )?;
+        if !unscoped {
+            return Ok(());
+        }
+
+        info!(
+            "Rebuilding {} to scope index names to their object store",
+            create::OBJECT_STORE_INDEX
+        );
+        let scoped = format!("{}_scoped", create::OBJECT_STORE_INDEX);
+        let columns = create::OBJECT_STORE_INDEX_COLUMNS;
+        let table = create::OBJECT_STORE_INDEX;
+        connection.execute_batch(&format!(
+            "begin;
+             {create_scoped}
+             insert into {scoped} ({columns}) select {columns} from {table};
+             drop table {table};
+             alter table {scoped} rename to {table};
+             commit;",
+            create_scoped = create::object_store_index_table(&scoped),
+        ))?;
+        Ok(())
+    }
+
     /// The table holding the statements that would undo the writes of each live transaction.
     ///
     /// It is created outside [`Self::init_db`] because that returns early for a database that
@@ -323,6 +373,7 @@ impl SqliteEngine {
     ) -> Result<Self, Error> {
         let db_path = path.join("indexeddb.sqlite");
         let connection = Self::init_db(&db_path, db_info)?;
+        Self::scope_index_names_to_their_store(&connection)?;
         Self::create_undo_log(&connection)?;
 
         for stmt in DB_PRAGMAS {
