@@ -13,9 +13,10 @@ use sea_query_rusqlite::RusqliteBinder;
 use servo_base::threadpool::ThreadPool;
 use storage_traits::indexeddb::{
     AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, AsyncSchemaOperation,
-    BackendError, BackendResult, CreateObjectResult, IndexedDBDescription, IndexedDBIndex,
-    IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord, IndexedDBTxnMode, KeyPath, KvsEngine,
-    KvsIndexUpdate, KvsOperationTarget, KvsTransaction, PutItemResult, RecordsShape,
+    BackendError, BackendResult, BackfillIndexResult, CreateObjectResult, IndexBackfillEntry,
+    IndexedDBDescription, IndexedDBIndex, IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord,
+    IndexedDBTxnMode, KeyPath, KvsEngine, KvsIndexUpdate, KvsOperationTarget, KvsTransaction,
+    PutItemResult, RecordsShape,
 };
 
 use crate::shared::{DB_INIT_PRAGMAS, DB_PRAGMAS, is_sqlite_disk_full_error};
@@ -491,6 +492,57 @@ impl SqliteEngine {
         Ok(())
     }
 
+    /// Write the index records a newly created index needs for the records the store already
+    /// holds.
+    ///
+    /// <https://w3c.github.io/IndexedDB/#dom-idbobjectstore-createindex> step 12. The keys are
+    /// extracted on the script thread, so all this does is insert them and answer whether a
+    /// unique index found two records under one key. The index row was inserted by the schema
+    /// operation that ran ahead of this one, so it holds no records yet and the only collisions
+    /// possible are between entries in this call; the read below still goes to the table, so a
+    /// row that arrived some other way is caught too.
+    fn backfill_index(
+        connection: &Connection,
+        store: object_store_model::Model,
+        index_name: &str,
+        entries: &[IndexBackfillEntry],
+    ) -> Result<BackfillIndexResult, Error> {
+        let Some(index) = Self::index_by_name(connection, store.id, index_name)? else {
+            // The transaction that created the index has already deleted it again. There is
+            // nothing to populate and nothing to refuse.
+            return Ok(BackfillIndexResult::Done);
+        };
+        let table = index_table(&index);
+        for entry in entries {
+            let primary_key = encoding::serialize(&entry.primary_key);
+            for key in &entry.keys {
+                let value = encoding::serialize(key);
+                if index.unique_index {
+                    let holder: Option<Vec<u8>> = connection
+                        .prepare(
+                            "SELECT object_data_key FROM unique_index_data \
+                             WHERE index_id = ? AND value = ?",
+                        )
+                        .and_then(|mut stmt| {
+                            stmt.query_row(params![index.id, value], |row| row.get(0))
+                                .optional()
+                        })?;
+                    if holder.is_some_and(|held| held != primary_key) {
+                        return Ok(BackfillIndexResult::UniqueConstraintViolated);
+                    }
+                }
+                connection.execute(
+                    &format!(
+                        "INSERT OR REPLACE INTO {table} \
+                         (index_id, value, object_store_id, object_data_key) VALUES (?, ?, ?, ?)"
+                    ),
+                    params![index.id, value, store.id, primary_key],
+                )?;
+            }
+        }
+        Ok(BackfillIndexResult::Done)
+    }
+
     fn put_item(
         connection: &Connection,
         store: object_store_model::Model,
@@ -936,6 +988,16 @@ impl KvsEngine for SqliteEngine {
                         };
                         let _ = callback
                             .send(result.map_err(|e| BackendError::DbErr(format!("{:?}", e))));
+                    },
+                    AsyncOperation::ReadWrite(AsyncReadWriteOperation::BackfillIndex {
+                        callback,
+                        index_name,
+                        entries,
+                    }) => {
+                        let _ = callback.send(
+                            Self::backfill_index(&connection, object_store, &index_name, &entries)
+                                .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
+                        );
                     },
                     AsyncOperation::ReadWrite(AsyncReadWriteOperation::RemoveItem {
                         callback,

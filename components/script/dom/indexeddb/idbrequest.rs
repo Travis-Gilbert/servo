@@ -16,8 +16,8 @@ use script_bindings::reflector::{DomObject, reflect_dom_object_with_cx};
 use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::GenericSend;
 use storage_traits::indexeddb::{
-    AsyncOperation, AsyncReadOnlyOperation, BackendError, BackendResult, IndexedDBKeyRange,
-    IndexedDBKeyType, IndexedDBRecord, IndexedDBThreadMsg, IndexedDBTxnMode,
+    AsyncOperation, AsyncReadOnlyOperation, BackendError, BackendResult, BackfillIndexResult,
+    IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord, IndexedDBThreadMsg, IndexedDBTxnMode,
     KvsOperationContext, PutItemResult, RecordsShape, SyncOperation,
 };
 use stylo_atoms::Atom;
@@ -93,6 +93,15 @@ impl GetAllKind {
 /// Cursor iteration and the `getAll` family read the same records and so share one wire
 /// payload. This is what tells them apart, and it carries the part of each algorithm the
 /// backend was not told about.
+/// Whether a request may be held back by the transaction's outbound hold.
+#[derive(Clone, Copy)]
+enum OutboundHold {
+    /// The ordinary case: the hold, when it is set, takes this request.
+    Respect,
+    /// The request the hold is waiting for. Holding it would stall the transaction on itself.
+    Bypass,
+}
+
 #[derive(Clone)]
 pub(crate) enum RecordsParam {
     /// Move a cursor onto the next record the iteration selects.
@@ -103,6 +112,13 @@ pub(crate) enum RecordsParam {
         direction: IDBCursorDirection,
         count: Option<u32>,
     },
+    /// Extract `index_name`'s keys from the records and send them back out as the write that
+    /// populates a newly created index.
+    ///
+    /// This request is not script visible. `create index` needs the index's key path evaluated
+    /// against every stored value, and only the script thread can do that, so the read comes
+    /// here and the keys go out again.
+    IndexBackfill { index_name: String },
 }
 
 /// A resolved `getAll`, `getAllKeys` or `getAllRecords` request.
@@ -286,6 +302,21 @@ impl From<PutItemResult> for IdbResult {
 impl From<Vec<IndexedDBRecord>> for IdbResult {
     fn from(value: Vec<IndexedDBRecord>) -> Self {
         Self::Records(value)
+    }
+}
+
+impl From<BackfillIndexResult> for IdbResult {
+    fn from(value: BackfillIndexResult) -> Self {
+        match value {
+            BackfillIndexResult::Done => Self::None,
+            // <https://w3c.github.io/IndexedDB/#dom-idbobjectstore-createindex>: the request
+            // is not script visible, so nothing calls `preventDefault` on the error event it
+            // fires and the upgrade transaction aborts with this error, which is what the
+            // algorithm asks for when a unique index cannot hold the store's records.
+            BackfillIndexResult::UniqueConstraintViolated => Self::Error(Error::Constraint(Some(
+                "A unique index cannot be created over records that already share a key".into(),
+            ))),
+        }
     }
 }
 
@@ -504,6 +535,49 @@ impl RequestListener {
                             }
                         }
                         array.safe_to_jsval(cx, answer.handle_mut());
+                    },
+                    Some(RecordsParam::IndexBackfill { index_name }) => {
+                        // A backfill request is not script visible, so there is no listener
+                        // below to open the activity window `fire a success event` step 6
+                        // opens. The continuation places the backfill write against the
+                        // transaction, so it opens that window here; step 8 below closes it.
+                        if transaction.is_inactive() {
+                            transaction.set_active_flag(true);
+                        }
+                        let store = match &*request.source.borrow() {
+                            Some(RequestSource::ObjectStore(store)) => Some(store.as_rooted()),
+                            _ => None,
+                        };
+                        // A backfill read is always issued from the object store that owns the
+                        // index, so anything else here is a protocol error. The transaction
+                        // aborts, and the messages the hold is carrying go with it.
+                        let Some(store) = store else {
+                            warn!("An index backfill answered a request with no object store");
+                            transaction.discard_held_outbound();
+                            Self::handle_async_request_error(
+                                &global,
+                                cx,
+                                request,
+                                Error::InvalidState(None),
+                                self.request_id,
+                            );
+                            return;
+                        };
+                        if let Err(e) = store.finish_index_backfill(cx, index_name, records) {
+                            warn!("Error populating a new index from the store's records");
+                            transaction.discard_held_outbound();
+                            Self::handle_async_request_error(
+                                &global,
+                                cx,
+                                request,
+                                e,
+                                self.request_id,
+                            );
+                            return;
+                        }
+                        // The write is on its way, so everything script placed behind it can
+                        // follow, up to the next `createIndex` that queued itself here.
+                        transaction.resume_after_backfill(cx);
                     },
                     // The pairing is asserted where the operation is sent, so reaching here
                     // means the backend answered with records for a request that reads none.
@@ -790,6 +864,7 @@ impl IDBRequest {
             operation_fn,
             request,
             records_param,
+            OutboundHold::Respect,
         )
     }
 
@@ -814,9 +889,46 @@ impl IDBRequest {
         T: Into<IdbResult> + for<'a> Deserialize<'a> + Serialize + Send + Sync + 'static,
         F: FnOnce(GenericCallback<BackendResult<T>>) -> AsyncOperation,
     {
-        Self::execute_async_inner(cx, store, None, context, operation_fn, request, records_param)
+        Self::execute_async_inner(
+            cx,
+            store,
+            None,
+            context,
+            operation_fn,
+            request,
+            records_param,
+            OutboundHold::Respect,
+        )
     }
 
+    /// `asynchronously execute a request` for a request the transaction's outbound hold must
+    /// not delay.
+    ///
+    /// A `createIndex` backfill's read and write are the two requests the hold exists for.
+    /// Holding either of them would stall the transaction on itself.
+    pub(crate) fn execute_async_bypassing_hold<T, F>(
+        cx: &mut JSContext,
+        store: &IDBObjectStore,
+        operation_fn: F,
+        records_param: Option<RecordsParam>,
+    ) -> Fallible<DomRoot<IDBRequest>>
+    where
+        T: Into<IdbResult> + for<'a> Deserialize<'a> + Serialize + Send + Sync + 'static,
+        F: FnOnce(GenericCallback<BackendResult<T>>) -> AsyncOperation,
+    {
+        Self::execute_async_inner(
+            cx,
+            store,
+            None,
+            KvsOperationContext::default(),
+            operation_fn,
+            None,
+            records_param,
+            OutboundHold::Bypass,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn execute_async_inner<T, F>(
         cx: &mut JSContext,
         store: &IDBObjectStore,
@@ -825,6 +937,7 @@ impl IDBRequest {
         operation_fn: F,
         request: Option<DomRoot<IDBRequest>>,
         records_param: Option<RecordsParam>,
+        hold: OutboundHold,
     ) -> Fallible<DomRoot<IDBRequest>>
     where
         T: Into<IdbResult> + for<'a> Deserialize<'a> + Serialize + Send + Sync + 'static,
@@ -906,20 +1019,27 @@ impl IDBRequest {
 
         // Start is a backend database task (spec). Script does not model it with a
         // separate queued task, backend scheduling decides when requests begin.
-        transaction
-            .global()
-            .storage_threads()
-            .send(IndexedDBThreadMsg::Async(
-                global.origin().immutable().clone(),
-                String::from(transaction.get_db_name()),
-                String::from(store.get_name()),
-                context,
-                transaction.get_serial_number(),
-                request_id,
-                transaction_mode,
-                operation,
-            ))
-            .unwrap();
+        let message = IndexedDBThreadMsg::Async(
+            global.origin().immutable().clone(),
+            String::from(transaction.get_db_name()),
+            String::from(store.get_name()),
+            context,
+            transaction.get_serial_number(),
+            request_id,
+            transaction_mode,
+            operation,
+        );
+        let sent = match hold {
+            OutboundHold::Respect => transaction.send_or_hold(message),
+            OutboundHold::Bypass => transaction
+                .global()
+                .storage_threads()
+                .send(message)
+                .map_err(|_| ()),
+        };
+        if sent.is_err() {
+            warn!("Could not send an IndexedDB request to the storage backend");
+        }
 
         // Step 6
         Ok(request)

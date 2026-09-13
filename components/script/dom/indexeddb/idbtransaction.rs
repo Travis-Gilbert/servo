@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
@@ -83,9 +83,34 @@ pub struct IDBTransaction {
     next_unhandled_request_id: Cell<u64>,
     handled_pending: DomRefCell<HashSet<u64>>,
 
+    /// Outbound messages this transaction is holding back, in the order script placed them.
+    ///
+    /// `createIndex` populates its index over a round trip: the records go to the script
+    /// thread, which is the only place the index's key path can be evaluated against a stored
+    /// value, and the extracted keys come back as a write. Anything script places between the
+    /// two would otherwise reach the backend first and be ordered ahead of the index records,
+    /// so the index would read as empty right after it was made, and a `put` that belongs
+    /// before the backfill would be missing from it.
+    #[no_trace]
+    #[ignore_malloc_size_of = "thread messages carry IPC callbacks with no size to report"]
+    held_outbound: DomRefCell<VecDeque<HeldOutbound>>,
+    /// Whether `held_outbound` is taking messages. It stays set while a backfill is in flight
+    /// and while any later backfill is still queued behind it.
+    outbound_held: Cell<bool>,
+
     // An unique identifier, used to commit and revert this transaction
     // FIXME:(rasviitanen) Replace this with a channel
     serial_number: u64,
+}
+
+/// One entry in a transaction's outbound hold.
+pub(crate) enum HeldOutbound {
+    /// A message waiting for the hold to lift.
+    Message(IndexedDBThreadMsg),
+    /// A `createIndex` that ran while an earlier backfill was still in flight. Its read is
+    /// issued when the hold drains down to it, and everything behind it keeps waiting, because
+    /// the messages ahead of it may still change the records the read is going to see.
+    Backfill { store_name: String, index_name: String },
 }
 
 impl IDBTransaction {
@@ -123,6 +148,8 @@ impl IDBTransaction {
             next_request_id: Cell::new(0),
             next_unhandled_request_id: Cell::new(0),
             handled_pending: Default::default(),
+            held_outbound: Default::default(),
+            outbound_held: Cell::new(false),
             serial_number,
         }
     }
@@ -514,6 +541,9 @@ impl IDBTransaction {
             self.restore_associated_object_store_handles_after_abort(cx);
         }
         self.abort_initiated.set(true);
+        // An aborted transaction answers every outstanding request from the abort itself, so
+        // anything a `createIndex` backfill was holding back has nowhere left to land.
+        self.discard_held_outbound();
         // https://w3c.github.io/IndexedDB/#transaction-concept
         // A transaction has a error which is set if the transaction is aborted.
         // NOTE: Implementors need to keep in mind that the value "null" is considered an error, as it is set from abort()
@@ -698,6 +728,88 @@ impl IDBTransaction {
 
     fn get_idb_thread(&self) -> GenericSender<IndexedDBThreadMsg> {
         self.global().storage_threads().sender()
+    }
+
+    /// Send a message to the storage backend, or hold it if a `createIndex` backfill is still
+    /// running.
+    ///
+    /// Every request and schema operation this transaction places goes through here, because
+    /// the backend runs one transaction's operations in the order they arrive and the backfill's
+    /// write has to land ahead of anything script placed after the `createIndex` that started
+    /// it.
+    pub(crate) fn send_or_hold(&self, message: IndexedDBThreadMsg) -> Result<(), ()> {
+        if self.outbound_held.get() {
+            self.held_outbound
+                .borrow_mut()
+                .push_back(HeldOutbound::Message(message));
+            return Ok(());
+        }
+        self.get_idb_thread().send(message).map_err(|_| ())
+    }
+
+    /// Claim the outbound hold for a `createIndex` backfill of `index_name` on `store_name`.
+    ///
+    /// Returns whether the caller should issue the backfill read now. A false answer means an
+    /// earlier backfill is still running and this one is queued behind the messages script has
+    /// placed since, which may still change the records the read would see.
+    pub(crate) fn hold_outbound_for_backfill(&self, store_name: &str, index_name: &str) -> bool {
+        if self.outbound_held.get() {
+            self.held_outbound
+                .borrow_mut()
+                .push_back(HeldOutbound::Backfill {
+                    store_name: store_name.to_owned(),
+                    index_name: index_name.to_owned(),
+                });
+            return false;
+        }
+        self.outbound_held.set(true);
+        true
+    }
+
+    /// A backfill's write has been sent. Release the messages held behind it, stopping at the
+    /// next queued backfill and starting that one instead.
+    pub(crate) fn resume_after_backfill(&self, cx: &mut JSContext) {
+        loop {
+            let entry = self.held_outbound.borrow_mut().pop_front();
+            match entry {
+                Some(HeldOutbound::Message(message)) => {
+                    if self.get_idb_thread().send(message).is_err() {
+                        warn!("Could not send a held IndexedDB message");
+                    }
+                },
+                Some(HeldOutbound::Backfill {
+                    store_name,
+                    index_name,
+                }) => {
+                    // The hold stays claimed; this backfill owns it now.
+                    let store = self.object_store_handle(&DOMString::from(store_name));
+                    match store {
+                        Some(store) => {
+                            if let Err(error) = store.start_index_backfill(cx, &index_name) {
+                                warn!("Could not start a queued index backfill: {error:?}");
+                                continue;
+                            }
+                        },
+                        // The store handle is gone, so nothing can read the index either.
+                        None => continue,
+                    }
+                    return;
+                },
+                None => {
+                    self.outbound_held.set(false);
+                    return;
+                },
+            }
+        }
+    }
+
+    /// Drop everything the hold is carrying without sending it.
+    ///
+    /// An aborted transaction answers every outstanding request from the abort itself, so the
+    /// held messages have nowhere to land.
+    pub(crate) fn discard_held_outbound(&self) {
+        self.held_outbound.borrow_mut().clear();
+        self.outbound_held.set(false);
     }
 
     fn object_store_parameters(

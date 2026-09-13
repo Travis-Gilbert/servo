@@ -16,11 +16,11 @@ use script_bindings::codegen::GenericBindings::IDBObjectStoreBinding::IDBIndexPa
 use script_bindings::codegen::GenericUnionTypes::StringOrStringSequence;
 use script_bindings::error::ErrorResult;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
-use servo_base::generic_channel::{GenericSend, GenericSender};
 use storage_traits::indexeddb::{
     self, AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, AsyncSchemaOperation,
-    IndexedDBKeyRange, IndexedDBKeyType, IndexedDBThreadMsg, KvsIndexUpdate, KvsOperationContext,
-    KvsOperationTarget, RecordsShape,
+    BackfillIndexResult, IndexBackfillEntry, IndexedDBKeyRange, IndexedDBKeyType,
+    IndexedDBRecord, IndexedDBThreadMsg, KvsIndexUpdate, KvsOperationContext, KvsOperationTarget,
+    RecordsShape,
 };
 
 use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::IDBCursorDirection;
@@ -263,10 +263,6 @@ impl IDBObjectStore {
         self.transaction.as_rooted()
     }
 
-    fn get_idb_thread(&self) -> GenericSender<IndexedDBThreadMsg> {
-        self.global().storage_threads().sender()
-    }
-
     /// <https://www.w3.org/TR/IndexedDB-3/#clone>
     fn clone_value_in_target_realm(
         &self,
@@ -396,6 +392,102 @@ impl IDBObjectStore {
         if let IDBTransactionMode::Readonly = transaction.get_mode() {
             return Err(Error::ReadOnly(None));
         }
+        Ok(())
+    }
+
+    /// <https://w3c.github.io/IndexedDB/#dom-idbobjectstore-createindex>
+    /// Step 12's operation, first half: read back every record the store already holds.
+    ///
+    /// A new index has to hold a record for each of them, and the index key comes out of the
+    /// JavaScript value the key path is evaluated against. Only the script thread holds that
+    /// value, so the records make a round trip: out through this read, back through
+    /// [`Self::finish_index_backfill`] as index keys. The read bypasses the transaction's
+    /// outbound hold, because it is one of the two requests the hold is waiting for.
+    pub(crate) fn start_index_backfill(&self, cx: &mut JSContext, index_name: &str) -> Fallible<()> {
+        IDBRequest::execute_async_bypassing_hold::<Vec<IndexedDBRecord>, _>(
+            cx,
+            self,
+            |callback| {
+                AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
+                    callback,
+                    key_range: IndexedDBKeyRange::default(),
+                    count: None,
+                    shape: RecordsShape::WithValues,
+                })
+            },
+            Some(RecordsParam::IndexBackfill {
+                index_name: index_name.to_owned(),
+            }),
+        )?;
+        Ok(())
+    }
+
+    /// <https://w3c.github.io/IndexedDB/#dom-idbobjectstore-createindex>
+    /// Step 12's operation, second half: evaluate the index's key path against each record and
+    /// send the extracted keys out as the write that populates the index.
+    ///
+    /// The uniqueness check stays in the backend, which is where the index records land and the
+    /// only place that can see a collision with a row that arrived some other way.
+    #[expect(unsafe_code)]
+    pub(crate) fn finish_index_backfill(
+        &self,
+        cx: &mut JSContext,
+        index_name: &str,
+        records: Vec<IndexedDBRecord>,
+    ) -> Fallible<()> {
+        let name = DOMString::from(index_name);
+        let Some((key_path, multi_entry)) = self
+            .index_set
+            .borrow()
+            .get(&name)
+            .map(|index| (index.index_key_path().clone(), index.is_multi_entry()))
+        else {
+            // The same upgrade transaction deleted the index again before its records came
+            // back. There is nothing left to populate.
+            return Ok(());
+        };
+
+        let global = self.global();
+        let mut entries = Vec::with_capacity(records.len());
+        for record in records {
+            rooted!(&in(cx) let mut value = NullValue());
+            let data = postcard::from_bytes(&record.value).map_err(|_| Error::Data(None))?;
+            structuredclone::read(cx, &global, data, value.handle_mut())?;
+            // Step 6 of `store a record into an object store`, run here against a value the
+            // store is already holding rather than one being written.
+            let extracted = match extract_key(cx, value.handle(), &key_path, Some(multi_entry)) {
+                Ok(extracted) => extracted,
+                // An exception thrown while extracting an index key takes the record out of
+                // the index rather than failing the operation. The pending exception has to go
+                // with it, or the next JavaScript call on this context would inherit it.
+                Err(_) => {
+                    unsafe { JS_ClearPendingException(cx) };
+                    continue;
+                },
+            };
+            let keys = match extracted {
+                ExtractionResult::Key(IndexedDBKeyType::Array(elements)) if multi_entry => elements,
+                ExtractionResult::Key(key) => vec![key],
+                ExtractionResult::Invalid | ExtractionResult::Failure => continue,
+            };
+            entries.push(IndexBackfillEntry {
+                primary_key: record.primary_key,
+                keys,
+            });
+        }
+
+        IDBRequest::execute_async_bypassing_hold::<BackfillIndexResult, _>(
+            cx,
+            self,
+            |callback| {
+                AsyncOperation::ReadWrite(AsyncReadWriteOperation::BackfillIndex {
+                    callback,
+                    index_name: index_name.to_owned(),
+                    entries,
+                })
+            },
+            None,
+        )?;
         Ok(())
     }
 
@@ -811,8 +903,8 @@ impl IDBObjectStore {
         };
 
         if self
-            .get_idb_thread()
-            .send(IndexedDBThreadMsg::AsyncSchemaOperation {
+            .transaction
+            .send_or_hold(IndexedDBThreadMsg::AsyncSchemaOperation {
                 origin: self.global().origin().immutable().clone(),
                 database_name: self.db_name.to_string(),
                 store_name: self.name.borrow().clone().into(),
@@ -1191,8 +1283,8 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
             new_name: name.to_string(),
         };
         if self
-            .get_idb_thread()
-            .send(IndexedDBThreadMsg::AsyncSchemaOperation {
+            .transaction
+            .send_or_hold(IndexedDBThreadMsg::AsyncSchemaOperation {
                 origin: self.global().origin().immutable().clone(),
                 database_name: self.db_name.to_string(),
                 store_name: old_name.to_string(),
@@ -1289,8 +1381,8 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
         };
 
         if self
-            .get_idb_thread()
-            .send(IndexedDBThreadMsg::AsyncSchemaOperation {
+            .transaction
+            .send_or_hold(IndexedDBThreadMsg::AsyncSchemaOperation {
                 origin: self.global().origin().immutable().clone(),
                 database_name: self.db_name.to_string(),
                 store_name: self.name.borrow().clone().into(),
@@ -1303,7 +1395,22 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
         }
 
         // Step 12. Add index to this object store handle's index set.
-        let index = self.add_index(cx, name, options, key_path, true);
+        let index = self.add_index(cx, name.clone(), options, key_path, true);
+
+        // Step 11's operation: the index has to hold a record for every record the store
+        // already has, and the index keys come out of the stored JavaScript values, so the
+        // records make a round trip through the script thread. The transaction holds every
+        // request script places behind that round trip; without the hold a request placed in
+        // this same turn would reach the backend first and be ordered ahead of the index
+        // records, so the index would read as empty right after it was made.
+        let store_name = self.name.borrow().to_string();
+        let index_name = name.to_string();
+        if self
+            .transaction
+            .hold_outbound_for_backfill(&store_name, &index_name)
+        {
+            self.start_index_backfill(cx, &index_name)?;
+        }
 
         // Step 13. Return a new index handle associated with index and this object store handle.
         Ok(index)
@@ -1332,8 +1439,8 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
             index_name: name.to_string(),
         };
         if self
-            .get_idb_thread()
-            .send(IndexedDBThreadMsg::AsyncSchemaOperation {
+            .transaction
+            .send_or_hold(IndexedDBThreadMsg::AsyncSchemaOperation {
                 origin: self.global().origin().immutable().clone(),
                 database_name: self.db_name.to_string(),
                 store_name: self.name.borrow().clone().into(),

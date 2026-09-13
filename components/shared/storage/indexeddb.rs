@@ -517,6 +517,28 @@ pub enum PutItemResult {
     IndexConstraintViolated(String),
 }
 
+/// One record's index keys, prepared for the backfill a newly created index needs.
+///
+/// An index's keys come out of the JavaScript value the key path is evaluated against, and the
+/// backend holds only structured-clone bytes, so `create index` reads the store's records back
+/// to the script thread and sends the extracted keys out again as one of these per record. A
+/// multi-entry index arrives flattened, the same way `KvsIndexUpdate` does; an empty `keys`
+/// means the record has no place in the index.
+#[derive(Clone, Debug, Deserialize, MallocSizeOf, PartialEq, Serialize)]
+pub struct IndexBackfillEntry {
+    pub primary_key: IndexedDBKeyType,
+    pub keys: Vec<IndexedDBKeyType>,
+}
+
+#[derive(Clone, Debug, Deserialize, MallocSizeOf, PartialEq, Serialize)]
+pub enum BackfillIndexResult {
+    /// Every entry was written.
+    Done,
+    /// The index is unique and two of the store's records extract the same index key, so
+    /// `create index` has to abort the upgrade transaction.
+    UniqueConstraintViolated,
+}
+
 #[derive(Debug, Deserialize, MallocSizeOf, Serialize)]
 pub enum AsyncReadOnlyOperation {
     /// Gets the value associated with the given key in the associated idb data
@@ -578,6 +600,16 @@ pub enum AsyncReadWriteOperation {
     },
     /// Clears all key/value pairs in the associated idb data
     Clear(GenericCallback<BackendResult<()>>),
+    /// Write the index records a newly created index needs for the store's existing records.
+    ///
+    /// <https://w3c.github.io/IndexedDB/#dom-idbobjectstore-createindex> step 12 runs this as
+    /// part of the upgrade transaction. The keys arrive already extracted because the key path
+    /// is evaluated against a JavaScript value, which only the script thread holds.
+    BackfillIndex {
+        callback: GenericCallback<BackendResult<BackfillIndexResult>>,
+        index_name: String,
+        entries: Vec<IndexBackfillEntry>,
+    },
 }
 
 impl AsyncReadWriteOperation {
@@ -586,6 +618,7 @@ impl AsyncReadWriteOperation {
             Self::PutItem { callback, .. } => callback.send(Err(error)),
             Self::RemoveItem { callback, .. } => callback.send(Err(error)),
             Self::Clear(callback) => callback.send(Err(error)),
+            Self::BackfillIndex { callback, .. } => callback.send(Err(error)),
         };
     }
 }
