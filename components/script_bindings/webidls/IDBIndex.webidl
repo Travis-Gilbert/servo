@@ -17,9 +17,9 @@ interface IDBIndex {
 
   [NewObject, Throws] IDBRequest get(any query);
   [NewObject, Throws] IDBRequest getKey(any query);
-  [NewObject, Throws] IDBRequest getAll(optional any query,
+  [NewObject, Throws] IDBRequest getAll(optional any queryOrOptions,
                                 optional [EnforceRange] unsigned long count);
-  [NewObject, Throws] IDBRequest getAllKeys(optional any query,
+  [NewObject, Throws] IDBRequest getAllKeys(optional any queryOrOptions,
                                     optional [EnforceRange] unsigned long count);
   [NewObject, Throws] IDBRequest count(optional any query);
   [NewObject, Throws] IDBRequest getAllRecords(optional IDBGetAllOptions options = {});
@@ -28,8 +28,4 @@ interface IDBIndex {
                                     optional IDBCursorDirection direction = "next");
   [NewObject, Throws] IDBRequest openKeyCursor(optional any query,
                                        optional IDBCursorDirection direction = "next");
-
-  // The newer queryOrOptions overload of getAll and getAllKeys arrives with the same spec
-  // revision as getAllRecords; both signatures above match IDBObjectStore's live ones so the
-  // two interfaces stay consistent.
 };

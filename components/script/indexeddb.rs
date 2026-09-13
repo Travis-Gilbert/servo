@@ -205,16 +205,28 @@ pub(crate) fn is_valid_key_path(
     }
 }
 
+/// The result of converting a value to a key.
+///
+/// The two failures read alike at every ordinary call site, which throws a "DataError" for
+/// either. They are kept apart because `getAll` and `getAllKeys` tell their first argument
+/// apart by exactly this distinction: a value of a key type that happens not to convert (a NaN
+/// `Date`, a detached buffer, an array holding a non-key) is still a query and still throws,
+/// while a value of no key type at all is an `IDBGetAllOptions` dictionary.
 pub(crate) enum ConversionResult {
     Valid(IndexedDBKeyType),
-    Invalid,
+    /// A value whose type is a key type, carrying something that is not a key.
+    InvalidValue,
+    /// A value whose type is not a key type at all.
+    InvalidType,
 }
 
 impl ConversionResult {
     pub fn into_result(self) -> Result<IndexedDBKeyType, Error> {
         match self {
             ConversionResult::Valid(key) => Ok(key),
-            ConversionResult::Invalid => Err(Error::Data(None)),
+            ConversionResult::InvalidValue | ConversionResult::InvalidType => {
+                Err(Error::Data(None))
+            },
         }
     }
 }
@@ -236,7 +248,7 @@ pub fn convert_value_to_key(
             return Err(Error::JSFailed);
         }
         if same {
-            return Ok(ConversionResult::Invalid);
+            return Ok(ConversionResult::InvalidValue);
         }
     }
 
@@ -246,7 +258,7 @@ pub fn convert_value_to_key(
     if input.is_number() {
         // 3.1. If input is NaN then return "invalid value".
         if input.to_number().is_nan() {
-            return Ok(ConversionResult::Invalid);
+            return Ok(ConversionResult::InvalidValue);
         }
         // 3.2. Otherwise, return a new key with type number and value input.
         return Ok(ConversionResult::Valid(IndexedDBKeyType::Number(
@@ -279,7 +291,7 @@ pub fn convert_value_to_key(
                 }
                 // 3.2. If ms is NaN then return "invalid value".
                 if ms.is_nan() {
-                    return Ok(ConversionResult::Invalid);
+                    return Ok(ConversionResult::InvalidValue);
                 }
                 // 3.3. Otherwise, return a new key with type date and value ms.
                 return Ok(ConversionResult::Valid(IndexedDBKeyType::Date(ms)));
@@ -304,7 +316,7 @@ pub fn convert_value_to_key(
                 };
                 // 3.1. If input is detached then return "invalid value".
                 if is_detached {
-                    return Ok(ConversionResult::Invalid);
+                    return Ok(ConversionResult::InvalidValue);
                 }
                 // 3.2. Let bytes be the result of getting a copy of the bytes held
                 // by the buffer source input.
@@ -351,7 +363,7 @@ pub fn convert_value_to_key(
                     }
                     // 3.5.2. If hop is false, return "invalid value".
                     if !hop {
-                        return Ok(ConversionResult::Invalid);
+                        return Ok(ConversionResult::InvalidValue);
                     }
                     // 3.5.3. Let entry be ? Get(input, index).
                     rooted!(&in(cx) let mut entry = UndefinedValue());
@@ -371,7 +383,9 @@ pub fn convert_value_to_key(
                         ConversionResult::Valid(key) => key,
                         // 3.5.6. If key is "invalid value" or "invalid type"
                         //        abort these steps and return "invalid value".
-                        ConversionResult::Invalid => return Ok(ConversionResult::Invalid),
+                        ConversionResult::InvalidValue | ConversionResult::InvalidType => {
+                            return Ok(ConversionResult::InvalidValue);
+                        },
                     };
                     // 3.5.7. Append key to keys.
                     keys.push(key);
@@ -385,7 +399,7 @@ pub fn convert_value_to_key(
     }
 
     // Otherwise, return "invalid type".
-    Ok(ConversionResult::Invalid)
+    Ok(ConversionResult::InvalidType)
 }
 
 /// <https://w3c.github.io/IndexedDB/#convert-a-value-to-a-multientry-key>
@@ -458,6 +472,45 @@ pub fn convert_value_to_multientry_key(
 
     // Step 2. Otherwise, return the result of converting a value to a key with input.
     convert_value_to_key(cx, input, None)
+}
+
+/// <https://w3c.github.io/IndexedDB/#is-a-potentially-valid-key-range>
+///
+/// This is how `getAll` and `getAllKeys` tell a query from an `IDBGetAllOptions` dictionary.
+/// The question is about the value's type, not about the value: a NaN `Date`, a detached
+/// buffer and an array holding a non-key are all potentially valid key ranges, so they reach
+/// `convert a value to a key range` and throw a "DataError" there, instead of quietly being
+/// read as a dictionary with default members.
+///
+/// The spec's step list answers false for `undefined` and `null`, which is a spec bug: both
+/// convert to an unbounded key range, so both satisfy the definition this algorithm is named
+/// after, and reading them as a dictionary would discard the positional `count` that
+/// `getAll(undefined, 10)` passes. Web platform tests require the count to survive.
+#[expect(unsafe_code)]
+pub(crate) fn is_potentially_valid_key_range(
+    cx: &mut JSContext,
+    value: HandleValue,
+) -> Result<bool, Error> {
+    // Step 1. If value is a key range, return true.
+    if value.is_object() {
+        rooted!(&in(cx) let object = value.to_object());
+        if unsafe { root_from_object::<IDBKeyRange>(cx, object.get()).is_ok() } {
+            return Ok(true);
+        }
+    }
+
+    // Not a spec step. See the note above.
+    if value.get().is_undefined() || value.get().is_null() {
+        return Ok(true);
+    }
+
+    // Step 2. Let key be the result of converting a value to a key with value.
+    // Step 3. If key is "invalid type" return false.
+    // Step 4. Else return true.
+    Ok(!matches!(
+        convert_value_to_key(cx, value, None)?,
+        ConversionResult::InvalidType
+    ))
 }
 
 /// <https://www.w3.org/TR/IndexedDB-3/#convert-a-value-to-a-key-range>
@@ -894,12 +947,16 @@ pub(crate) fn extract_key(
         Some(true) => match convert_value_to_multientry_key(cx, r.handle())? {
             ConversionResult::Valid(key) => key,
             // Step 4. If key is invalid, return invalid.
-            ConversionResult::Invalid => return Ok(ExtractionResult::Invalid),
+            ConversionResult::InvalidValue | ConversionResult::InvalidType => {
+                return Ok(ExtractionResult::Invalid);
+            },
         },
         _ => match convert_value_to_key(cx, r.handle(), None)? {
             ConversionResult::Valid(key) => key,
             // Step 4. If key is invalid, return invalid.
-            ConversionResult::Invalid => return Ok(ExtractionResult::Invalid),
+            ConversionResult::InvalidValue | ConversionResult::InvalidType => {
+                return Ok(ExtractionResult::Invalid);
+            },
         },
     };
 

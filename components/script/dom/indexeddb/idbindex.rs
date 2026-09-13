@@ -14,7 +14,7 @@ use script_bindings::error::{Error, ErrorResult};
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 use script_bindings::str::DOMString;
 use storage_traits::indexeddb::{
-    AsyncOperation, AsyncReadOnlyOperation, KvsOperationContext, KvsOperationTarget,
+    AsyncOperation, AsyncReadOnlyOperation, KvsOperationContext, KvsOperationTarget, RecordsShape,
 };
 
 use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::IDBCursorDirection;
@@ -28,7 +28,9 @@ use crate::dom::idbobjectstore::KeyPath;
 use crate::dom::indexeddb::idbcursor::{IDBCursor, IterationParam, ObjectStoreOrIndex};
 use crate::dom::indexeddb::idbcursorwithvalue::IDBCursorWithValue;
 use crate::dom::indexeddb::idbobjectstore::IDBObjectStore;
-use crate::dom::indexeddb::idbrequest::{IDBRequest, RecordsParam, RequestSource};
+use crate::dom::indexeddb::idbrequest::{
+    GetAllKind, GetAllRequest, IDBRequest, RecordsParam, RequestSource,
+};
 use crate::indexeddb::convert_value_to_key_range;
 
 #[dom_struct]
@@ -210,6 +212,8 @@ impl IDBIndex {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
                     callback,
                     key_range: range,
+                    count: None,
+                    shape: RecordsShape::WithValues,
                 })
             },
             None,
@@ -387,7 +391,7 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
     fn GetAll(
         &self,
         cx: &mut JSContext,
-        query: HandleValue,
+        query_or_options: HandleValue,
         count: Option<u32>,
     ) -> Fallible<DomRoot<IDBRequest>> {
         // Step 1. Let transaction be this's transaction.
@@ -400,31 +404,27 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
         // "TransactionInactiveError" DOMException.
         self.check_transaction_active()?;
 
-        // Step 5. Let range be the result of converting a value to a key range with query.
-        // Rethrow any exceptions.
-        let serialized_query = convert_value_to_key_range(cx, query, None);
+        // Steps 6 to 9. Resolve the range, the direction and the count the read may apply.
+        let request = GetAllRequest::resolve(cx, GetAllKind::Values, query_or_options, count)?;
 
-        // Step 6. Let operation be an algorithm to run retrieve multiple referenced values from
-        // an index with the current Realm record, index, range, and count if given.
-        // Step 7. Return the result (an IDBRequest) of running asynchronously execute a request
-        // with this and operation.
-        serialized_query.and_then(|q| {
-            IDBRequest::execute_async_from_source(
-                cx,
-                &self.object_store,
-                RequestSource::Index(Dom::from_ref(self)),
-                self.operation_context(),
-                |callback| {
-                    AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllItems {
-                        callback,
-                        key_range: q,
-                        count,
-                    })
-                },
-                None,
-                None,
-            )
-        })
+        // Steps 10 to 13. Run retrieve multiple records from an index as the operation of an
+        // asynchronously executed request.
+        IDBRequest::execute_async_from_source(
+            cx,
+            &self.object_store,
+            RequestSource::Index(Dom::from_ref(self)),
+            self.operation_context(),
+            |callback| {
+                AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
+                    callback,
+                    key_range: request.key_range,
+                    count: request.count,
+                    shape: GetAllKind::Values.shape(),
+                })
+            },
+            None,
+            Some(request.records_param),
+        )
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbindex-getallrecords>
@@ -443,30 +443,26 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
         // "TransactionInactiveError" DOMException.
         self.check_transaction_active()?;
 
-        // Step 5. Let range be the result of converting a value to a key range with
-        // options["query"]. Rethrow any exceptions.
-        let key_range = convert_value_to_key_range(cx, options.query.handle(), None)?;
+        // Steps 6 to 9. Resolve the range, the direction and the count the read may apply.
+        let request = GetAllRequest::from_options(cx, GetAllKind::Records, &options)?;
 
-        // Step 6. Let operation be an algorithm to run retrieve multiple records from an index
-        // with the current Realm record, index, range, options["direction"] and
-        // options["count"] if given.
-        // Step 7. Return the result (an IDBRequest) of running asynchronously execute a request
-        // with this and operation.
-        let (records_param, count) = RecordsParam::get_all(&options);
+        // Steps 10 to 13. Run retrieve multiple records from an index as the operation of an
+        // asynchronously executed request.
         IDBRequest::execute_async_from_source(
             cx,
             &self.object_store,
             RequestSource::Index(Dom::from_ref(self)),
             self.operation_context(),
             |callback| {
-                AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllRecords {
+                AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
                     callback,
-                    key_range,
-                    count,
+                    key_range: request.key_range,
+                    count: request.count,
+                    shape: GetAllKind::Records.shape(),
                 })
             },
             None,
-            Some(records_param),
+            Some(request.records_param),
         )
     }
 
@@ -474,7 +470,7 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
     fn GetAllKeys(
         &self,
         cx: &mut JSContext,
-        query: HandleValue,
+        query_or_options: HandleValue,
         count: Option<u32>,
     ) -> Fallible<DomRoot<IDBRequest>> {
         // Step 1. Let transaction be this's transaction.
@@ -487,31 +483,27 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
         // "TransactionInactiveError" DOMException.
         self.check_transaction_active()?;
 
-        // Step 5. Let range be the result of converting a value to a key range with query.
-        // Rethrow any exceptions.
-        let serialized_query = convert_value_to_key_range(cx, query, None);
+        // Steps 6 to 9. Resolve the range, the direction and the count the read may apply.
+        let request = GetAllRequest::resolve(cx, GetAllKind::PrimaryKeys, query_or_options, count)?;
 
-        // Step 6. Let operation be an algorithm to run retrieve multiple values from an index
-        // with index, range, and count if given.
-        // Step 7. Return the result (an IDBRequest) of running asynchronously execute a request
-        // with this and operation.
-        serialized_query.and_then(|q| {
-            IDBRequest::execute_async_from_source(
-                cx,
-                &self.object_store,
-                RequestSource::Index(Dom::from_ref(self)),
-                self.operation_context(),
-                |callback| {
-                    AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllKeys {
-                        callback,
-                        key_range: q,
-                        count,
-                    })
-                },
-                None,
-                None,
-            )
-        })
+        // Steps 10 to 13. Run retrieve multiple records from an index as the operation of an
+        // asynchronously executed request.
+        IDBRequest::execute_async_from_source(
+            cx,
+            &self.object_store,
+            RequestSource::Index(Dom::from_ref(self)),
+            self.operation_context(),
+            |callback| {
+                AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
+                    callback,
+                    key_range: request.key_range,
+                    count: request.count,
+                    shape: GetAllKind::PrimaryKeys.shape(),
+                })
+            },
+            None,
+            Some(request.records_param),
+        )
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbindex-count>

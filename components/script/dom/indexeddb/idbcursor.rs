@@ -13,8 +13,9 @@ use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 use storage_traits::indexeddb::{IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord};
 
-use storage_traits::indexeddb::{AsyncOperation, AsyncReadOnlyOperation, KvsOperationContext,
-    KvsOperationTarget};
+use storage_traits::indexeddb::{
+    AsyncOperation, AsyncReadOnlyOperation, KvsOperationContext, KvsOperationTarget, RecordsShape,
+};
 
 use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::{
     IDBCursorDirection, IDBCursorMethods,
@@ -327,6 +328,8 @@ impl IDBCursor {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
                     callback,
                     key_range,
+                    count: None,
+                    shape: RecordsShape::WithValues,
                 })
             },
             Some(request),

@@ -15,7 +15,7 @@ use storage_traits::indexeddb::{
     AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, AsyncSchemaOperation,
     BackendError, BackendResult, CreateObjectResult, IndexedDBDescription, IndexedDBIndex,
     IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord, IndexedDBTxnMode, KeyPath, KvsEngine,
-    KvsIndexUpdate, KvsOperationTarget, KvsTransaction, PutItemResult,
+    KvsIndexUpdate, KvsOperationTarget, KvsTransaction, PutItemResult, RecordsShape,
 };
 
 use crate::shared::{DB_INIT_PRAGMAS, DB_PRAGMAS, is_sqlite_disk_full_error};
@@ -251,21 +251,27 @@ impl SqliteEngine {
         Self::get(connection, store, key_range).map(|opt| opt.map(|model| model.data))
     }
 
-    fn get_all(
+    /// The records of an object store that a key range covers, in ascending key order.
+    ///
+    /// An object store record's key and primary key are the same key, which is what makes the
+    /// answer the same shape as an index request's.
+    fn object_store_records(
         connection: &Connection,
         store: object_store_model::Model,
         key_range: IndexedDBKeyRange,
         count: Option<u32>,
-    ) -> Result<Vec<object_data_model::Model>, Error> {
+        shape: RecordsShape,
+    ) -> Result<Vec<SourceRecord>, Error> {
         let query = range_to_query(key_range);
         let mut sql_query = sea_query::Query::select();
         sql_query
             .from(object_data_model::Column::Table)
-            .columns(vec![
-                object_data_model::Column::ObjectStoreId,
-                object_data_model::Column::Key,
-                object_data_model::Column::Data,
-            ])
+            .column(object_data_model::Column::Key);
+        // A key-only request pays for every stored byte it selects and then discards.
+        if shape == RecordsShape::WithValues {
+            sql_query.column(object_data_model::Column::Data);
+        }
+        sql_query
             .and_where(query.and(Expr::col(object_data_model::Column::ObjectStoreId).is(store.id)))
             // Every operation reaching here (getAll, getAllKeys, getAllRecords, cursor
             // iteration) is defined in key order, and a LIMIT without an ORDER BY truncates
@@ -279,43 +285,20 @@ impl SqliteEngine {
         }
         let (sql, values) = sql_query.build_rusqlite(SqliteQueryBuilder);
         let mut stmt = connection.prepare(&sql)?;
-        let models = stmt
+        let records = stmt
             .query_and_then(&*values.as_params(), |row| {
-                object_data_model::Model::try_from(row)
+                let key: Vec<u8> = row.get(0)?;
+                Ok::<SourceRecord, Error>(SourceRecord {
+                    key: key.clone(),
+                    primary_key: key,
+                    data: match shape {
+                        RecordsShape::WithValues => row.get(1)?,
+                        RecordsShape::KeysOnly => Vec::new(),
+                    },
+                })
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(models)
-    }
-
-    fn get_all_keys(
-        connection: &Connection,
-        store: object_store_model::Model,
-        key_range: IndexedDBKeyRange,
-        count: Option<u32>,
-    ) -> Result<Vec<Vec<u8>>, Error> {
-        Self::get_all(connection, store, key_range, count)
-            .map(|models| models.into_iter().map(|m| m.key).collect())
-    }
-
-    fn get_all_items(
-        connection: &Connection,
-        store: object_store_model::Model,
-        key_range: IndexedDBKeyRange,
-        count: Option<u32>,
-    ) -> Result<Vec<Vec<u8>>, Error> {
-        Self::get_all(connection, store, key_range, count)
-            .map(|models| models.into_iter().map(|m| m.data).collect())
-    }
-
-    #[expect(clippy::type_complexity)]
-    fn get_all_records(
-        connection: &Connection,
-        store: object_store_model::Model,
-        key_range: IndexedDBKeyRange,
-        count: Option<u32>,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Error> {
-        Self::get_all(connection, store, key_range, count)
-            .map(|models| models.into_iter().map(|m| (m.key, m.data)).collect())
+        Ok(records)
     }
 
     /// Look up one declared index of a store by name.
@@ -347,13 +330,20 @@ impl SqliteEngine {
         index_name: &str,
         key_range: IndexedDBKeyRange,
         count: Option<u32>,
+        shape: RecordsShape,
     ) -> Result<Vec<SourceRecord>, Error> {
         let Some(index) = Self::index_by_name(connection, store.id, index_name)? else {
             return Ok(Vec::new());
         };
         let table = index_table(&index);
+        // The join stays even for a key-only request: it is what drops an index record whose
+        // object store row is already gone. Only the selected value changes.
+        let value_column = match shape {
+            RecordsShape::WithValues => ", o.data",
+            RecordsShape::KeysOnly => "",
+        };
         let mut sql = format!(
-            "SELECT i.value, i.object_data_key, o.data FROM {table} i \
+            "SELECT i.value, i.object_data_key{value_column} FROM {table} i \
              JOIN object_data o \
              ON o.object_store_id = i.object_store_id AND o.key = i.object_data_key \
              WHERE i.index_id = ? AND i.object_store_id = ?"
@@ -375,7 +365,10 @@ impl SqliteEngine {
                 Ok::<SourceRecord, Error>(SourceRecord {
                     key: row.get(0)?,
                     primary_key: row.get(1)?,
-                    data: row.get(2)?,
+                    data: match shape {
+                        RecordsShape::WithValues => row.get(2)?,
+                        RecordsShape::KeysOnly => Vec::new(),
+                    },
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -555,10 +548,16 @@ impl SqliteEngine {
     ) -> Result<(), Error> {
         // The index records name their primary keys, so the set has to be read before the rows
         // that define it are gone.
-        let removed = Self::get_all(connection, store.clone(), key_range.clone(), None)?
-            .into_iter()
-            .map(|model| model.key)
-            .collect::<Vec<_>>();
+        let removed = Self::object_store_records(
+            connection,
+            store.clone(),
+            key_range.clone(),
+            None,
+            RecordsShape::KeysOnly,
+        )?
+        .into_iter()
+        .map(|record| record.key)
+        .collect::<Vec<_>>();
         Self::delete_index_records(connection, store.id, &removed)?;
         let query = range_to_query(key_range);
         let (sql, values) = sea_query::Query::delete()
@@ -908,66 +907,11 @@ impl KvsEngine for SqliteEngine {
                                 name,
                                 key_range,
                                 Some(1),
+                                RecordsShape::WithValues,
                             )
                             .map(|records| records.into_iter().next().map(|record| record.data)),
                             KvsOperationTarget::ObjectStore => {
                                 Self::get_item(&connection, object_store, key_range)
-                            },
-                        };
-                        let _ = callback
-                            .send(result.map_err(|e| BackendError::DbErr(format!("{:?}", e))));
-                    },
-                    AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllKeys {
-                        callback,
-                        key_range,
-                        count,
-                    }) => {
-                        let result = match &context.target {
-                            KvsOperationTarget::Index { name } => Self::index_records(
-                                &connection,
-                                &object_store,
-                                name,
-                                key_range,
-                                count,
-                            )
-                            .map(|records| {
-                                records
-                                    .into_iter()
-                                    .map(|record| record.primary_key)
-                                    .collect::<Vec<_>>()
-                            }),
-                            KvsOperationTarget::ObjectStore => {
-                                Self::get_all_keys(&connection, object_store, key_range, count)
-                            },
-                        };
-                        let _ = callback.send(
-                            result
-                                .and_then(|keys| {
-                                    keys.iter()
-                                        .map(|k| decode_key(k))
-                                        .collect::<Result<Vec<_>, Error>>()
-                                })
-                                .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
-                        );
-                    },
-                    AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllItems {
-                        callback,
-                        key_range,
-                        count,
-                    }) => {
-                        let result = match &context.target {
-                            KvsOperationTarget::Index { name } => Self::index_records(
-                                &connection,
-                                &object_store,
-                                name,
-                                key_range,
-                                count,
-                            )
-                            .map(|records| {
-                                records.into_iter().map(|record| record.data).collect()
-                            }),
-                            KvsOperationTarget::ObjectStore => {
-                                Self::get_all_items(&connection, object_store, key_range, count)
                             },
                         };
                         let _ = callback
@@ -1000,54 +944,16 @@ impl KvsEngine for SqliteEngine {
                     AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
                         callback,
                         key_range,
-                    }) => {
-                        // An object store cursor's key and primary key are the same key. An index
-                        // cursor's are not, and keeping them apart here is what lets the cursor
-                        // report the index key while continuing from the object store position.
-                        let result = match &context.target {
-                            KvsOperationTarget::Index { name } => {
-                                Self::index_records(&connection, &object_store, name, key_range, None)
-                            },
-                            KvsOperationTarget::ObjectStore => {
-                                Self::get_all_records(&connection, object_store, key_range, None)
-                                    .map(|records| {
-                                        records
-                                            .into_iter()
-                                            .map(|(key, data)| SourceRecord {
-                                                key: key.clone(),
-                                                primary_key: key,
-                                                data,
-                                            })
-                                            .collect()
-                                    },
-                                )
-                            },
-                        };
-                        let _ = callback.send(
-                            result
-                                .and_then(|records: Vec<SourceRecord>| {
-                                    records
-                                        .into_iter()
-                                        .map(|record| {
-                                            Ok(IndexedDBRecord {
-                                                key: decode_key(&record.key)?,
-                                                primary_key: decode_key(&record.primary_key)?,
-                                                value: record.data,
-                                            })
-                                        })
-                                        .collect::<Result<Vec<_>, Error>>()
-                                })
-                                .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
-                        );
-                    },
-                    AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllRecords {
-                        callback,
-                        key_range,
                         count,
+                        shape,
                     }) => {
-                        // Same shape as Iterate, with the spec's `count` pushed into the
-                        // query's LIMIT. Direction is not applied here: the DOM applies it,
-                        // the way IDBCursor already does. See ADR12.
+                        // An object store record's key and primary key are the same key. An
+                        // index record's are not, and keeping them apart here is what lets a
+                        // cursor report the index key while continuing from the object store
+                        // position, and `getAllKeys` on an index answer with primary keys.
+                        //
+                        // Direction is not applied here: the DOM applies it, the way IDBCursor
+                        // already does. See ADR12.
                         let result = match &context.target {
                             KvsOperationTarget::Index { name } => Self::index_records(
                                 &connection,
@@ -1055,20 +961,15 @@ impl KvsEngine for SqliteEngine {
                                 name,
                                 key_range,
                                 count,
+                                shape,
                             ),
-                            KvsOperationTarget::ObjectStore => {
-                                Self::get_all_records(&connection, object_store, key_range, count)
-                                    .map(|records| {
-                                        records
-                                            .into_iter()
-                                            .map(|(key, data)| SourceRecord {
-                                                key: key.clone(),
-                                                primary_key: key,
-                                                data,
-                                            })
-                                            .collect()
-                                    })
-                            },
+                            KvsOperationTarget::ObjectStore => Self::object_store_records(
+                                &connection,
+                                object_store,
+                                key_range,
+                                count,
+                                shape,
+                            ),
                         };
                         let _ = callback.send(
                             result
@@ -1106,6 +1007,7 @@ impl KvsEngine for SqliteEngine {
                                 name,
                                 key_range,
                                 Some(1),
+                                RecordsShape::KeysOnly,
                             )
                             .map(|records| {
                                 records.into_iter().next().map(|record| record.primary_key)
@@ -1353,7 +1255,7 @@ mod tests {
     use storage_traits::indexeddb::{
         AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, CreateObjectResult,
         IndexedDBDescription, IndexedDBKeyRange, IndexedDBKeyType, IndexedDBTxnMode, KeyPath,
-        KvsEngine, KvsOperation, KvsTransaction, PutItemResult,
+        KvsEngine, KvsOperation, KvsTransaction, PutItemResult, RecordsShape,
     };
     use url::Host;
 
@@ -1762,13 +1664,14 @@ mod tests {
                     KvsOperation {
                         store_name: store_name.to_owned(),
                         context: Default::default(),
-                        operation: AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllItems {
+                        operation: AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
                             callback: get_callback(get_all_items.0),
                             key_range: IndexedDBKeyRange::lower_bound(
                                 IndexedDBKeyType::Number(0.0),
                                 false,
                             ),
                             count: None,
+                            shape: RecordsShape::WithValues,
                         }),
                     },
                     KvsOperation {
@@ -1817,7 +1720,14 @@ mod tests {
         let get_result = get_item_none.1.recv().unwrap();
         let value = get_result.unwrap();
         assert_eq!(value, None);
-        let all_items = get_all_items.1.recv().unwrap().unwrap();
+        let all_items: Vec<Vec<u8>> = get_all_items
+            .1
+            .recv()
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .map(|record| record.value)
+            .collect();
         assert_eq!(all_items.len(), 3);
         // Check that all three items are present
         assert!(all_items.contains(&vec![13, 14, 15]));
@@ -1880,14 +1790,20 @@ mod tests {
             )
             .expect("Failed to delete key range");
 
-            SqliteEngine::get_all_keys(&db.connection, store, IndexedDBKeyRange::default(), None)
-                .expect("Failed to read remaining keys")
-                .into_iter()
-                .map(|raw_key| match encoding::deserialize(&raw_key).unwrap() {
-                    IndexedDBKeyType::Number(number) => number as i32,
-                    other => panic!("Expected numeric key, got {other:?}"),
-                })
-                .collect()
+            SqliteEngine::object_store_records(
+                &db.connection,
+                store,
+                IndexedDBKeyRange::default(),
+                None,
+                RecordsShape::KeysOnly,
+            )
+            .expect("Failed to read remaining keys")
+            .into_iter()
+            .map(|record| match encoding::deserialize(&record.key).unwrap() {
+                IndexedDBKeyType::Number(number) => number as i32,
+                other => panic!("Expected numeric key, got {other:?}"),
+            })
+            .collect()
         }
 
         assert_eq!(
