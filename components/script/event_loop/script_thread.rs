@@ -44,11 +44,10 @@ use devtools_traits::{
 };
 use embedder_traits::user_contents::{UserContentManagerId, UserContents, UserScript};
 use embedder_traits::{
-    ViewportDetails, WebDriverScriptCommand,
-    ViewportDetails, WebDriverScriptCommand, WebViewPoint,
-    JavaScriptEvaluationError, JavaScriptEvaluationId, MediaSessionActionType, Theme,
-    EmbedderControlResponse, EmbedderMsg, FocusSequenceNumber, HitTestResult, InputEventOutcome,
     DocumentLayoutSnapshot, DocumentLayoutSnapshotError, EmbedderControlId,
+    EmbedderControlResponse, EmbedderMsg, FocusSequenceNumber, HitTestResult, InputEventOutcome,
+    JavaScriptEvaluationError, JavaScriptEvaluationId, MediaSessionActionType, Theme,
+    ViewportDetails, WebDriverScriptCommand, WebViewPoint,
 };
 use encoding_rs::Encoding;
 use fonts::{FontContext, SystemFontServiceProxy, WebFontLoadEvent};
