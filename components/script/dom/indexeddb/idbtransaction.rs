@@ -528,10 +528,19 @@ impl IDBTransaction {
         }
     }
 
+    /// <https://w3c.github.io/IndexedDB/#asynchronously-execute-a-request> step 4: add the
+    /// request to the end of this transaction's request list.
+    ///
+    /// The list holds requests, not executions. A cursor's `continue()` runs a second operation
+    /// against the request script already holds, and a request that is already listed moves to
+    /// the end rather than appearing twice: the list is walked once per request when an abort
+    /// answers everything still outstanding, and a request listed twice would be settled twice.
     pub fn add_request(&self, request: &IDBRequest) {
-        self.requests.borrow_mut().push(Dom::from_ref(request));
-        // Increase the number of outstanding requests so that we can detect when
-        // the transaction is allowed to finish.
+        let mut requests = self.requests.borrow_mut();
+        requests.retain(|listed| *listed != request);
+        requests.push(Dom::from_ref(request));
+        // The count, unlike the list, counts executions: a reused request owes one answer per
+        // operation run against it, and each of those answers calls `request_finished`.
         self.pending_request_count
             .set(self.pending_request_count.get() + 1);
     }
