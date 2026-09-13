@@ -16,10 +16,7 @@ interface IDBCursor {
   // failure instead of taking the content process down with them.
   [Throws] readonly attribute any key;
   [Throws] readonly attribute any primaryKey;
-  // The request is stored on the cursor by the open cursor steps rather than at
-  // construction, so the getter reports a cursor that has none instead of taking the
-  // content process down with it.
-  [Throws, SameObject] readonly attribute IDBRequest request;
+  [SameObject] readonly attribute IDBRequest request;
 
   [Throws] undefined advance([EnforceRange] unsigned long count);
   [Throws] undefined continue(optional any key);

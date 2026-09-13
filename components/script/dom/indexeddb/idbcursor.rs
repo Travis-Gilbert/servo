@@ -433,14 +433,10 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
     }
 
     /// <https://w3c.github.io/IndexedDB/#dom-idbcursor-request>
-    fn GetRequest(&self) -> Fallible<DomRoot<IDBRequest>> {
-        // A cursor reaches script only as the result of the request that opened it, and that
-        // request is what `set_request` stores, so the getter normally has one. The invariant
-        // is established by IDBObjectStore::OpenCursor and IDBIndex::OpenCursor rather than
-        // here, so report a cursor without one the way `run_iteration` already reports it.
-        self.request.get().ok_or(Error::InvalidState(Some(
-            "The cursor has no request".to_owned(),
-        )))
+    fn Request(&self) -> DomRoot<IDBRequest> {
+        self.request
+            .get()
+            .expect("IDBCursor.request should be set when cursor is opened")
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbcursor-advance>

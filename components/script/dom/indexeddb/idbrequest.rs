@@ -308,6 +308,7 @@ fn project_records(
 #[derive(Clone)]
 struct RequestListener {
     request: Trusted<IDBRequest>,
+    transaction: Trusted<IDBTransaction>,
     records_param: Option<RecordsParam>,
     request_id: u64,
     visibility: RequestVisibility,
@@ -446,15 +447,19 @@ impl RequestListener {
     fn handle_async_request_finished(&self, cx: &mut JSContext, result: BackendResult<IdbResult>) {
         let request = self.request.root();
         let global = request.global();
+        let transaction = self.transaction.root();
 
-        // Every request a RequestListener answers was given a transaction by
-        // `execute_async_inner`, and only IDBOpenDBRequest, which never reaches this listener,
-        // ever clears one. A reply that arrives without one has nothing left to report it to:
-        // the remaining steps all run against the transaction.
-        let Some(transaction) = request.transaction.get() else {
-            warn!("An IndexedDB reply arrived for a request with no transaction; dropping it.");
-            return;
-        };
+        // Completion bookkeeping belongs to the transaction that issued the backend request,
+        // not to the request's mutable script-facing association. Keep processing with the
+        // retained transaction if that association was unexpectedly cleared or replaced, or the
+        // pending count and RequestHandled frontier would never advance.
+        match request.transaction.get() {
+            Some(request_transaction) if &*request_transaction == &*transaction => {},
+            Some(_) => warn!(
+                "An IndexedDB reply arrived for a request associated with a different transaction."
+            ),
+            None => warn!("An IndexedDB reply arrived for a request with no transaction."),
+        }
 
         // <https://w3c.github.io/IndexedDB/#abort-a-transaction> step 5 already answered this
         // request with an `AbortError`, which is what "abort the steps to asynchronously
@@ -787,13 +792,7 @@ impl RequestListener {
         error: Error,
     ) {
         let request_id = self.request_id;
-        // As in `handle_async_request_finished`: every step below runs against the
-        // transaction, and `fire an error event` is defined in terms of it, so an error with
-        // no transaction to carry it has nowhere to go.
-        let Some(transaction) = request.transaction.get() else {
-            warn!("An IndexedDB request failed with no transaction to report the error to.");
-            return;
-        };
+        let transaction = self.transaction.root();
         // Substep 1: Set the result of request to undefined.
         rooted!(&in(cx) let undefined = UndefinedValue());
         request.set_result(undefined.handle());
@@ -1186,6 +1185,7 @@ impl IDBRequest {
         // the transaction's commit bookkeeping in step with the requests script placed.
         let listener = RequestListener {
             request: Trusted::new(&request),
+            transaction: Trusted::new(&transaction),
             records_param: None,
             request_id,
             visibility: RequestVisibility::Script,
@@ -1253,6 +1253,7 @@ impl IDBRequest {
 
         let response_listener = RequestListener {
             request: Trusted::new(&request),
+            transaction: Trusted::new(&transaction),
             records_param: records_param.clone(),
             request_id,
             visibility,

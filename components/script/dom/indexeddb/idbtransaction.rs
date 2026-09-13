@@ -713,7 +713,10 @@ impl IDBTransaction {
                         // https://w3c.github.io/IndexedDB/#abort-an-upgrade-transaction
                         this.db.set_version(old_version);
                     }
-                    this.db.clear_upgrade_transaction(&this);
+                    // Abort finalization is already the structured failure path. A missing or
+                    // mismatched connection slot is diagnosed by the identity-aware cleanup;
+                    // importantly, it never clears another transaction.
+                    let _ = this.db.clear_upgrade_transaction(&this);
                 }
                 let global = this.global();
                 let event = Event::new(
@@ -771,16 +774,30 @@ impl IDBTransaction {
                 let this = this.root();
                 this.committing.set(false);
                 this.commit_started.set(false);
-                this.version_change_old_version.set(None);
-                this.version_change_old_object_store_names
-                    .borrow_mut()
-                    .take();
                 if this.mode == IDBTransactionMode::Versionchange {
                     // https://w3c.github.io/IndexedDB/#commit-transaction
                     // Step 5.1: If transaction is an upgrade transaction, then set transaction’s connection’s
                     // associated database’s upgrade transaction to null.
-                    this.db.clear_upgrade_transaction(&this);
+                    if let Err(error) = this.db.clear_upgrade_transaction(&this) {
+                        // A versionchange transaction cannot report successful completion while
+                        // its connection has lost or replaced the transaction being completed.
+                        // Convert the invariant failure into the normal structured abort path.
+                        this.initiate_abort(
+                            cx,
+                            Error::Operation(Some(format!(
+                                "Could not clear the IndexedDB upgrade transaction: {error:?}"
+                            ))),
+                        );
+                        this.request_backend_abort();
+                        return;
+                    }
                 }
+                // Keep the rollback snapshots intact until fallible upgrade cleanup succeeds.
+                // If cleanup fails, the abort path above still needs both to restore DOM state.
+                this.version_change_old_version.set(None);
+                this.version_change_old_object_store_names
+                    .borrow_mut()
+                    .take();
                 // https://w3c.github.io/IndexedDB/#commit-transaction
                 // Step 5.2: Set transaction’s state to finished.
                 this.finished.set(true);
@@ -932,10 +949,10 @@ impl IDBTransaction {
 
     /// The callback an `AsyncSchemaOperation` carries to report why it failed.
     ///
-    /// Returns `None` when the reply channel cannot be created. The operation cannot be sent
-    /// without it, so the callers report that the same way they report a send the storage
-    /// thread never took: the local handle state still changes and the failure is logged.
-    pub(crate) fn create_abort_callback(&self) -> Option<GenericCallback<BackendError>> {
+    /// Returns a structured failure when the reply channel cannot be created. The schema
+    /// operation cannot be sent without it, so callers must propagate the failure before
+    /// changing their local handle state.
+    pub(crate) fn create_abort_callback(&self) -> Fallible<GenericCallback<BackendError>> {
         let trusted_transaction = Trusted::new(self);
         let task_source = self
             .global()
@@ -946,29 +963,31 @@ impl IDBTransaction {
             self.global().time_profiler_chan().clone(),
             move |error: Result<BackendError, ipc_channel::IpcError>| {
                 let error = match error {
-                    Ok(error) => error,
-                    // This callback exists only to carry the reason a schema operation
-                    // failed. Losing it loses the reason, not the abort, which the failing
-                    // operation drives on its own; but the reason is then gone for good,
-                    // so it is worth saying that it was lost.
+                    Ok(error) => map_backend_error_to_dom_error(error),
+                    // The backend reports schema failure through this callback; it does not
+                    // independently abort the DOM transaction. If the reply is lost, preserve
+                    // that failure semantic with a generic operation error.
                     Err(error) => {
-                        return warn!(
-                            "Lost the reason an IndexedDB schema operation failed: {error}"
-                        );
+                        warn!("Lost the reason an IndexedDB schema operation failed: {error}");
+                        Error::Operation(Some(
+                            "The IndexedDB schema operation failure reply was lost".to_owned(),
+                        ))
                     },
                 };
                 let trusted_transaction = trusted_transaction.clone();
                 task_source.queue(task!(delete_failed: move |cx| {
                     let transaction = trusted_transaction.root();
-                    transaction.initiate_abort(cx, map_backend_error_to_dom_error(error));
+                    transaction.initiate_abort(cx, error);
                     transaction.request_backend_abort();
                 }));
             },
         )
-        .inspect_err(|error| {
+        .map_err(|error| {
             warn!("Could not create an IndexedDB schema operation abort callback: {error:?}");
+            Error::Operation(Some(
+                "Could not create the IndexedDB schema operation callback".to_owned(),
+            ))
         })
-        .ok()
     }
 }
 

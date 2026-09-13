@@ -318,16 +318,18 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
             )));
         }
 
-        // Step 9: Set index’s name to name.
-        // An aborting upgrade transaction has to put the first name back, not the name of
-        // whatever rename happened to be last.
+        // Queue the backend rename before changing either local name. If callback creation or
+        // transport fails, the index remains consistently named on both sides.
+        self.object_store.rename_index(&stored_name, &name)?;
+
+        // Step 9: Set index’s name to name. An aborting upgrade transaction has to put the
+        // first name back, not the name of whatever rename happened to be last.
         {
             let mut rollback_name = self.rollback_name.borrow_mut();
             if rollback_name.is_none() {
                 *rollback_name = Some(stored_name.clone());
             }
         }
-        self.object_store.rename_index(&stored_name, &name);
 
         // Step 10: Set this’s name to name.
         *stored_name = name;

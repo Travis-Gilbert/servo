@@ -1009,45 +1009,44 @@ impl IDBObjectStore {
     }
 
     /// The caller must ensure that the original index exists.
-    pub(crate) fn rename_index(&self, name: &DOMString, new_name: &DOMString) {
-        match self.transaction.create_abort_callback() {
-            Some(callback) => {
-                let operation = AsyncSchemaOperation::RenameIndex {
-                    callback,
-                    index_name: name.to_string(),
-                    new_name: new_name.to_string(),
-                };
-
-                if self
-                    .transaction
-                    .send_or_hold(IndexedDBThreadMsg::AsyncSchemaOperation {
-                        origin: self.global().origin().immutable().clone(),
-                        database_name: self.db_name.to_string(),
-                        store_name: self.name.borrow().clone().into(),
-                        operation,
-                        transaction_serial_number: self.transaction.get_serial_number(),
-                    })
-                    .is_err()
-                {
-                    warn!("Could not send AsyncSchemaOperation");
-                }
-            },
-            None => warn!("Could not send AsyncSchemaOperation"),
-        }
+    pub(crate) fn rename_index(&self, name: &DOMString, new_name: &DOMString) -> ErrorResult {
+        let index = self
+            .index_set
+            .borrow()
+            .get(name)
+            .map(|index| index.as_rooted())
+            .ok_or_else(|| {
+                warn!("rename_index called for an index that is not in the index set");
+                Error::InvalidState(Some(
+                    "The index to rename is no longer in its object store".to_owned(),
+                ))
+            })?;
+        let operation = AsyncSchemaOperation::RenameIndex {
+            callback: self.transaction.create_abort_callback()?,
+            index_name: name.to_string(),
+            new_name: new_name.to_string(),
+        };
+        self.transaction
+            .send_or_hold(IndexedDBThreadMsg::AsyncSchemaOperation {
+                origin: self.global().origin().immutable().clone(),
+                database_name: self.db_name.to_string(),
+                store_name: self.name.borrow().clone().into(),
+                operation,
+                transaction_serial_number: self.transaction.get_serial_number(),
+            })
+            .map_err(|()| {
+                warn!("Could not send RenameIndex to the IndexedDB backend");
+                Error::Operation(Some("Could not send the rename index operation".to_owned()))
+            })?;
 
         // We also need to update the key in the index set.
-        // IDBIndex::SetName checks the index is in this handle's set before renaming it, so
-        // the removal normally yields the handle. A set that no longer holds it has nothing to
-        // re-key, and an entry invented under the new name would not be the renamed index.
-        let removed = self.index_set.borrow_mut().remove(name);
-        let Some(index) = removed else {
-            warn!("rename_index called for an index that is not in the index set.");
-            return;
-        };
-        let index = index.as_rooted();
+        if self.index_set.borrow_mut().remove(name).is_none() {
+            warn!("The index disappeared while its backend rename was being queued");
+        }
         self.index_set
             .borrow_mut()
             .insert(new_name.clone(), Dom::from_ref(&index));
+        Ok(())
     }
 }
 
@@ -1389,38 +1388,35 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
         }
 
         let old_name = self.name.borrow().clone();
-        if let Some(abort_state) = self.abort_state_on_abort.borrow_mut().as_mut() &&
-            abort_state.rollback_name.is_none()
-        {
-            abort_state.rollback_name = Some(old_name.clone());
-        }
 
         // Step 9. Set store’s name to name.
         // The store also has to be renamed in the backend, which keys a store's rows and
         // every later request against it by name. Without this the rename lived only on
         // the handle, and the first request issued after the upgrade transaction
         // committed failed against a store the backend still held under the old name.
-        match self.transaction.create_abort_callback() {
-            Some(callback) => {
-                let operation = AsyncSchemaOperation::RenameObjectStore {
-                    callback,
-                    new_name: name.to_string(),
-                };
-                if self
-                    .transaction
-                    .send_or_hold(IndexedDBThreadMsg::AsyncSchemaOperation {
-                        origin: self.global().origin().immutable().clone(),
-                        database_name: self.db_name.to_string(),
-                        store_name: old_name.to_string(),
-                        operation,
-                        transaction_serial_number: self.transaction.get_serial_number(),
-                    })
-                    .is_err()
-                {
-                    warn!("Could not send AsyncSchemaOperation");
-                }
-            },
-            None => warn!("Could not send AsyncSchemaOperation"),
+        let operation = AsyncSchemaOperation::RenameObjectStore {
+            callback: self.transaction.create_abort_callback()?,
+            new_name: name.to_string(),
+        };
+        self.transaction
+            .send_or_hold(IndexedDBThreadMsg::AsyncSchemaOperation {
+                origin: self.global().origin().immutable().clone(),
+                database_name: self.db_name.to_string(),
+                store_name: old_name.to_string(),
+                operation,
+                transaction_serial_number: self.transaction.get_serial_number(),
+            })
+            .map_err(|()| {
+                warn!("Could not send RenameObjectStore to the IndexedDB backend");
+                Error::Operation(Some(
+                    "Could not send the rename object store operation".to_owned(),
+                ))
+            })?;
+
+        if let Some(abort_state) = self.abort_state_on_abort.borrow_mut().as_mut() &&
+            abort_state.rollback_name.is_none()
+        {
+            abort_state.rollback_name = Some(old_name.clone());
         }
 
         transaction
@@ -1518,21 +1514,15 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
         // Set index’s name to name and key path to keyPath. If unique is set, set index’s unique flag.
         // If multiEntry is set, set index’s multiEntry flag.
         let stored_key_path: indexeddb::KeyPath = key_path.clone().into();
-        // The operation carries the callback, so one that cannot be created is one that cannot
-        // be sent, which this method already reports as an "UnknownError" DOMException below.
-        let Some(callback) = self.transaction.create_abort_callback() else {
-            return Err(Error::Operation(None));
-        };
         let operation = AsyncSchemaOperation::CreateIndex {
-            callback,
+            callback: self.transaction.create_abort_callback()?,
             index_name: name.to_string(),
             key_path: stored_key_path.clone(),
             unique: options.unique,
             multi_entry: options.multiEntry,
         };
 
-        if self
-            .transaction
+        self.transaction
             .send_or_hold(IndexedDBThreadMsg::AsyncSchemaOperation {
                 origin: self.global().origin().immutable().clone(),
                 database_name: self.db_name.to_string(),
@@ -1540,10 +1530,10 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
                 operation,
                 transaction_serial_number: self.transaction.get_serial_number(),
             })
-            .is_err()
-        {
-            return Err(Error::Operation(None));
-        }
+            .map_err(|()| {
+                warn!("Could not send CreateIndex to the IndexedDB backend");
+                Error::Operation(Some("Could not send the create index operation".to_owned()))
+            })?;
 
         // Step 12. Add index to this object store handle's index set.
         let index = self.add_index(cx, name.clone(), options, key_path, true);
@@ -1590,20 +1580,12 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
         if !self.index_set.borrow().contains_key(&name) {
             return Err(Error::NotFound(None));
         }
-        // Step 7. Remove index from this object store handle's index set.
-        self.index_set.borrow_mut().retain(|n, _| n != &name);
         // Step 8. Destroy index.
-        // The operation carries the callback, so one that cannot be created is one that cannot
-        // be sent, which this method already reports as an "UnknownError" DOMException below.
-        let Some(callback) = self.transaction.create_abort_callback() else {
-            return Err(Error::Operation(None));
-        };
         let operation = AsyncSchemaOperation::DeleteIndex {
-            callback,
+            callback: self.transaction.create_abort_callback()?,
             index_name: name.to_string(),
         };
-        if self
-            .transaction
+        self.transaction
             .send_or_hold(IndexedDBThreadMsg::AsyncSchemaOperation {
                 origin: self.global().origin().immutable().clone(),
                 database_name: self.db_name.to_string(),
@@ -1611,10 +1593,14 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
                 operation,
                 transaction_serial_number: self.transaction.get_serial_number(),
             })
-            .is_err()
-        {
-            return Err(Error::Operation(None));
-        }
+            .map_err(|()| {
+                warn!("Could not send DeleteIndex to the IndexedDB backend");
+                Error::Operation(Some("Could not send the delete index operation".to_owned()))
+            })?;
+
+        // Step 7. Remove index from this object store handle's index set only once the backend
+        // operation is guaranteed to be queued.
+        self.index_set.borrow_mut().retain(|n, _| n != &name);
         Ok(())
     }
 
