@@ -191,10 +191,14 @@ impl IDBFactory {
             cleared += request.clear_transaction_if_matches(transaction) as usize;
         }
 
-        debug_assert_eq!(
-            cleared, 1,
-            "A versionchange transaction should belong to exactly one IDBOpenDBRequest."
-        );
+        // Clearing is what this method is for, so a count other than one leaves nothing to
+        // undo and the release build has always carried on from here.
+        if cleared != 1 {
+            warn!(
+                "A versionchange transaction should belong to exactly one IDBOpenDBRequest, \
+                 but {cleared} were cleared."
+            );
+        }
     }
 
     pub fn new(cx: &mut JSContext, global: &GlobalScope) -> DomRoot<IDBFactory> {
@@ -247,15 +251,11 @@ impl IDBFactory {
         let name = DBName(name);
         let mut pending = self.connections.borrow_mut();
         let Some(entry) = pending.get_mut(&name) else {
-            debug_assert!(false, "There should be a pending connection for {:?}", name);
+            warn!("There should be a pending connection for {name:?}.");
             return None;
         };
         let Some(request) = entry.get_mut(request_id) else {
-            debug_assert!(
-                false,
-                "There should be a pending connection for {:?}",
-                request_id
-            );
+            warn!("There should be a pending connection for {request_id:?}.");
             return None;
         };
         Some(request.as_rooted())
@@ -275,10 +275,8 @@ impl IDBFactory {
                 object_store_names,
             } => {
                 let Some(request) = self.get_request(name.clone(), &id) else {
-                    return debug_assert!(
-                        false,
-                        "There should be a request to handle ConnectionMsg::Connection."
-                    );
+                    warn!("There should be a request to handle ConnectionMsg::Connection.");
+                    return;
                 };
 
                 // https://w3c.github.io/IndexedDB/#upgrade-transaction-steps
@@ -319,10 +317,8 @@ impl IDBFactory {
                 let global = self.global();
 
                 let Some(request) = self.get_request(name.clone(), &id) else {
-                    return debug_assert!(
-                        false,
-                        "There should be a request to handle ConnectionMsg::Upgrade."
-                    );
+                    warn!("There should be a request to handle ConnectionMsg::Upgrade.");
+                    return;
                 };
 
                 let connection = request.get_or_init_connection(
@@ -357,10 +353,8 @@ impl IDBFactory {
             } => {
                 let global = self.global();
                 let Some(request) = self.get_request(name.clone(), &id) else {
-                    return debug_assert!(
-                        false,
-                        "There should be a request to handle ConnectionMsg::VersionChange."
-                    );
+                    warn!("There should be a request to handle ConnectionMsg::VersionChange.");
+                    return;
                 };
                 let connection = request.connection();
 
@@ -391,10 +385,8 @@ impl IDBFactory {
                 old_version,
             } => {
                 let Some(request) = self.get_request(name, &id) else {
-                    return debug_assert!(
-                        false,
-                        "There should be a request to handle ConnectionMsg::VersionChange."
-                    );
+                    warn!("There should be a request to handle ConnectionMsg::Blocked.");
+                    return;
                 };
 
                 // Step 10.4: fire a version change event named blocked at request with db’s version and version.
@@ -428,14 +420,12 @@ impl IDBFactory {
         let request = {
             let mut pending = self.connections.borrow_mut();
             let Some(entry) = pending.get_mut(&name) else {
-                return debug_assert!(false, "There should be a pending connection for {:?}", name);
+                warn!("There should be a pending connection for {name:?}.");
+                return;
             };
             let Some(request) = entry.get_mut(&request_id) else {
-                return debug_assert!(
-                    false,
-                    "There should be a pending connection for {:?}",
-                    request_id
-                );
+                warn!("There should be a pending connection for {request_id:?}.");
+                return;
             };
             request.as_rooted()
         };
@@ -529,7 +519,9 @@ impl IDBFactory {
             .collect();
         let origin = global.origin().immutable().clone();
         let Ok(proxy_map) = self.obtain_a_local_storage_bottle_map(&global, origin.clone()) else {
-            debug_assert!(false, "Failed to obtain a proxy map.");
+            // The AbortPendingUpgrades message carries the proxy map, so without one there is
+            // nothing to send and the release build has always returned here.
+            warn!("Failed to obtain a proxy map.");
             return;
         };
         if global

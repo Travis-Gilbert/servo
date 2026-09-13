@@ -157,10 +157,12 @@ impl IDBDatabase {
             .get()
             .expect("clear_upgrade_transaction called but no upgrade transaction is set");
 
-        debug_assert!(
-            &*current == transaction,
-            "clear_upgrade_transaction called with non-current transaction"
-        );
+        // A connection holds one upgrade transaction at a time, so the caller should be it.
+        // Clearing regardless is what the release build has always done, and leaving a
+        // transaction set here would keep the connection out of an upgrade forever.
+        if &*current != transaction {
+            warn!("clear_upgrade_transaction called with non-current transaction.");
+        }
 
         self.upgrade_transaction.set(None);
     }

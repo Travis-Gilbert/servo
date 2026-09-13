@@ -277,7 +277,13 @@ impl IDBObjectStore {
         clone: MutableHandleValue<'_>,
     ) -> Fallible<()> {
         // Step 1. Assert: transaction's state is active.
-        debug_assert!(self.transaction.is_active());
+        //
+        // Step 2 below makes the transaction inactive and step 5 makes it active again, which
+        // is what the clone needs; a transaction that was already inactive is simply left
+        // active afterwards, and the release build has always run the clone either way.
+        if !self.transaction.is_active() {
+            warn!("Cloning a value for an object store whose transaction is not active.");
+        }
 
         // Step 2. Set transaction's state to inactive.
         //

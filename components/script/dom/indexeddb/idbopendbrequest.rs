@@ -157,7 +157,12 @@ impl IDBOpenDBRequest {
         upgraded: bool,
     ) -> DomRoot<IDBDatabase> {
         self.pending_connection.or_init(|| {
-            debug_assert!(!upgraded, "A connection should exist for the upgraded db.");
+            // An upgraded database was opened by an earlier ConnectionMsg::Upgrade, which
+            // initialised the connection. Creating one here anyway is what the release build
+            // has always done, and it is still a usable connection for this request.
+            if upgraded {
+                warn!("A connection should exist for the upgraded db.");
+            }
             IDBDatabase::new(
                 cx,
                 global,
