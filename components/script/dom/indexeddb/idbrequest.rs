@@ -8,7 +8,7 @@ use dom_struct::dom_struct;
 use js::context::JSContext;
 use js::conversions::{ConversionResult as JsConversionResult, ToJSValConvertible};
 use js::jsapi::Heap;
-use js::jsval::{DoubleValue, JSVal, ObjectValue, UndefinedValue};
+use js::jsval::{DoubleValue, JSVal, NullValue, ObjectValue, UndefinedValue};
 use js::rust::HandleValue;
 use profile_traits::generic_callback::GenericCallback;
 use script_bindings::cell::DomRefCell;
@@ -437,8 +437,8 @@ impl RequestListener {
                                 return;
                             },
                         };
-                        if let Some(cursor) = cursor {
-                            match cursor.downcast::<IDBCursorWithValue>() {
+                        match cursor {
+                            Some(cursor) => match cursor.downcast::<IDBCursorWithValue>() {
                                 Some(cursor_with_value) => {
                                     answer.handle_mut().set(ObjectValue(
                                         *cursor_with_value.reflector().get_jsobject(),
@@ -449,7 +449,11 @@ impl RequestListener {
                                         .handle_mut()
                                         .set(ObjectValue(*cursor.reflector().get_jsobject()));
                                 },
-                            }
+                            },
+                            // <https://w3c.github.io/IndexedDB/#iterate-a-cursor>
+                            // Step 6: no record was found, so the cursor is exhausted and
+                            // the request's result is null rather than undefined.
+                            None => answer.handle_mut().set(NullValue()),
                         }
                     },
                     Some(RecordsParam::GetAll {

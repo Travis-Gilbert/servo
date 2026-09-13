@@ -26,8 +26,8 @@ use servo_url::origin::ImmutableOrigin;
 use storage_traits::client_storage::StorageProxyMap;
 use storage_traits::indexeddb::{
     AsyncOperation, BackendError, BackendResult, ConnectionMsg, CreateObjectResult, DatabaseInfo,
-    DbResult, IndexedDBDescription, IndexedDBIndex, IndexedDBObjectStore, IndexedDBThreadMsg,
-    IndexedDBTxnMode, IndexedDbEngineFactory, KeyPath, KvsEngine, KvsOperation,
+    DbResult, DeleteDatabaseMsg, IndexedDBDescription, IndexedDBIndex, IndexedDBObjectStore,
+    IndexedDBThreadMsg, IndexedDBTxnMode, IndexedDbEngineFactory, KeyPath, KvsEngine, KvsOperation,
     KvsOperationContext, KvsTransaction, SyncOperation, TxnCompleteMsg,
 };
 use uuid::Uuid;
@@ -883,16 +883,24 @@ enum OpenRequest {
     },
     Delete {
         /// The callback used to send a result to script.
-        sender: GenericCallback<BackendResult<u64>>,
+        sender: GenericCallback<DeleteDatabaseMsg>,
 
         _origin: ImmutableOrigin,
 
         /// The name of the database.
-        /// Note: will be used when the full spec is implemented.
         db_name: String,
 
         /// <https://w3c.github.io/IndexedDB/#request-processed-flag>
         processed: bool,
+
+        /// This request is pending on these connections to close.
+        pending_close: HashSet<Uuid>,
+
+        /// This request is pending on these connections to fire a versionchange event.
+        /// Note: this starts as equal to `pending_close`, but when all events have fired,
+        /// not all connections need to have closed, in which case the `blocked` event
+        /// is fired at this request.
+        pending_versionchange: HashSet<Uuid>,
 
         id: Uuid,
 
@@ -920,6 +928,8 @@ impl OpenRequest {
                 _origin: _,
                 db_name: _,
                 processed: _,
+                pending_close: _,
+                pending_versionchange: _,
                 proxy_map: _,
                 id,
             } => id,
@@ -945,6 +955,8 @@ impl OpenRequest {
                 _origin: _,
                 db_name: _,
                 processed: _,
+                pending_close: _,
+                pending_versionchange: _,
                 proxy_map: _,
                 id: _,
             } => false,
@@ -976,9 +988,11 @@ impl OpenRequest {
                 _origin: _,
                 db_name: _,
                 processed,
+                pending_close,
+                pending_versionchange,
                 id: _,
                 proxy_map: _,
-            } => !processed,
+            } => !processed || !pending_close.is_empty() || !pending_versionchange.is_empty(),
         }
     }
 
@@ -1013,10 +1027,15 @@ impl OpenRequest {
                 _origin: _,
                 db_name: _,
                 processed: _,
+                pending_close: _,
+                pending_versionchange: _,
                 id: _,
                 proxy_map: _,
             } => {
-                if sender.send(Err(BackendError::DbNotFound)).is_err() {
+                if sender
+                    .send(DeleteDatabaseMsg::Done(Err(BackendError::DbNotFound)))
+                    .is_err()
+                {
                     error!("Failed to send result of database delete to script.");
                 };
                 None
@@ -1383,10 +1402,10 @@ impl IndexedDBManager {
             let was_pruned = self.maybe_remove_front_from_queue(&key);
 
             if !was_pruned {
-                // Note: requests to delete a database are, at this point in the implementation,
-                // done in one step; so we can continue on to the next request.
-                // Request to open a connection consists of multiple async steps, so we must break if
-                // it is still pending.
+                // Note: both kinds of request consist of multiple async steps, so we must
+                // break if the front one is still pending. A delete waits for open
+                // connections to fire `versionchange` and then close; an open waits for
+                // the same two conditions and then for its upgrade transaction.
                 break;
             }
         }
@@ -1799,12 +1818,65 @@ impl IndexedDBManager {
             name: name.clone(),
             origin,
         };
-        let (can_upgrade, version) = {
+        // <https://www.w3.org/TR/IndexedDB/#delete-a-database>
+        // A delete request waits on the same two conditions as an open request, but its
+        // `blocked` event fires at the request itself rather than at a connection.
+        // `Some(true)` means every condition is met and the delete can run.
+        let delete_can_finish = {
             let Some(queue) = self.connection_queues.get_mut(&key) else {
-                return debug_assert!(false, "A connection queue should exist.");
+                return warn!("A connection queue should exist.");
             };
             let Some(open_request) = queue.front_mut() else {
-                return debug_assert!(false, "An open request should be in the queue.");
+                return warn!("An open request should be in the queue.");
+            };
+            match open_request {
+                OpenRequest::Delete {
+                    sender,
+                    pending_versionchange,
+                    pending_close,
+                    ..
+                } => {
+                    pending_versionchange.remove(&from_id);
+
+                    // Step 7: Wait for all of the events to be fired.
+                    if !pending_versionchange.is_empty() {
+                        Some(false)
+                    } else if !pending_close.is_empty() {
+                        // Step 8: If any of the connections in openConnections are still
+                        // not closed, queue a database task to fire a version change
+                        // event named blocked at request with db's version and null.
+                        if sender
+                            .send(DeleteDatabaseMsg::Blocked { old_version })
+                            .is_err()
+                        {
+                            debug!("Script went away during pending database delete.");
+                        }
+                        // Step 9: Wait until all connections in openConnections are
+                        // closed. The algorithm continues in `close_database`.
+                        Some(false)
+                    } else {
+                        Some(true)
+                    }
+                },
+                OpenRequest::Open { .. } => None,
+            }
+        };
+        if let Some(can_finish) = delete_can_finish {
+            if can_finish {
+                self.finish_delete_database(key.clone());
+                if self.maybe_remove_front_from_queue(&key) {
+                    self.advance_connection_queue(key);
+                }
+            }
+            return;
+        }
+
+        let (can_upgrade, version) = {
+            let Some(queue) = self.connection_queues.get_mut(&key) else {
+                return warn!("A connection queue should exist.");
+            };
+            let Some(open_request) = queue.front_mut() else {
+                return warn!("An open request should be in the queue.");
             };
             let OpenRequest::Open {
                 sender,
@@ -1818,10 +1890,7 @@ impl IndexedDBManager {
                 proxy_map: _,
             } = open_request
             else {
-                return debug_assert!(
-                    false,
-                    "An request to open a connection should be in the queue."
-                );
+                return warn!("An request to open a connection should be in the queue.");
             };
             debug_assert!(
                 pending_versionchange.contains(&from_id),
@@ -2054,7 +2123,7 @@ impl IndexedDBManager {
                     .send(ConnectionMsg::VersionChange {
                         name: db_name.clone(),
                         id: *id_to_close,
-                        version,
+                        version: Some(version),
                         old_version: db_version,
                     })
                     .is_err()
@@ -2109,13 +2178,15 @@ impl IndexedDBManager {
         key: IndexedDBDescription,
         id: Uuid,
         proxy_map: StorageProxyMap,
-        sender: GenericCallback<BackendResult<u64>>,
+        sender: GenericCallback<DeleteDatabaseMsg>,
     ) {
         let open_request = OpenRequest::Delete {
             sender,
             _origin: key.origin.clone(),
             db_name: key.name.clone(),
             processed: false,
+            pending_close: Default::default(),
+            pending_versionchange: Default::default(),
             proxy_map,
             id,
         };
@@ -2137,49 +2208,120 @@ impl IndexedDBManager {
     }
 
     /// <https://www.w3.org/TR/IndexedDB/#delete-a-database>
+    /// Steps 4 through 9: notify every open connection and wait for them to close.
     fn delete_database(&mut self, key: IndexedDBDescription) {
+        // Step 4: Let db be the database named name in storageKey, if one exists.
+        // Otherwise, return 0 (zero).
+        // Note: a database that is not open has no connections, so steps 5 through 9
+        // are vacuous and the delete runs straight through.
+        let Some(db) = self.databases.get(&key) else {
+            return self.finish_delete_database(key);
+        };
+        let db_version = match db.version() {
+            Ok(version) => version,
+            Err(error) => return self.fail_delete_database(&key, error),
+        };
+
+        // Step 5: Let openConnections be the set of all connections associated with db.
+        // Step 6: For each entry of openConnections that does not have its close pending
+        // flag set to true, queue a database task to fire a version change event named
+        // versionchange at entry with db's version and null.
+        let mut pending: HashSet<Uuid> = HashSet::new();
+        if let Some(connections) = self.connections.get(&key) {
+            for (connection_id, connection) in connections.iter() {
+                if connection.close_pending {
+                    continue;
+                }
+                if connection
+                    .sender
+                    .send(ConnectionMsg::VersionChange {
+                        name: key.name.clone(),
+                        id: *connection_id,
+                        version: None,
+                        old_version: db_version,
+                    })
+                    .is_err()
+                {
+                    error!("Failed to send ConnectionMsg::VersionChange to script.");
+                }
+                pending.insert(*connection_id);
+            }
+        }
+
+        if pending.is_empty() {
+            return self.finish_delete_database(key);
+        }
+
+        // Step 7: Wait for all of the events to be fired.
+        // Step 9: Wait until all connections in openConnections are closed.
+        // Note: the algorithm continues in `handle_version_change_done` once every event
+        // has fired, and in `close_database` once every connection has closed.
         let Some(queue) = self.connection_queues.get_mut(&key) else {
-            return debug_assert!(false, "A connection queue should exist.");
+            return warn!("A connection queue should exist while deleting a database.");
+        };
+        let Some(OpenRequest::Delete {
+            pending_close,
+            pending_versionchange,
+            ..
+        }) = queue.front_mut()
+        else {
+            return warn!("A request to delete a database should be in the queue.");
+        };
+        *pending_close = pending.clone();
+        *pending_versionchange = pending;
+    }
+
+    /// <https://www.w3.org/TR/IndexedDB/#delete-a-database>
+    /// Answer the request at the front of the queue with a backend error.
+    fn fail_delete_database(&mut self, key: &IndexedDBDescription, error: BackendError) {
+        let Some(queue) = self.connection_queues.get_mut(key) else {
+            return warn!("A connection queue should exist while deleting a database.");
+        };
+        let Some(OpenRequest::Delete {
+            sender, processed, ..
+        }) = queue.front_mut()
+        else {
+            return warn!("A request to delete a database should be in the queue.");
+        };
+        *processed = true;
+        if sender.send(DeleteDatabaseMsg::Done(Err(error))).is_err() {
+            debug!("Script went away during pending database delete.");
+        }
+    }
+
+    /// <https://www.w3.org/TR/IndexedDB/#delete-a-database>
+    /// Steps 10 through 12: every connection has closed, so the database can be deleted.
+    fn finish_delete_database(&mut self, key: IndexedDBDescription) {
+        // Note: the database is removed from the open set here rather than at step 4,
+        // because connections kept using it while the request waited for them to close.
+        let db = self.databases.remove(&key);
+
+        let Some(queue) = self.connection_queues.get_mut(&key) else {
+            return warn!("A connection queue should exist while deleting a database.");
         };
         let Some(open_request) = queue.front_mut() else {
-            return debug_assert!(false, "An open request should be in the queue.");
+            return warn!("A request to delete a database should be in the queue.");
         };
         let OpenRequest::Delete {
             sender,
-            _origin: _,
             db_name,
             processed,
-            id: _,
             proxy_map,
+            ..
         } = open_request
         else {
-            return debug_assert!(
-                false,
-                "An request to open a connection should be in the queue."
-            );
+            return warn!("A request to delete a database should be in the queue.");
         };
 
-        // Step 4: Let db be the database named name in storageKey, if one exists. Otherwise, return 0 (zero).
-        let version = if let Some(db) = self.databases.remove(&key) {
-            // Step 5: Let openConnections be the set of all connections associated with db.
-            // Step6: For each entry of openConnections that does not have its close pending flag set to true,
-            // queue a database task to fire a version change event named versionchange
-            // at entry with db’s version and null.
-            // Step 7: Wait for all of the events to be fired.
-            // Step 8: If any of the connections in openConnections are still not closed,
-            // queue a database task to fire a version change event
-            // named blocked at request with db’s version and null.
-            // Step 9: Wait until all connections in openConnections are closed.
-            // TODO: implement connections.
-
-            // Step 10: Let version be db’s version.
+        let version = if let Some(db) = db {
+            // Step 10: Let version be db's version.
             let res = db.version();
             let Ok(version) = res else {
                 *processed = true;
                 if sender
-                    .send(BackendResult::Err(BackendError::DbErr(
+                    .send(DeleteDatabaseMsg::Done(Err(BackendError::DbErr(
                         res.unwrap_err().to_string(),
-                    )))
+                    ))))
                     .is_err()
                 {
                     debug!("Script went away during pending database delete.");
@@ -2199,10 +2341,11 @@ impl IndexedDBManager {
                 .delete_database(proxy_map.bottle_id, db_name.clone())
                 .recv()
             else {
+                *processed = true;
                 if sender
-                    .send(BackendResult::Err(BackendError::DbErr(
+                    .send(DeleteDatabaseMsg::Done(Err(BackendError::DbErr(
                         "Failed to communicate with client storage.".to_string(),
-                    )))
+                    ))))
                     .is_err()
                 {
                     debug!("Script went away during pending database delete.");
@@ -2210,10 +2353,11 @@ impl IndexedDBManager {
                 return;
             };
             if let Err(err) = response {
+                *processed = true;
                 if sender
-                    .send(BackendResult::Err(BackendError::DbErr(format!(
+                    .send(DeleteDatabaseMsg::Done(Err(BackendError::DbErr(format!(
                         "Client storage error: {err:?}"
-                    ))))
+                    )))))
                     .is_err()
                 {
                     debug!("Script went away during pending database delete.");
@@ -2226,11 +2370,10 @@ impl IndexedDBManager {
         };
 
         // step 12: Return version.
-        if sender.send(BackendResult::Ok(version)).is_err() {
+        *processed = true;
+        if sender.send(DeleteDatabaseMsg::Done(Ok(version))).is_err() {
             debug!("Script went away during pending database delete.");
         }
-
-        *processed = true;
     }
 
     /// <https://w3c.github.io/IndexedDB/#closing-connection>
@@ -2252,7 +2395,7 @@ impl IndexedDBManager {
         // <https://w3c.github.io/IndexedDB/#open-a-database-connection>
         // in the case that an open request is waiting for connections to close.
         let key = IndexedDBDescription { origin, name };
-        let (can_upgrade, version) = {
+        let (can_upgrade, version, delete_can_finish) = {
             self.remove_connection(&key, &id);
 
             let Some(queue) = self.connection_queues.get_mut(&key) else {
@@ -2261,30 +2404,54 @@ impl IndexedDBManager {
             let Some(open_request) = queue.front_mut() else {
                 return;
             };
-            if let OpenRequest::Open {
-                sender: _,
-                db_name: _,
-                version,
-                id: _,
-                processed: _,
-                pending_upgrade,
-                pending_versionchange,
-                pending_close,
-                proxy_map: _,
-            } = open_request
-            {
-                pending_close.remove(&id);
-                (
-                    // Note: need to exclude requests that have already started upgrading.
-                    pending_close.is_empty() &&
-                        pending_versionchange.is_empty() &&
-                        !pending_upgrade.is_some(),
-                    *version,
-                )
-            } else {
-                (false, None)
+            match open_request {
+                OpenRequest::Open {
+                    sender: _,
+                    db_name: _,
+                    version,
+                    id: _,
+                    processed: _,
+                    pending_upgrade,
+                    pending_versionchange,
+                    pending_close,
+                    proxy_map: _,
+                } => {
+                    pending_close.remove(&id);
+                    (
+                        // Note: need to exclude requests that have already started upgrading.
+                        pending_close.is_empty() &&
+                            pending_versionchange.is_empty() &&
+                            !pending_upgrade.is_some(),
+                        *version,
+                        false,
+                    )
+                },
+                // <https://www.w3.org/TR/IndexedDB/#delete-a-database>
+                // Step 9: Wait until all connections in openConnections are closed.
+                // Note: the versionchange events must also have all fired, because a
+                // connection may close before the event queued at step 6 reaches it.
+                OpenRequest::Delete {
+                    pending_close,
+                    pending_versionchange,
+                    ..
+                } => {
+                    pending_close.remove(&id);
+                    (
+                        false,
+                        None,
+                        pending_close.is_empty() && pending_versionchange.is_empty(),
+                    )
+                },
             }
         };
+
+        if delete_can_finish {
+            self.finish_delete_database(key.clone());
+            if self.maybe_remove_front_from_queue(&key) {
+                self.advance_connection_queue(key);
+            }
+            return;
+        }
 
         // <https://w3c.github.io/IndexedDB/#open-a-database-connection>
         // Step 10.3: Wait for all of the events to be fired.

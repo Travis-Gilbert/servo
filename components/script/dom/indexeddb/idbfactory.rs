@@ -345,7 +345,8 @@ impl IDBFactory {
                 let connection = request.connection();
 
                 // Step 10.2: fire a version change event named versionchange at entry with db’s version and version.
-                connection.dispatch_versionchange(cx, old_version, Some(version));
+                // Note: a database delete carries a null `newVersion`, which arrives as `None`.
+                connection.dispatch_versionchange(cx, old_version, version);
 
                 // Step 10.3: Wait for all of the events to be fired.
                 // Note: backend is at this step; sending a message to continue algo there.

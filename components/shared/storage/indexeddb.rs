@@ -673,7 +673,9 @@ pub enum ConnectionMsg {
         id: Uuid,
         /// The name of the connection.
         name: String,
-        version: u64,
+        /// The version the requesting connection is upgrading to, or `None` when the
+        /// request is a database delete, whose `newVersion` is null.
+        version: Option<u64>,
         old_version: u64,
     },
     /// A `blocked` event should be fired for a connection.
@@ -691,6 +693,18 @@ pub enum ConnectionMsg {
     },
     /// Ask script to recheck whether a transaction can commit now.
     TxnMaybeCommit { db_name: String, txn: u64 },
+}
+
+/// <https://www.w3.org/TR/IndexedDB/#delete-a-database>
+/// A delete request owns a private callback rather than a connection, so the events
+/// that fire at the request travel on this channel instead of `ConnectionMsg`.
+#[derive(Debug, Deserialize, MallocSizeOf, Serialize)]
+pub enum DeleteDatabaseMsg {
+    /// Step 8: connections to the database are still open, so a `blocked` event should
+    /// be fired at the request with the database's version and null.
+    Blocked { old_version: u64 },
+    /// Step 12: the request is finished, carrying the version that was deleted.
+    Done(BackendResult<u64>),
 }
 
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
@@ -806,7 +820,7 @@ pub enum SyncOperation {
 
     /// Deletes the database
     DeleteDatabase(
-        GenericCallback<BackendResult<u64>>,
+        GenericCallback<DeleteDatabaseMsg>,
         ImmutableOrigin,
         // Database name.
         String,
