@@ -3868,7 +3868,6 @@ class CGCreateInterfaceObjectsMethod(CGAbstractMethod):
                 """)
 
 
-
         name = self.descriptor.interface.identifier.name
         parentName = self.descriptor.getParentName()
         if not parentName:
@@ -4690,7 +4689,7 @@ class CGMethodPromiseWrapper(CGAbstractExternMethod):
             let cx = &mut cx;
             return exception_to_promise(cx, (*args).rval());
             """,
-            methodName=self.method.identifier.name,
+            methodName=CGDictionary.makeMemberName(self.method.identifier.name),
             args=", ".join(arg.name for arg in self.args),
         ))
 
@@ -4963,7 +4962,6 @@ let mut cx = JSContext::from_ptr(ptr::NonNull::new(cx).unwrap());
 let cx = &mut cx;
 JS_DefineProperty(cx, HandleObject::from_raw(obj), {name}, HandleValue::from_raw(args.get(0)), JSPROP_ENUMERATE as u32)
 """)
-
 
 
 class CGMemberJITInfo(CGThing):
