@@ -15,6 +15,7 @@ use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object};
 use storage_traits::indexeddb::{
     AsyncOperation, AsyncReadOnlyOperation, IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord,
+    KvsOperationContext, KvsOperationTarget,
 };
 
 use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::{
@@ -182,6 +183,19 @@ impl IDBCursor {
         }
     }
 
+    /// Keep index cursors on the index record set when advance/continue reuse their request.
+    fn operation_context(&self) -> KvsOperationContext {
+        match &self.source {
+            ObjectStoreOrIndex::ObjectStore(_) => KvsOperationContext::default(),
+            ObjectStoreOrIndex::Index(index) => KvsOperationContext {
+                target: KvsOperationTarget::Index {
+                    name: index.index_name(),
+                },
+                index_updates: Vec::new(),
+            },
+        }
+    }
+
     pub(crate) fn verify_not_deleted(&self) -> ErrorResult {
         match &self.source {
             ObjectStoreOrIndex::ObjectStore(store) => store.verify_not_deleted(),
@@ -316,12 +330,10 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
         };
 
         let range = self.range.clone();
-        // NOTE: According to the spec, execute_async should take the cursor's source
-        // (which may be an index). Using effective_object_store here is a temporary
-        // workaround until execute_async supports ObjectStoreOrIndex as source.
-        IDBRequest::execute_async(
+        IDBRequest::execute_async_with_context(
             cx,
             &self.effective_object_store(),
+            self.operation_context(),
             |callback| {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
                     callback,
@@ -410,12 +422,10 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
         };
 
         let range = self.range.clone();
-        // NOTE: According to the spec, execute_async should take the cursor's source
-        // (which may be an index). Using effective_object_store here is a temporary
-        // workaround until execute_async supports ObjectStoreOrIndex as source.
-        IDBRequest::execute_async(
+        IDBRequest::execute_async_with_context(
             cx,
             &self.effective_object_store(),
+            self.operation_context(),
             |callback| {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
                     callback,
@@ -556,12 +566,10 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
         };
 
         let range = self.range.clone();
-        // NOTE: According to the spec, execute_async should take the cursor's source
-        // (which may be an index). Using effective_object_store here is a temporary
-        // workaround until execute_async supports ObjectStoreOrIndex as source.
-        IDBRequest::execute_async(
+        IDBRequest::execute_async_with_context(
             cx,
             &self.effective_object_store(),
+            self.operation_context(),
             |callback| {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
                     callback,

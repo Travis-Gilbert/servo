@@ -468,6 +468,9 @@ pub struct IndexedDBObjectStore {
 pub enum PutItemResult {
     Key(IndexedDBKeyType),
     CannotOverwrite,
+    /// A unique index already holds one of the record's index keys for a different primary key.
+    /// Carries the index name so the request can report which index refused it.
+    IndexConstraintViolated(String),
 }
 
 #[derive(Debug, Deserialize, MallocSizeOf, Serialize)]
