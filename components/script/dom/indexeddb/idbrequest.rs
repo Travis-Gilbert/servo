@@ -429,10 +429,14 @@ impl RequestListener {
         let request = self.request.root();
         let global = request.global();
 
-        let transaction = request
-            .transaction
-            .get()
-            .expect("Request unexpectedly has no transaction");
+        // Every request a RequestListener answers was given a transaction by
+        // `execute_async_inner`, and only IDBOpenDBRequest, which never reaches this listener,
+        // ever clears one. A reply that arrives without one has nothing left to report it to:
+        // the remaining steps all run against the transaction.
+        let Some(transaction) = request.transaction.get() else {
+            warn!("An IndexedDB reply arrived for a request with no transaction; dropping it.");
+            return;
+        };
 
         // <https://w3c.github.io/IndexedDB/#abort-a-transaction> step 5 already answered this
         // request with an `AbortError`, which is what "abort the steps to asynchronously
@@ -727,10 +731,13 @@ impl RequestListener {
         error: Error,
     ) {
         let request_id = self.request_id;
-        let transaction = request
-            .transaction
-            .get()
-            .expect("Request has no transaction");
+        // As in `handle_async_request_finished`: every step below runs against the
+        // transaction, and `fire an error event` is defined in terms of it, so an error with
+        // no transaction to carry it has nowhere to go.
+        let Some(transaction) = request.transaction.get() else {
+            warn!("An IndexedDB request failed with no transaction to report the error to.");
+            return;
+        };
         // Substep 1: Set the result of request to undefined.
         rooted!(&in(cx) let undefined = UndefinedValue());
         request.set_result(undefined.handle());

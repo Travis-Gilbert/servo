@@ -356,11 +356,17 @@ impl IDBFactory {
                     warn!("There should be a request to handle ConnectionMsg::VersionChange.");
                     return;
                 };
-                let connection = request.connection();
-
                 // Step 10.2: fire a version change event named versionchange at entry with db’s version and version.
                 // Note: a database delete carries a null `newVersion`, which arrives as `None`.
-                connection.dispatch_versionchange(cx, old_version, version);
+                match request.pending_connection() {
+                    Some(connection) => connection.dispatch_versionchange(cx, old_version, version),
+                    // Without a connection there is no entry to fire the event at. The backend
+                    // is waiting at step 10.3 and only moves on once it is told the event phase
+                    // is over, so the message below is still sent.
+                    None => {
+                        warn!("ConnectionMsg::VersionChange arrived for a request with no connection.")
+                    },
+                }
 
                 // Step 10.3: Wait for all of the events to be fired.
                 // Note: backend is at this step; sending a message to continue algo there.

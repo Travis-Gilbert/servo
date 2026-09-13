@@ -960,13 +960,16 @@ impl IDBObjectStore {
             None => warn!("Could not send AsyncSchemaOperation"),
         }
 
-        // We also need to update the key in the index set
-        let index = self
-            .index_set
-            .borrow_mut()
-            .remove(name)
-            .expect("Earlier steps of the algorithm checked that the index exists")
-            .as_rooted();
+        // We also need to update the key in the index set.
+        // IDBIndex::SetName checks the index is in this handle's set before renaming it, so
+        // the removal normally yields the handle. A set that no longer holds it has nothing to
+        // re-key, and an entry invented under the new name would not be the renamed index.
+        let removed = self.index_set.borrow_mut().remove(name);
+        let Some(index) = removed else {
+            warn!("rename_index called for an index that is not in the index set.");
+            return;
+        };
+        let index = index.as_rooted();
         self.index_set
             .borrow_mut()
             .insert(new_name.clone(), Dom::from_ref(&index));

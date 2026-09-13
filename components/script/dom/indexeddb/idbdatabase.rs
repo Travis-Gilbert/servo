@@ -152,10 +152,13 @@ impl IDBDatabase {
     }
 
     pub(crate) fn clear_upgrade_transaction(&self, transaction: &IDBTransaction) {
-        let current = self
-            .upgrade_transaction
-            .get()
-            .expect("clear_upgrade_transaction called but no upgrade transaction is set");
+        // Both callers reach this from an upgrade transaction that finished, so the connection
+        // should still be holding it. With nothing set there is nothing to clear, which is the
+        // state this method exists to reach.
+        let Some(current) = self.upgrade_transaction.get() else {
+            warn!("clear_upgrade_transaction called but no upgrade transaction is set.");
+            return;
+        };
 
         // A connection holds one upgrade transaction at a time, so the caller should be it.
         // Clearing regardless is what the release build has always done, and leaving a

@@ -415,10 +415,14 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
     }
 
     /// <https://w3c.github.io/IndexedDB/#dom-idbcursor-request>
-    fn Request(&self) -> DomRoot<IDBRequest> {
-        self.request
-            .get()
-            .expect("IDBCursor.request should be set when cursor is opened")
+    fn Request(&self) -> Fallible<DomRoot<IDBRequest>> {
+        // A cursor reaches script only as the result of the request that opened it, and that
+        // request is what `set_request` stores, so the getter normally has one. The invariant
+        // is established by IDBObjectStore::OpenCursor and IDBIndex::OpenCursor rather than
+        // here, so report a cursor without one the way `run_iteration` already reports it.
+        self.request.get().ok_or(Error::InvalidState(Some(
+            "The cursor has no request".to_owned(),
+        )))
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbcursor-advance>
@@ -914,8 +918,14 @@ pub(crate) fn iterate_cursor(
             },
         }
     }
-    let found_record =
-        found_record.expect("The while loop above guarantees found_record is defined");
+    // Step 9 runs at least once: `count` is never `Some(0)`, because `advance()` rejects a
+    // zero count and the other two iteration methods pass `None`. An iteration that finds
+    // nothing has already returned at step 9.2.4, so reaching here means the loop bound a
+    // record. A cursor that somehow did not is a request that failed, not a crash.
+    let Some(found_record) = found_record else {
+        warn!("iterate_cursor reached step 10 without a found record.");
+        return Err(Error::Operation(None));
+    };
 
     // Step 10. Set cursor’s position to position.
     cursor.set_position(position);
