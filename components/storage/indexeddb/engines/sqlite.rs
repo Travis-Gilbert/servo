@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use log::{info, warn};
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
-use rusqlite::{Connection, Error, OptionalExtension, params};
+use rusqlite::types::Value;
+use rusqlite::{Connection, Error, OptionalExtension, params, params_from_iter};
 use sea_query::{Condition, Expr, ExprTrait, IntoCondition, SqliteQueryBuilder};
 use sea_query_rusqlite::RusqliteBinder;
 use servo_base::threadpool::ThreadPool;
@@ -14,7 +15,7 @@ use storage_traits::indexeddb::{
     AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, AsyncSchemaOperation,
     BackendError, BackendResult, CreateObjectResult, IndexedDBDescription, IndexedDBIndex,
     IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord, IndexedDBTxnMode, KeyPath, KvsEngine,
-    KvsTransaction, PutItemResult,
+    KvsIndexUpdate, KvsOperationTarget, KvsTransaction, PutItemResult,
 };
 
 use crate::shared::{DB_INIT_PRAGMAS, DB_PRAGMAS, is_sqlite_disk_full_error};
@@ -66,6 +67,54 @@ fn range_to_query(range: IndexedDBKeyRange) -> Condition {
         condition = condition.add(part);
     }
     condition
+}
+
+/// One record from whichever surface a request addressed.
+struct SourceRecord {
+    /// The key the request's range applied to, which is the index key for an index request.
+    key: Vec<u8>,
+    /// The object store key, which an index cursor reports as its `primaryKey`.
+    primary_key: Vec<u8>,
+    data: Vec<u8>,
+}
+
+/// Index records live in `unique_index_data` when the index is unique and in `index_data`
+/// otherwise. The two tables differ only in their primary key, which is what makes the unique
+/// one reject a second primary key for the same index key.
+fn index_table(index: &object_store_index_model::Model) -> &'static str {
+    if index.unique_index {
+        "unique_index_data"
+    } else {
+        "index_data"
+    }
+}
+
+/// Append `range` to `sql` as a comparison over `column`, pushing its bound values onto `values`.
+///
+/// [`range_to_query`] does the same thing through sea_query, but only ever over `object_data.key`.
+/// The index tables need the identical comparison over their `value` column, and the join those
+/// statements carry reads more clearly hand written than through a query builder.
+fn append_range_predicate(
+    sql: &mut String,
+    values: &mut Vec<Value>,
+    column: &str,
+    range: &IndexedDBKeyRange,
+) {
+    if let Some(singleton) = range.as_singleton() {
+        sql.push_str(&format!(" AND {column} = ?"));
+        values.push(Value::Blob(encoding::serialize(singleton)));
+        return;
+    }
+    if let Some(lower) = range.lower.as_ref() {
+        let operator = if range.lower_open { ">" } else { ">=" };
+        sql.push_str(&format!(" AND {column} {operator} ?"));
+        values.push(Value::Blob(encoding::serialize(lower)));
+    }
+    if let Some(upper) = range.upper.as_ref() {
+        let operator = if range.upper_open { "<" } else { "<=" };
+        sql.push_str(&format!(" AND {column} {operator} ?"));
+        values.push(Value::Blob(encoding::serialize(upper)));
+    }
 }
 
 pub struct SqliteEngine {
@@ -234,6 +283,185 @@ impl SqliteEngine {
             .map(|models| models.into_iter().map(|m| (m.key, m.data)).collect())
     }
 
+    /// Look up one declared index of a store by name.
+    fn index_by_name(
+        connection: &Connection,
+        store_id: i32,
+        index_name: &str,
+    ) -> Result<Option<object_store_index_model::Model>, Error> {
+        connection
+            .prepare("SELECT * FROM object_store_index WHERE object_store_id = ? AND name = ?")
+            .and_then(|mut stmt| {
+                stmt.query_row(params![store_id, index_name], |row| {
+                    object_store_index_model::Model::try_from(row)
+                })
+                .optional()
+            })
+    }
+
+    /// The records an index request ranges over, in index key order and then primary key order.
+    ///
+    /// The index key is what the request's key range applies to and the object store key rides
+    /// along beside it. Keeping the pair distinct is the whole point: an index cursor's `key` is
+    /// the index key and its `primaryKey` is the object store key, and the two coincide only for
+    /// an object store request. An index that no longer exists yields no records rather than an
+    /// error, because the transaction that deleted it has already invalidated the request.
+    fn index_records(
+        connection: &Connection,
+        store: &object_store_model::Model,
+        index_name: &str,
+        key_range: IndexedDBKeyRange,
+        count: Option<u32>,
+    ) -> Result<Vec<SourceRecord>, Error> {
+        let Some(index) = Self::index_by_name(connection, store.id, index_name)? else {
+            return Ok(Vec::new());
+        };
+        let table = index_table(&index);
+        let mut sql = format!(
+            "SELECT i.value, i.object_data_key, o.data FROM {table} i \
+             JOIN object_data o \
+             ON o.object_store_id = i.object_store_id AND o.key = i.object_data_key \
+             WHERE i.index_id = ? AND i.object_store_id = ?"
+        );
+        let mut values = vec![
+            Value::Integer(index.id as i64),
+            Value::Integer(store.id as i64),
+        ];
+        append_range_predicate(&mut sql, &mut values, "i.value", &key_range);
+        sql.push_str(" ORDER BY i.value ASC, i.object_data_key ASC");
+        if let Some(count) = count {
+            sql.push_str(" LIMIT ?");
+            values.push(Value::Integer(count as i64));
+        }
+        let mut stmt = connection.prepare(&sql)?;
+        let records = stmt
+            .query_and_then(params_from_iter(values), |row| {
+                Ok::<SourceRecord, Error>(SourceRecord {
+                    key: row.get(0)?,
+                    primary_key: row.get(1)?,
+                    data: row.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(records)
+    }
+
+    /// How many index records the range covers, counted without loading any stored value.
+    fn index_count(
+        connection: &Connection,
+        store: &object_store_model::Model,
+        index_name: &str,
+        key_range: IndexedDBKeyRange,
+    ) -> Result<u64, Error> {
+        let Some(index) = Self::index_by_name(connection, store.id, index_name)? else {
+            return Ok(0);
+        };
+        let table = index_table(&index);
+        let mut sql = format!(
+            "SELECT COUNT(*) FROM {table} i WHERE i.index_id = ? AND i.object_store_id = ?"
+        );
+        let mut values = vec![
+            Value::Integer(index.id as i64),
+            Value::Integer(store.id as i64),
+        ];
+        append_range_predicate(&mut sql, &mut values, "i.value", &key_range);
+        let count: i64 =
+            connection
+                .prepare(&sql)?
+                .query_row(params_from_iter(values), |row| row.get(0))?;
+        Ok(count as u64)
+    }
+
+    /// Drop every index record pointing at any of `primary_keys`.
+    fn delete_index_records(
+        connection: &Connection,
+        store_id: i32,
+        primary_keys: &[Vec<u8>],
+    ) -> Result<(), Error> {
+        for key in primary_keys {
+            for table in ["index_data", "unique_index_data"] {
+                connection.execute(
+                    &format!(
+                        "DELETE FROM {table} WHERE object_store_id = ? AND object_data_key = ?"
+                    ),
+                    params![store_id, key],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The name of the first unique index `index_updates` would collide on, if any.
+    ///
+    /// This runs before the value is stored. A unique index rejects the whole put, so finding the
+    /// collision after writing `object_data` would leave the store holding a record the
+    /// transaction is about to be told never landed. A key already held by this same primary key
+    /// is not a collision: that is the record being overwritten.
+    fn unique_index_conflict(
+        connection: &Connection,
+        store_id: i32,
+        primary_key: &[u8],
+        index_updates: &[KvsIndexUpdate],
+    ) -> Result<Option<String>, Error> {
+        for update in index_updates {
+            let Some(index) = Self::index_by_name(connection, store_id, &update.index_name)? else {
+                continue;
+            };
+            if !index.unique_index {
+                continue;
+            }
+            for key in &update.keys {
+                let value = encoding::serialize(key);
+                let holder: Option<Vec<u8>> = connection
+                    .prepare(
+                        "SELECT object_data_key FROM unique_index_data WHERE index_id = ? AND value = ?",
+                    )
+                    .and_then(|mut stmt| {
+                        stmt.query_row(params![index.id, value], |row| row.get(0))
+                            .optional()
+                    })?;
+                if holder.is_some_and(|held| held != primary_key) {
+                    return Ok(Some(update.index_name.clone()));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Replace the index records that point at `primary_key`.
+    ///
+    /// A put rewrites the whole record, so every index key extracted from the old value stops
+    /// being true the moment the new one lands. Deleting this primary key's records first and
+    /// inserting the freshly extracted keys afterwards is what keeps the index tables agreeing
+    /// with `object_data`. The keys themselves come from the script thread, which owns the
+    /// JavaScript value the key path is evaluated against; a multiEntry index arrives here as one
+    /// update carrying several keys.
+    fn replace_index_records(
+        connection: &Connection,
+        store_id: i32,
+        primary_key: &[u8],
+        index_updates: &[KvsIndexUpdate],
+    ) -> Result<(), Error> {
+        Self::delete_index_records(connection, store_id, &[primary_key.to_vec()])?;
+        for update in index_updates {
+            let Some(index) = Self::index_by_name(connection, store_id, &update.index_name)? else {
+                continue;
+            };
+            let table = index_table(&index);
+            for key in &update.keys {
+                let value = encoding::serialize(key);
+                connection.execute(
+                    &format!(
+                        "INSERT OR REPLACE INTO {table} \
+                         (index_id, value, object_store_id, object_data_key) VALUES (?, ?, ?, ?)"
+                    ),
+                    params![index.id, value, store_id, primary_key],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     fn put_item(
         connection: &Connection,
         store: object_store_model::Model,
@@ -241,6 +469,7 @@ impl SqliteEngine {
         value: Vec<u8>,
         should_overwrite: bool,
         key_generator_current_number: Option<i64>,
+        index_updates: &[KvsIndexUpdate],
     ) -> Result<PutItemResult, Error> {
         let no_overwrite = !should_overwrite;
         let serialized_key: Vec<u8> = encoding::serialize(&key);
@@ -252,6 +481,11 @@ impl SqliteEngine {
                 })
                 .optional()
             })?;
+        if let Some(index_name) =
+            Self::unique_index_conflict(connection, store.id, &serialized_key, index_updates)?
+        {
+            return Ok(PutItemResult::IndexConstraintViolated(index_name));
+        }
         if existing_item.is_some() {
             if no_overwrite {
                 return Ok(PutItemResult::CannotOverwrite);
@@ -268,6 +502,7 @@ impl SqliteEngine {
                 params![store.id, serialized_key, value],
             )?;
         }
+        Self::replace_index_records(connection, store.id, &serialized_key, index_updates)?;
         if let Some(next_key_generator_current_number) = key_generator_current_number {
             connection.execute(
                 "UPDATE object_store SET auto_increment = ? WHERE id = ?",
@@ -282,6 +517,13 @@ impl SqliteEngine {
         store: object_store_model::Model,
         key_range: IndexedDBKeyRange,
     ) -> Result<(), Error> {
+        // The index records name their primary keys, so the set has to be read before the rows
+        // that define it are gone.
+        let removed = Self::get_all(connection, store.clone(), key_range.clone(), None)?
+            .into_iter()
+            .map(|model| model.key)
+            .collect::<Vec<_>>();
+        Self::delete_index_records(connection, store.id, &removed)?;
         let query = range_to_query(key_range);
         let (sql, values) = sea_query::Query::delete()
             .from_table(object_data_model::Column::Table)
@@ -292,6 +534,12 @@ impl SqliteEngine {
     }
 
     fn clear(connection: &Connection, store: object_store_model::Model) -> Result<(), Error> {
+        for table in ["index_data", "unique_index_data"] {
+            connection.execute(
+                &format!("DELETE FROM {table} WHERE object_store_id = ?"),
+                params![store.id],
+            )?;
+        }
         connection.execute(
             "DELETE FROM object_data WHERE object_store_id = ?",
             params![store.id],
@@ -440,7 +688,14 @@ impl SqliteEngine {
             |row| Ok(object_store_model::Model::try_from(row).unwrap()),
         )?;
 
-        // Delete the index if it exists
+        // Delete the index's records before the row that gives them their index_id.
+        if let Some(index) = Self::index_by_name(connection, object_store.id, &index_name)? {
+            let table = index_table(&index);
+            connection.execute(
+                &format!("DELETE FROM {table} WHERE index_id = ?"),
+                params![index.id],
+            )?;
+        }
         let _ = connection.execute(
             "DELETE FROM object_store_index WHERE name = ? AND object_store_id = ?",
             params![index_name, object_store.id],
@@ -551,6 +806,11 @@ impl KvsEngine for SqliteEngine {
                     },
                 };
 
+                // The target says which of the store's surfaces the request addressed. The six
+                // read operations are deliberately target agnostic on the wire, so an index needs
+                // no operation variants of its own, only this context to select which records
+                // they range over.
+                let context = request.context;
                 match request.operation {
                     AsyncOperation::ReadWrite(AsyncReadWriteOperation::PutItem {
                         callback,
@@ -596,6 +856,7 @@ impl KvsEngine for SqliteEngine {
                                 value,
                                 should_overwrite,
                                 key_generator_current_number,
+                                &context.index_updates,
                             )
                             .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
                         );
@@ -604,18 +865,47 @@ impl KvsEngine for SqliteEngine {
                         callback,
                         key_range,
                     }) => {
-                        let _ = callback.send(
-                            Self::get_item(&connection, object_store, key_range)
-                                .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
-                        );
+                        let result = match &context.target {
+                            KvsOperationTarget::Index { name } => Self::index_records(
+                                &connection,
+                                &object_store,
+                                name,
+                                key_range,
+                                Some(1),
+                            )
+                            .map(|records| records.into_iter().next().map(|record| record.data)),
+                            KvsOperationTarget::ObjectStore => {
+                                Self::get_item(&connection, object_store, key_range)
+                            },
+                        };
+                        let _ = callback
+                            .send(result.map_err(|e| BackendError::DbErr(format!("{:?}", e))));
                     },
                     AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllKeys {
                         callback,
                         key_range,
                         count,
                     }) => {
+                        let result = match &context.target {
+                            KvsOperationTarget::Index { name } => Self::index_records(
+                                &connection,
+                                &object_store,
+                                name,
+                                key_range,
+                                count,
+                            )
+                            .map(|records| {
+                                records
+                                    .into_iter()
+                                    .map(|record| record.primary_key)
+                                    .collect::<Vec<_>>()
+                            }),
+                            KvsOperationTarget::ObjectStore => {
+                                Self::get_all_keys(&connection, object_store, key_range, count)
+                            },
+                        };
                         let _ = callback.send(
-                            Self::get_all_keys(&connection, object_store, key_range, count)
+                            result
                                 .map(|keys| {
                                     keys.into_iter()
                                         .map(|k| encoding::deserialize(&k).unwrap())
@@ -629,10 +919,23 @@ impl KvsEngine for SqliteEngine {
                         key_range,
                         count,
                     }) => {
-                        let _ = callback.send(
-                            Self::get_all_items(&connection, object_store, key_range, count)
-                                .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
-                        );
+                        let result = match &context.target {
+                            KvsOperationTarget::Index { name } => Self::index_records(
+                                &connection,
+                                &object_store,
+                                name,
+                                key_range,
+                                count,
+                            )
+                            .map(|records| {
+                                records.into_iter().map(|record| record.data).collect()
+                            }),
+                            KvsOperationTarget::ObjectStore => {
+                                Self::get_all_items(&connection, object_store, key_range, count)
+                            },
+                        };
+                        let _ = callback
+                            .send(result.map_err(|e| BackendError::DbErr(format!("{:?}", e))));
                     },
                     AsyncOperation::ReadWrite(AsyncReadWriteOperation::RemoveItem {
                         callback,
@@ -647,25 +950,53 @@ impl KvsEngine for SqliteEngine {
                         callback,
                         key_range,
                     }) => {
-                        let _ = callback.send(
-                            Self::count(&connection, object_store, key_range)
-                                .map(|r| r as u64)
-                                .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
-                        );
+                        let result = match &context.target {
+                            KvsOperationTarget::Index { name } => {
+                                Self::index_count(&connection, &object_store, name, key_range)
+                            },
+                            KvsOperationTarget::ObjectStore => {
+                                Self::count(&connection, object_store, key_range).map(|r| r as u64)
+                            },
+                        };
+                        let _ = callback
+                            .send(result.map_err(|e| BackendError::DbErr(format!("{:?}", e))));
                     },
                     AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
                         callback,
                         key_range,
                     }) => {
+                        // An object store cursor's key and primary key are the same key. An index
+                        // cursor's are not, and keeping them apart here is what lets the cursor
+                        // report the index key while continuing from the object store position.
+                        let result = match &context.target {
+                            KvsOperationTarget::Index { name } => {
+                                Self::index_records(&connection, &object_store, name, key_range, None)
+                            },
+                            KvsOperationTarget::ObjectStore => {
+                                Self::get_all_records(&connection, object_store, key_range).map(
+                                    |records| {
+                                        records
+                                            .into_iter()
+                                            .map(|(key, data)| SourceRecord {
+                                                key: key.clone(),
+                                                primary_key: key,
+                                                data,
+                                            })
+                                            .collect()
+                                    },
+                                )
+                            },
+                        };
                         let _ = callback.send(
-                            Self::get_all_records(&connection, object_store, key_range)
-                                .map(|records| {
+                            result
+                                .map(|records: Vec<SourceRecord>| {
                                     records
                                         .into_iter()
-                                        .map(|(key, data)| IndexedDBRecord {
-                                            key: encoding::deserialize(&key).unwrap(),
-                                            primary_key: encoding::deserialize(&key).unwrap(),
-                                            value: data,
+                                        .map(|record| IndexedDBRecord {
+                                            key: encoding::deserialize(&record.key).unwrap(),
+                                            primary_key: encoding::deserialize(&record.primary_key)
+                                                .unwrap(),
+                                            value: record.data,
                                         })
                                         .collect()
                                 })
@@ -682,8 +1013,25 @@ impl KvsEngine for SqliteEngine {
                         callback,
                         key_range,
                     }) => {
+                        // An index request answers with the primary key the index record points
+                        // at, which is what `IDBIndex.getKey` is defined to return.
+                        let result = match &context.target {
+                            KvsOperationTarget::Index { name } => Self::index_records(
+                                &connection,
+                                &object_store,
+                                name,
+                                key_range,
+                                Some(1),
+                            )
+                            .map(|records| {
+                                records.into_iter().next().map(|record| record.primary_key)
+                            }),
+                            KvsOperationTarget::ObjectStore => {
+                                Self::get_key(&connection, object_store, key_range)
+                            },
+                        };
                         let _ = callback.send(
-                            Self::get_key(&connection, object_store, key_range)
+                            result
                                 .map(|key| key.map(|k| encoding::deserialize(&k).unwrap()))
                                 .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
                         );

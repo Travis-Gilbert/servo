@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::GenericSend;
 use storage_traits::indexeddb::{
     AsyncOperation, AsyncReadOnlyOperation, BackendError, BackendResult, IndexedDBKeyType,
-    IndexedDBRecord, IndexedDBThreadMsg, IndexedDBTxnMode, KvsOperationContext, KvsOperationTarget,
+    IndexedDBRecord, IndexedDBThreadMsg, IndexedDBTxnMode, KvsOperationContext,
     PutItemResult, SyncOperation,
 };
 use stylo_atoms::Atom;
@@ -89,6 +89,9 @@ impl From<PutItemResult> for IdbResult {
         match value {
             PutItemResult::Key(key) => Self::Key(key),
             PutItemResult::CannotOverwrite => Self::Error(Error::Constraint(None)),
+            PutItemResult::IndexConstraintViolated(index_name) => Self::Error(Error::Constraint(
+                Some(format!("Unique index \"{index_name}\" already holds that key")),
+            )),
         }
     }
 }
@@ -427,6 +430,15 @@ impl IDBRequest {
         self.ready_state.set(IDBRequestReadyState::Done);
     }
 
+    /// Reopens a completed request so it can carry the result of another operation.
+    ///
+    /// Cursor iteration is the only caller: `advance`, `continue` and `continuePrimaryKey` all
+    /// say "set request's done flag to false" and then run a fresh iterate operation against the
+    /// same `IDBRequest` object, because the cursor holds exactly one request for its lifetime.
+    pub fn set_ready_state_pending(&self) {
+        self.ready_state.set(IDBRequestReadyState::Pending);
+    }
+
     pub fn set_result(&self, result: HandleValue) {
         self.result.set(result.get());
     }
@@ -461,6 +473,37 @@ impl IDBRequest {
     pub fn execute_async<T, F>(
         cx: &mut JSContext,
         source: &IDBObjectStore,
+        operation_fn: F,
+        request: Option<DomRoot<IDBRequest>>,
+        iteration_param: Option<IterationParam>,
+    ) -> Fallible<DomRoot<IDBRequest>>
+    where
+        T: Into<IdbResult> + for<'a> Deserialize<'a> + Serialize + Send + Sync + 'static,
+        F: FnOnce(GenericCallback<BackendResult<T>>) -> AsyncOperation,
+    {
+        Self::execute_async_with_context(
+            cx,
+            source,
+            KvsOperationContext::default(),
+            operation_fn,
+            request,
+            iteration_param,
+        )
+    }
+
+    /// Asynchronously execute a request, naming which of the object store's surfaces the
+    /// request addresses.
+    ///
+    /// `store` is always the owning object store, because the transaction, the store name on
+    /// the wire and the request's source all derive from it. `context` is what distinguishes an
+    /// `IDBIndex` request from an `IDBObjectStore` one: the backend reads index records when
+    /// `context.target` is `KvsOperationTarget::Index` and object store records otherwise. The
+    /// six read operations are deliberately target agnostic, so an index needs no new operation
+    /// variants, only the context that selects which records they range over.
+    pub fn execute_async_with_context<T, F>(
+        cx: &mut JSContext,
+        source: &IDBObjectStore,
+        context: KvsOperationContext,
         operation_fn: F,
         request: Option<DomRoot<IDBRequest>>,
         iteration_param: Option<IterationParam>,
@@ -550,10 +593,7 @@ impl IDBRequest {
                 global.origin().immutable().clone(),
                 String::from(transaction.get_db_name()),
                 String::from(source.get_name()),
-                KvsOperationContext {
-                    target: KvsOperationTarget::ObjectStore,
-                    index_updates: Vec::new(),
-                },
+                context,
                 transaction.get_serial_number(),
                 request_id,
                 transaction_mode,

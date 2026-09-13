@@ -10,6 +10,7 @@ use js::conversions::ToJSValConvertible;
 use js::gc::MutableHandleValue;
 use js::jsval::NullValue;
 use js::rust::HandleValue;
+use js::rust::wrappers2::JS_ClearPendingException;
 use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericBindings::IDBObjectStoreBinding::IDBIndexParameters;
 use script_bindings::codegen::GenericUnionTypes::StringOrStringSequence;
@@ -18,7 +19,7 @@ use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 use servo_base::generic_channel::{GenericSend, GenericSender};
 use storage_traits::indexeddb::{
     self, AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, AsyncSchemaOperation,
-    IndexedDBKeyType, IndexedDBThreadMsg,
+    IndexedDBKeyType, IndexedDBThreadMsg, KvsIndexUpdate, KvsOperationContext, KvsOperationTarget,
 };
 
 use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::IDBCursorDirection;
@@ -361,6 +362,66 @@ impl IDBObjectStore {
         Ok(())
     }
 
+    /// The index records this store's declared indexes produce for `value`.
+    ///
+    /// This is steps 6.1 through 6.4 of "store a record into an object store". Only the script
+    /// thread can run them: an index key is extracted by evaluating a key path against the
+    /// JavaScript value, which never crosses to the storage thread. The backend receives the
+    /// extracted keys and writes the index records from those alone.
+    ///
+    /// An index whose key path does not evaluate against the value contributes nothing, which is
+    /// what makes an index sparse. A multiEntry index contributes one record per distinct element
+    /// of its extracted array key; every other index contributes one record. Uniqueness is left
+    /// to the backend, which is the only place that can see the records already stored.
+    #[expect(unsafe_code)]
+    fn extract_index_updates(
+        &self,
+        cx: &mut JSContext,
+        value: HandleValue,
+    ) -> Fallible<Vec<KvsIndexUpdate>> {
+        // Extraction runs JavaScript getters, which can reenter this object store, so the index
+        // set is snapshotted here rather than held borrowed across any of it.
+        let indexes = self
+            .index_set
+            .borrow()
+            .values()
+            .map(|index| {
+                (
+                    index.index_name(),
+                    index.index_key_path().clone(),
+                    index.is_multi_entry(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut updates = Vec::with_capacity(indexes.len());
+        for (index_name, key_path, multi_entry) in indexes {
+            // Step 6.1. Let index key be the result of extracting a key from a value using a key
+            // path with value, index's key path, and index's multiEntry flag.
+            let extracted = match extract_key(cx, value, &key_path, Some(multi_entry)) {
+                Ok(extracted) => extracted,
+                // Step 6.2. An exception thrown while extracting an index key takes the record
+                // out of that index rather than failing the put, so it is discarded here. The
+                // pending exception has to go with it, or the next JavaScript call on this
+                // context would inherit it.
+                Err(_) => {
+                    unsafe { JS_ClearPendingException(cx) };
+                    continue;
+                },
+            };
+            let keys = match extracted {
+                // Step 6.4. A multiEntry index whose key is an array key stores one record per
+                // element; `convert_value_to_multientry_key` has already dropped the duplicates.
+                ExtractionResult::Key(IndexedDBKeyType::Array(elements)) if multi_entry => elements,
+                // Step 6.3. Otherwise the whole extracted key is the one index key.
+                ExtractionResult::Key(key) => vec![key],
+                // Step 6.2. Invalid or failure leaves the record out of this index.
+                ExtractionResult::Invalid | ExtractionResult::Failure => continue,
+            };
+            updates.push(KvsIndexUpdate { index_name, keys });
+        }
+        Ok(updates)
+    }
+
     /// <https://www.w3.org/TR/IndexedDB-3/#add-or-put>
     fn put(
         &self,
@@ -468,9 +529,18 @@ impl IDBObjectStore {
         };
         // Step 12. Let operation be an algorithm to run store a record into an object store with
         // store, clone, key, and no-overwrite flag.
-        let request = IDBRequest::execute_async(
+        //
+        // Storing a record also builds its index records, so the index keys are extracted from
+        // the finished clone, after any generated key has been injected into it, and travel with
+        // the operation.
+        let index_updates = self.extract_index_updates(cx, cloned_js_value.handle())?;
+        let request = IDBRequest::execute_async_with_context(
             cx,
             self,
+            KvsOperationContext {
+                target: KvsOperationTarget::ObjectStore,
+                index_updates,
+            },
             |callback| {
                 AsyncOperation::ReadWrite(AsyncReadWriteOperation::PutItem {
                     callback,
