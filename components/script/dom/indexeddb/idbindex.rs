@@ -120,6 +120,11 @@ impl IDBIndex {
         )
     }
 
+    /// The object store this index belongs to.
+    pub(crate) fn object_store(&self) -> DomRoot<IDBObjectStore> {
+        self.object_store.as_rooted()
+    }
+
     /// The index's name, as the object store knows it when it builds index records.
     pub(crate) fn index_name(&self) -> String {
         self.name.borrow().to_string()

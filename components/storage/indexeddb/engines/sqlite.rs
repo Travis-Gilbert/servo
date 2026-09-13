@@ -446,12 +446,23 @@ impl SqliteEngine {
         Self::get(connection, store, key_range).map(|opt| opt.map(|model| model.key))
     }
 
-    fn get_item(
+    /// The one record a key range covers, key included.
+    ///
+    /// `get` already reads the whole row. Dropping the key here is what kept it from the DOM,
+    /// which needs it to inject a generated in-line key into the value on the way out. An object
+    /// store record's key and primary key are the same key.
+    fn get_record(
         connection: &Connection,
         store: object_store_model::Model,
         key_range: IndexedDBKeyRange,
-    ) -> Result<Option<Vec<u8>>, Error> {
-        Self::get(connection, store, key_range).map(|opt| opt.map(|model| model.data))
+    ) -> Result<Option<SourceRecord>, Error> {
+        Self::get(connection, store, key_range).map(|opt| {
+            opt.map(|model| SourceRecord {
+                key: model.key.clone(),
+                primary_key: model.key,
+                data: model.data,
+            })
+        })
     }
 
     /// The records of an object store that a key range covers, in ascending key order.
@@ -743,6 +754,39 @@ impl SqliteEngine {
             }
         }
         Ok(BackfillIndexResult::Done)
+    }
+
+    /// <https://w3c.github.io/IndexedDB/#possibly-update-the-key-generator>
+    ///
+    /// `auto_increment` holds 0 for a store with no key generator, which is the step that aborts
+    /// before any of this runs. The answer is the generator's new current number, or `None` when
+    /// the generator does not move.
+    fn possibly_updated_key_generator(auto_increment: i64, key: &IndexedDBKeyType) -> Option<i64> {
+        if auto_increment == 0 {
+            return None;
+        }
+        // Step 1. If the type of key is not number, abort these steps.
+        let IndexedDBKeyType::Number(number) = key else {
+            return None;
+        };
+        // Step 2. Let value be the value of key.
+        // Step 3. Set value to the minimum of value and 2^53 (9007199254740992).
+        // Step 4. Set value to the largest integer not greater than value.
+        // Spelled as an associated call because `sea_query`'s prelude is in scope here and
+        // supplies its own `min` for `&f64`, which builds a SQL expression rather than a number.
+        let value = f64::min(*number, 9_007_199_254_740_992.0).floor();
+        // Step 5. Let generator be store's key generator.
+        // Step 6. If value is greater than or equal to generator's current number, then set
+        // generator's current number to value + 1.
+        if value < auto_increment as f64 {
+            return None;
+        }
+        // The clamp above leaves value at 2^53 or below, and an f64 holds every integer up to
+        // 2^53 exactly, so the increment moves into integer space here. Adding 1 in f64 would
+        // land on 2^53 + 1, which is not representable and rounds straight back down to 2^53. A
+        // generator an explicit key had maxed out would then come back one short of the value
+        // that makes the next `generate a key` fail, and it would keep handing out 2^53.
+        Some(value as i64 + 1)
     }
 
     fn put_item(
@@ -1146,14 +1190,21 @@ impl KvsEngine for SqliteEngine {
                         key,
                         value,
                         should_overwrite,
-                        key_generator_current_number,
                     }) => {
+                        // Both of the key generator's operations run here, against the durable
+                        // generator. A store that has no key generator holds 0 in this column;
+                        // every generator starts at 1 and only ever grows, so the one column
+                        // carries both the flag and the generator's current number.
                         let (key, key_generator_current_number) = match key {
-                            Some(key) => (key, key_generator_current_number),
-                            // <https://w3c.github.io/IndexedDB/#generate-a-key>. A store
-                            // that has no key generator holds 0 here; every generator starts at
-                            // 1 and only ever grows, so the one column carries both the flag and
-                            // the generator's current number.
+                            // <https://w3c.github.io/IndexedDB/#possibly-update-the-key-generator>
+                            Some(key) => {
+                                let next = Self::possibly_updated_key_generator(
+                                    object_store.auto_increment,
+                                    &key,
+                                );
+                                (key, next)
+                            },
+                            // <https://w3c.github.io/IndexedDB/#generate-a-key>
                             None => {
                                 if object_store.auto_increment == 0 {
                                     if let Err(error) = callback.send(Err(BackendError::DbErr(
@@ -1181,6 +1232,17 @@ impl KvsEngine for SqliteEngine {
                                 )
                             },
                         };
+                        // An index whose key path is the store's key path indexes the record
+                        // under the key the record is stored under. Script cannot extract that
+                        // key from a value it was never injected into, so it marks the update and
+                        // the key is filled in here, ahead of the uniqueness check `put_item`
+                        // runs.
+                        let mut index_updates = context.index_updates;
+                        for update in &mut index_updates {
+                            if update.keys_are_the_record_key {
+                                update.keys = vec![key.clone()];
+                            }
+                        }
                         let _ = callback.send(
                             Self::put_item(
                                 &connection,
@@ -1189,7 +1251,7 @@ impl KvsEngine for SqliteEngine {
                                 value,
                                 should_overwrite,
                                 key_generator_current_number,
-                                &context.index_updates,
+                                &index_updates,
                             )
                             .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
                         );
@@ -1198,6 +1260,10 @@ impl KvsEngine for SqliteEngine {
                         callback,
                         key_range,
                     }) => {
+                        // The key rides back with the value. A store with a key generator and an
+                        // in-line key path does not write the key into the value, because the key
+                        // is generated here and there is no JavaScript here to inject it with, so
+                        // the DOM injects it when it deserializes.
                         let result = match &context.target {
                             KvsOperationTarget::Index { name } => Self::index_records(
                                 &connection,
@@ -1207,11 +1273,22 @@ impl KvsEngine for SqliteEngine {
                                 Some(1),
                                 RecordsShape::WithValues,
                             )
-                            .map(|records| records.into_iter().next().map(|record| record.data)),
+                            .map(|records| records.into_iter().next()),
                             KvsOperationTarget::ObjectStore => {
-                                Self::get_item(&connection, object_store, key_range)
+                                Self::get_record(&connection, object_store, key_range)
                             },
-                        };
+                        }
+                        .and_then(|record| {
+                            record
+                                .map(|record| {
+                                    Ok(IndexedDBRecord {
+                                        key: decode_key(&record.key)?,
+                                        primary_key: decode_key(&record.primary_key)?,
+                                        value: record.data,
+                                    })
+                                })
+                                .transpose()
+                        });
                         let _ = callback
                             .send(result.map_err(|e| BackendError::DbErr(format!("{:?}", e))));
                     },
@@ -1978,7 +2055,6 @@ mod tests {
                             key: Some(IndexedDBKeyType::Number(1.0)),
                             value: vec![1, 2, 3],
                             should_overwrite: false,
-                            key_generator_current_number: None,
                         }),
                     },
                     KvsOperation {
@@ -1989,7 +2065,6 @@ mod tests {
                             key: Some(IndexedDBKeyType::String("2.0".to_string())),
                             value: vec![4, 5, 6],
                             should_overwrite: false,
-                            key_generator_current_number: None,
                         }),
                     },
                     KvsOperation {
@@ -2003,7 +2078,6 @@ mod tests {
                             ])),
                             value: vec![7, 8, 9],
                             should_overwrite: false,
-                            key_generator_current_number: None,
                         }),
                     },
                     // Try to put a duplicate key without overwrite
@@ -2015,7 +2089,6 @@ mod tests {
                             key: Some(IndexedDBKeyType::Number(1.0)),
                             value: vec![10, 11, 12],
                             should_overwrite: false,
-                            key_generator_current_number: None,
                         }),
                     },
                     KvsOperation {
@@ -2026,7 +2099,6 @@ mod tests {
                             key: Some(IndexedDBKeyType::Number(1.0)),
                             value: vec![13, 14, 15],
                             should_overwrite: true,
-                            key_generator_current_number: None,
                         }),
                     },
                     KvsOperation {
@@ -2250,7 +2322,6 @@ mod tests {
                     key: Some(IndexedDBKeyType::Number(key)),
                     value,
                     should_overwrite: true,
-                    key_generator_current_number: None,
                 }),
             }
         }

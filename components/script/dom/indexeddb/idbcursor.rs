@@ -43,6 +43,19 @@ pub(crate) enum ObjectStoreOrIndex {
     Index(Dom<IDBIndex>),
 }
 
+impl ObjectStoreOrIndex {
+    /// The object store the records come from, whichever surface the request addressed.
+    ///
+    /// An index request reads the object store's values, so the store is the one that knows
+    /// whether a stored value is missing the key it was generated under.
+    pub(crate) fn object_store(&self) -> DomRoot<IDBObjectStore> {
+        match self {
+            ObjectStoreOrIndex::ObjectStore(store) => store.as_rooted(),
+            ObjectStoreOrIndex::Index(index) => index.object_store(),
+        }
+    }
+}
+
 #[dom_struct]
 pub(crate) struct IDBCursor {
     reflector_: Reflector,
@@ -82,6 +95,11 @@ pub(crate) struct IDBCursor {
 }
 
 impl IDBCursor {
+    /// The object store or index this cursor was opened on.
+    pub(crate) fn source(&self) -> &ObjectStoreOrIndex {
+        &self.source
+    }
+
     #[cfg_attr(crown, expect(crown::unrooted_must_root))]
     pub(crate) fn new_inherited(
         transaction: &IDBTransaction,
@@ -961,6 +979,13 @@ pub(crate) fn iterate_cursor(
             .and_then(|data| {
                 structuredclone::read(cx, global, data, new_cursor_value.handle_mut())
             })?;
+        // A store that generates keys into an in-line key path does not store the key inside the
+        // value, so it goes back in before script sees the cursor's value.
+        source.object_store().inject_record_key_if_absent(
+            cx,
+            new_cursor_value.handle(),
+            &found_record.primary_key,
+        )?;
         cursor.value.set(new_cursor_value.get());
     }
 

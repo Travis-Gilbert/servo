@@ -15,6 +15,7 @@ use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::structuredclone;
 use crate::dom::globalscope::GlobalScope;
+use crate::dom::indexeddb::idbobjectstore::IDBObjectStore;
 use crate::indexeddb::key_type_to_jsval;
 
 /// <https://www.w3.org/TR/IndexedDB-3/#idbrecord>
@@ -56,6 +57,7 @@ impl IDBRecord {
     pub(crate) fn new(
         cx: &mut JSContext,
         global: &GlobalScope,
+        store: &IDBObjectStore,
         record: IndexedDBRecord,
     ) -> Fallible<DomRoot<IDBRecord>> {
         let this = reflect_dom_object_with_cx(Box::new(IDBRecord::new_inherited()), global, cx);
@@ -71,6 +73,9 @@ impl IDBRecord {
         rooted!(&in(cx) let mut value = UndefinedValue());
         let data = postcard::from_bytes(&record.value).map_err(|_| Error::Data(None))?;
         structuredclone::read(cx, global, data, value.handle_mut())?;
+        // A store that generates keys into an in-line key path does not store the key inside the
+        // value. `record.value` is the stored bytes, so the key goes back in here.
+        store.inject_record_key_if_absent(cx, value.handle(), &record.primary_key)?;
         this.value.set(value.get());
 
         Ok(this)

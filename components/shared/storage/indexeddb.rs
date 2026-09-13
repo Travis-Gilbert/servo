@@ -111,11 +111,21 @@ pub enum KvsOperationTarget {
 ///
 /// `keys` contains one entry per index record to write. A multi-entry index is flattened by the
 /// script layer before it reaches the backend; an empty vector means extraction produced no index
-/// record. The backend retains responsibility for uniqueness checks using its index schema.
+/// record, unless `keys_are_the_record_key` is set. The backend retains responsibility for
+/// uniqueness checks using its index schema.
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, PartialEq, Serialize)]
 pub struct KvsIndexUpdate {
     pub index_name: String,
     pub keys: Vec<IndexedDBKeyType>,
+    /// Set when this index's key path is the store's key path and the record's key had not been
+    /// generated when the update was built.
+    ///
+    /// An index key that is the store's own key cannot be extracted from a value the key has not
+    /// been injected into yet, so the script layer leaves `keys` empty and the engine fills it
+    /// with the key the record is stored under. The engine fills it before the uniqueness check,
+    /// so `createIndex('by_id', 'id', { unique: true })` on an `autoIncrement` store still
+    /// refuses a duplicate.
+    pub keys_are_the_record_key: bool,
 }
 
 #[derive(MallocSizeOf)]
@@ -593,8 +603,14 @@ pub enum AsyncReadOnlyOperation {
         callback: GenericCallback<BackendResult<Option<IndexedDBKeyType>>>,
         key_range: IndexedDBKeyRange,
     },
+    /// The one record a key range covers, key included.
+    ///
+    /// The key travels with the value because a store with a key generator and an in-line key
+    /// path does not write the key into the value; the key is generated in the engine, where
+    /// there is no JavaScript to inject it with, so `get` injects it on the way back out.
+    /// `primary_key` is the object store key in both cases, which is the one that gets injected.
     GetItem {
-        callback: GenericCallback<BackendResult<Option<Vec<u8>>>>,
+        callback: GenericCallback<BackendResult<Option<IndexedDBRecord>>>,
         key_range: IndexedDBKeyRange,
     },
 
@@ -633,11 +649,17 @@ pub enum AsyncReadWriteOperation {
     /// Sets the value of the given key in the associated idb data
     PutItem {
         callback: GenericCallback<BackendResult<PutItemResult>>,
+        /// `None` when the store's key generator has to produce the key.
+        ///
+        /// Both of the key generator's spec operations run in the engine, because the generator
+        /// they read is the durable one. `generate a key` runs for a `None` key and
+        /// `possibly update the key generator` runs for an explicit numeric one. Neither can be
+        /// decided here. A script-side mirror advances when a request is queued and the durable
+        /// generator advances when that request succeeds, so the two disagree for as long as a
+        /// put is in flight and they stay apart for good once one fails.
         key: Option<IndexedDBKeyType>,
         value: Vec<u8>,
         should_overwrite: bool,
-        /// New object store key generator current number to persist if the put succeeds.
-        key_generator_current_number: Option<i64>,
     },
 
     /// Removes the key/value pair for the given key in the associated idb data
@@ -1143,6 +1165,7 @@ mod test {
             index_updates: vec![KvsIndexUpdate {
                 index_name: "by-tag".to_owned(),
                 keys: vec![IndexedDBKeyType::String("rust".to_owned())],
+                keys_are_the_record_key: false,
             }],
         };
         let callback = GenericCallback::new(ProfilerChan(None), |_| {}).unwrap();
@@ -1160,7 +1183,6 @@ mod test {
                         key: Some(IndexedDBKeyType::Number(1.0)),
                         value: vec![1, 2, 3],
                         should_overwrite: true,
-                        key_generator_current_number: None,
                     }),
                 }]),
             },

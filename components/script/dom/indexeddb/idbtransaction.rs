@@ -892,7 +892,7 @@ impl IDBTransaction {
     fn object_store_parameters(
         &self,
         object_store_name: &DOMString,
-    ) -> Option<(IDBObjectStoreParameters, Vec<IndexedDBIndex>, Option<i64>)> {
+    ) -> Option<(IDBObjectStoreParameters, Vec<IndexedDBIndex>)> {
         let global = self.global();
         let idb_sender = global.storage_threads().sender();
         // A store whose parameters cannot even be asked for reads the same way to the caller as
@@ -927,7 +927,6 @@ impl IDBTransaction {
                 keyPath: key_path,
             },
             object_store.indexes,
-            object_store.key_generator_current_number,
         ))
     }
 
@@ -1015,24 +1014,21 @@ impl IDBTransactionMethods<crate::DomTypeHolder> for IDBTransaction {
             &self.global(),
             self.db.get_name(),
             name.clone(),
-            parameters.as_ref().map(|(params, _, _)| params),
+            parameters.as_ref().map(|(params, _)| params),
             IDBObjectStoreAbortState {
                 newly_created_during_transaction: false,
                 rollback_indexes_on_abort: if self.mode == IDBTransactionMode::Versionchange {
                     parameters
                         .as_ref()
-                        .map(|(_, indexes, _)| indexes.clone())
+                        .map(|(_, indexes)| indexes.clone())
                         .unwrap_or_default()
                 } else {
                     Vec::new()
                 },
-                key_generator_current_number: parameters
-                    .as_ref()
-                    .and_then(|(_, _, key_generator_current_number)| *key_generator_current_number),
             },
             self,
         );
-        if let Some(indexes) = parameters.map(|(_, indexes, _)| indexes) {
+        if let Some(indexes) = parameters.map(|(_, indexes)| indexes) {
             for index in indexes {
                 store.add_index(
                     cx,

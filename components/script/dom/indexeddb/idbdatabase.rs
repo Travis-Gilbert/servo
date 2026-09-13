@@ -355,7 +355,6 @@ impl IDBDatabaseMethods<crate::DomTypeHolder> for IDBDatabase {
             IDBObjectStoreAbortState {
                 newly_created_during_transaction: true,
                 rollback_indexes_on_abort: vec![],
-                key_generator_current_number: if auto_increment { Some(1_i64) } else { None },
             },
             &transaction,
         );

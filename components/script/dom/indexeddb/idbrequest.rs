@@ -64,6 +64,20 @@ pub(crate) enum RequestSource {
     Cursor(Dom<IDBCursor>),
 }
 
+impl RequestSource {
+    /// The object store whose records the request reads.
+    ///
+    /// An index request and a cursor request both answer with the object store's values, and the
+    /// store is what knows whether a stored value is missing the key it was generated under.
+    pub(crate) fn object_store(&self) -> DomRoot<IDBObjectStore> {
+        match self {
+            RequestSource::ObjectStore(store) => store.as_rooted(),
+            RequestSource::Index(index) => index.object_store(),
+            RequestSource::Cursor(cursor) => cursor.source().object_store(),
+        }
+    }
+}
+
 /// Which projection of each record a `getAll`-family request answers with.
 ///
 /// One backend read serves all three methods; only the shape of the answer differs.
@@ -302,7 +316,11 @@ struct RequestListener {
 pub enum IdbResult {
     Key(IndexedDBKeyType),
     Keys(Vec<IndexedDBKeyType>),
-    Value(Vec<u8>),
+    /// The one record a `get` answers with, key included.
+    ///
+    /// The key rides along because a store that generates keys into an in-line key path does not
+    /// write the key into the value; the key is generated in the engine and injected here.
+    Record(IndexedDBRecord),
     Values(Vec<Vec<u8>>),
     Count(u64),
     /// The records a range covers. Which of the four algorithms that read records this answer
@@ -324,9 +342,9 @@ impl From<Vec<IndexedDBKeyType>> for IdbResult {
     }
 }
 
-impl From<Vec<u8>> for IdbResult {
-    fn from(value: Vec<u8>) -> Self {
-        IdbResult::Value(value)
+impl From<IndexedDBRecord> for IdbResult {
+    fn from(value: IndexedDBRecord) -> Self {
+        IdbResult::Record(value)
     }
 }
 
@@ -478,11 +496,29 @@ impl RequestListener {
                     }
                     array.safe_to_jsval(cx, answer.handle_mut());
                 },
-                IdbResult::Value(serialized_data) => {
-                    let result = postcard::from_bytes(&serialized_data)
+                IdbResult::Record(record) => {
+                    // The store is rooted and the borrow released before anything below can
+                    // reenter script, because injecting a key runs `CreateDataProperty`.
+                    let store = request
+                        .source
+                        .borrow()
+                        .as_ref()
+                        .map(|source| source.object_store());
+                    let result = postcard::from_bytes(&record.value)
                         .map_err(|_| Error::Data(None))
                         .and_then(|data| {
                             structuredclone::read(cx, &global, data, answer.handle_mut())
+                        })
+                        .map(|_| ())
+                        .and_then(|()| match &store {
+                            // A store that generates keys into an in-line key path does not write
+                            // the key into the value, so `get` puts it back.
+                            Some(store) => store.inject_record_key_if_absent(
+                                cx,
+                                answer.handle(),
+                                &record.primary_key,
+                            ),
+                            None => Ok(()),
                         });
                     if let Err(e) = result {
                         warn!("Error reading structuredclone data");
@@ -543,34 +579,54 @@ impl RequestListener {
                         direction,
                         count,
                     }) => {
+                        // The store is rooted and the borrow released before the loop, because
+                        // injecting a key runs `CreateDataProperty`, which can reenter script.
+                        let store = request
+                            .source
+                            .borrow()
+                            .as_ref()
+                            .map(|source| source.object_store());
                         let records = project_records(*direction, *count, records);
                         rooted!(&in(cx) let mut array = vec![JSVal::default(); records.len()]);
                         for (i, record) in records.into_iter().enumerate() {
                             let element = match kind {
-                                GetAllKind::Values => postcard::from_bytes(&record.value)
-                                    .map_err(|_| Error::Data(None))
-                                    .and_then(|data| {
-                                        structuredclone::read(
-                                            cx,
-                                            &global,
-                                            data,
-                                            array.handle_mut_at(i),
-                                        )
-                                    })
+                                GetAllKind::Values => (|| {
+                                    let data = postcard::from_bytes(&record.value)
+                                        .map_err(|_| Error::Data(None))?;
                                     // The deserialized message ports belong to the value, which
                                     // is now rooted in the array. Nothing here owns them.
-                                    .map(|_| ()),
+                                    structuredclone::read(
+                                        cx,
+                                        &global,
+                                        data,
+                                        array.handle_mut_at(i),
+                                    )?;
+                                    // A store that generates keys into an in-line key path does
+                                    // not write the key into the value, so it goes back in here.
+                                    if let Some(store) = &store {
+                                        store.inject_record_key_if_absent(
+                                            cx,
+                                            array.handle_at(i),
+                                            &record.primary_key,
+                                        )?;
+                                    }
+                                    Ok(())
+                                })(),
                                 GetAllKind::PrimaryKeys => key_type_to_jsval(
                                     cx,
                                     &record.primary_key,
                                     array.handle_mut_at(i),
                                 ),
-                                GetAllKind::Records => {
-                                    IDBRecord::new(cx, &global, record).map(|idb_record| {
-                                        array.handle_mut_at(i).set(ObjectValue(
-                                            *idb_record.reflector().get_jsobject(),
-                                        ));
-                                    })
+                                // A `getAllRecords` request always has a source, so a reply that
+                                // arrives without one cannot be projected into records.
+                                GetAllKind::Records => match &store {
+                                    Some(store) => IDBRecord::new(cx, &global, store, record)
+                                        .map(|idb_record| {
+                                            array.handle_mut_at(i).set(ObjectValue(
+                                                *idb_record.reflector().get_jsobject(),
+                                            ));
+                                        }),
+                                    None => Err(Error::InvalidState(None)),
                                 },
                             };
                             if let Err(e) = element {
