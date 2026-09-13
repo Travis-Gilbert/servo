@@ -97,17 +97,44 @@ use crate::webview_delegate::{
 
 #[cfg(feature = "media-gstreamer")]
 mod media_platform {
+    use servo_media_gstreamer::GStreamerBackend;
+
     use super::ServoMedia;
+
+    #[cfg(any(windows, target_os = "macos"))]
     pub fn init() {
-        ServoMedia::init::<servo_media_dummy::DummyBackend>();
+        ServoMedia::init_with_backend(|| {
+            let mut plugin_dir = std::env::current_exe().unwrap();
+            plugin_dir.pop();
+
+            if cfg!(target_os = "macos") {
+                plugin_dir.push("lib");
+            }
+
+            let plugin_list = crate::gstreamer_plugins::gstreamer_plugins();
+            match GStreamerBackend::init_with_plugins(plugin_dir, &plugin_list) {
+                Ok(b) => b,
+                Err(e) => {
+                    log::error!("Error initializing GStreamer: {:?}", e);
+                    std::process::exit(1);
+                },
+            }
+        });
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    pub fn init() {
+        ServoMedia::init::<GStreamerBackend>();
     }
 }
 
-#[cfg(all(not(feature = "media-gstreamer"), not(target_env = "ohos")))]
+#[cfg(all(not(feature = "media-gstreamer"), target_env = "ohos"))]
 mod media_platform {
+    use servo_media_ohos::OhosBackend;
+
     use super::ServoMedia;
     pub fn init() {
-        ServoMedia::init::<servo_media_dummy::DummyBackend>();
+        ServoMedia::init::<OhosBackend>();
     }
 }
 
@@ -1321,10 +1348,6 @@ pub fn run_content_process(token: String) {
             media_platform::init();
             content_process_diagnostic(diagnostics, "media-ready");
 
-            // Start the fetch thread for this content process.
-            let fetch_thread_join_handle = start_fetch_thread();
-            content_process_diagnostic(diagnostics, "fetch-thread-started");
-
             set_logger(
                 new_event_loop_info
                     .initial_script_state
@@ -1364,11 +1387,10 @@ pub fn run_content_process(token: String) {
 
             StyleThreadPool::shutdown();
 
-            // Shut down the fetch thread started above.
-            exit_fetch_thread();
-            fetch_thread_join_handle
-                .join()
-                .expect("Failed to join on the fetch thread in the constellation");
+            // Shut down the `FetchThread` if it had been started in the course of execution.
+            content_process_diagnostic(diagnostics, "fetch-thread-exiting");
+            FetchThread::exit();
+            content_process_diagnostic(diagnostics, "fetch-thread-exited");
         },
         UnprivilegedContent::ServiceWorker(content) => {
             content.start::<ServiceWorkerManager>();

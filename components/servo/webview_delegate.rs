@@ -692,11 +692,30 @@ pub enum SimpleDialog {
 }
 
 impl SimpleDialog {
-    fn id(&self) -> EmbedderControlId {
+    #[doc(hidden)]
+    pub fn message(&self) -> &str {
         match self {
-            SimpleDialog::Alert(alert_dialog) => alert_dialog.id,
-            SimpleDialog::Confirm(confirm_dialog) => confirm_dialog.id,
-            SimpleDialog::Prompt(prompt_dialog) => prompt_dialog.id,
+            SimpleDialog::Alert(alert_dialog) => alert_dialog.message(),
+            SimpleDialog::Confirm(confirm_dialog) => confirm_dialog.message(),
+            SimpleDialog::Prompt(prompt_dialog) => prompt_dialog.message(),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn confirm(self) {
+        match self {
+            SimpleDialog::Alert(alert_dialog) => alert_dialog.confirm(),
+            SimpleDialog::Confirm(confirm_dialog) => confirm_dialog.confirm(),
+            SimpleDialog::Prompt(prompt_dialog) => prompt_dialog.confirm(),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn dismiss(self) {
+        match self {
+            SimpleDialog::Alert(alert_dialog) => alert_dialog.confirm(),
+            SimpleDialog::Confirm(confirm_dialog) => confirm_dialog.dismiss(),
+            SimpleDialog::Prompt(prompt_dialog) => prompt_dialog.dismiss(),
         }
     }
 }
