@@ -152,16 +152,25 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
         }
     }
 
-    fn register_transaction(&mut self, txn: u64, mode: IndexedDBTxnMode, scope: Vec<String>) {
+    fn register_transaction(
+        &mut self,
+        txn: u64,
+        mode: IndexedDBTxnMode,
+        scope: Vec<String>,
+    ) -> DbResult<()> {
         if self.txn_info.contains_key(&txn) {
-            return;
+            return Ok(());
         }
         let scope: HashSet<String> = scope.into_iter().collect();
+        // A readwrite transaction snapshots the key generator of every store in its
+        // scope so that an abort can revert it. A failed read is not an absent
+        // snapshot: registering the transaction without one would leave the generator
+        // silently un-revertable, so the registration fails instead.
         let scope: Vec<TxnScopeStore> = scope
             .into_iter()
             .map(|store_name| {
                 let key_generator_snapshot = if mode == IndexedDBTxnMode::Readwrite {
-                    self.key_generator_current_number(&store_name)
+                    self.key_generator_current_number(&store_name)?
                         .map(|current_number| KeyGeneratorSnapshot {
                             store_name: store_name.clone(),
                             current_number,
@@ -169,12 +178,12 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
                 } else {
                     None
                 };
-                TxnScopeStore {
+                Ok(TxnScopeStore {
                     name: store_name,
                     key_generator_snapshot,
-                }
+                })
             })
-            .collect();
+            .collect::<DbResult<Vec<TxnScopeStore>>>()?;
         let created_seq = self.next_created_seq;
         self.next_created_seq += 1;
         self.txn_info.insert(
@@ -192,6 +201,7 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
                 requests: VecDeque::new(),
                 mode,
             });
+        Ok(())
     }
 
     fn scopes_overlap(a: &TxnInfo, b: &TxnInfo) -> bool {
@@ -580,8 +590,10 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
         self.pending_commit_callbacks.remove(&txn);
     }
 
-    fn key_generator_current_number(&self, store_name: &str) -> Option<i64> {
-        self.engine.key_generator_current_number(store_name)
+    fn key_generator_current_number(&self, store_name: &str) -> DbResult<Option<i64>> {
+        self.engine
+            .key_generator_current_number(store_name)
+            .map_err(|err| format!("{err:?}"))
     }
 
     fn set_key_generator_current_number(
@@ -611,9 +623,9 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
     /// <https://w3c.github.io/IndexedDB/#key-generator-construct>
     fn object_store(&self, store_name: &str) -> DbResult<IndexedDBObjectStore> {
         // A key generator has a current number.
-        let key_generator_current_number = self.key_generator_current_number(store_name);
+        let key_generator_current_number = self.key_generator_current_number(store_name)?;
         Ok(IndexedDBObjectStore {
-            key_path: self.key_path(store_name),
+            key_path: self.key_path(store_name)?,
             has_key_generator: key_generator_current_number.is_some(),
             key_generator_current_number,
             indexes: self.indexes(store_name)?,
@@ -628,8 +640,10 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
             .collect()
     }
 
-    fn key_path(&self, store_name: &str) -> Option<KeyPath> {
-        self.engine.key_path(store_name)
+    fn key_path(&self, store_name: &str) -> DbResult<Option<KeyPath>> {
+        self.engine
+            .key_path(store_name)
+            .map_err(|err| format!("{err:?}"))
     }
 
     fn object_store_names(&self) -> DbResult<Vec<String>> {
@@ -1252,11 +1266,23 @@ impl IndexedDBManager {
         };
 
         if committed {
+            // The version bump is already durable by the time this arrives, so a missing
+            // queue or request is not a benign no-op: it is an open request that will
+            // never be answered. Say so, rather than returning into a debug-only
+            // assertion that release builds do not have.
             let Some(queue) = self.connection_queues.get_mut(&key) else {
-                return debug_assert!(false, "A connection queue should exist.");
+                debug_assert!(false, "A connection queue should exist.");
+                return error!(
+                    "Upgrade of {:?} committed with no connection queue to report it to.",
+                    key.name
+                );
             };
             let Some(front) = queue.front() else {
-                return debug_assert!(false, "A pending open request should exist.");
+                debug_assert!(false, "A pending open request should exist.");
+                return error!(
+                    "Upgrade of {:?} committed with no open request to report it to.",
+                    key.name
+                );
             };
             let OpenRequest::Open {
                 pending_upgrade: Some(pending_upgrade),
@@ -1414,43 +1440,56 @@ impl IndexedDBManager {
     /// placeholder backing store entirely.
     ///
     /// Related: <https://github.com/servo/servo/pull/42998>
+    /// Revert the effects of an aborted upgrade.
+    ///
+    /// The snapshot is borrowed rather than consumed, and every step is individually
+    /// idempotent: deleting a database that is already gone, setting a version that is
+    /// already `old`, and restoring object stores that already match are all no-ops.
+    /// A caller whose revert failed therefore still holds everything a second attempt
+    /// needs, and a partially applied revert converges when it is re-run.
     fn revert_aborted_upgrade(
         &mut self,
         key: &IndexedDBDescription,
         upgrade: &VersionUpgrade,
         proxy_map: &StorageProxyMap,
-    ) {
+    ) -> DbResult<()> {
+        // An upgrade from version zero is what created the database, so reverting it
+        // deletes the database rather than winding a version back.
         if upgrade.old == 0 {
-            if let Some(db) = self.databases.remove(key) {
-                // Note: ensure db is dropped before deleting directory,
-                // to get around windows file locks.
-                drop(db);
-                let response = proxy_map
-                    .handle
-                    .delete_database(proxy_map.bottle_id, key.name.clone())
-                    .recv();
-                if response.is_err() {
-                    error!("Failed to communicate with client storage.");
-                    return;
-                }
-                if response.unwrap().is_err() {
-                    error!("Failed to delete database {:?}", key.name);
-                }
-            }
-            return;
+            let Some(db) = self.databases.remove(key) else {
+                // Already removed, by an earlier attempt at this same revert.
+                return Ok(());
+            };
+            // Note: ensure db is dropped before deleting directory,
+            // to get around windows file locks.
+            //
+            // Dropping first is what the file locks require, so a failed delete leaves
+            // the directory on disk with no entry in `self.databases`. That residual is
+            // unchanged here; what changed is that it is now reported instead of logged
+            // and swallowed, so the caller knows the revert did not complete.
+            drop(db);
+            let response = proxy_map
+                .handle
+                .delete_database(proxy_map.bottle_id, key.name.clone())
+                .recv()
+                .map_err(|_| "Failed to communicate with client storage".to_string())?;
+            return response
+                .map_err(|error| format!("Failed to delete database {:?}: {error:?}", key.name));
         }
 
         let Some(db) = self.databases.get_mut(key) else {
-            return debug_assert!(false, "Db should have been created");
+            debug_assert!(false, "Db should have been created");
+            return Err(format!(
+                "No open database to revert the aborted upgrade of {:?}",
+                key.name
+            ));
         };
-        let res = db.set_version(upgrade.old);
-        debug_assert!(res.is_ok(), "Setting a db version should not fail.");
+        db.set_version(upgrade.old)?;
 
         // Step 4. Set connection’s object store set to the set of object stores
         // in database if database previously existed, or the empty set if
         // database was newly created.
-        let res = db.restore_object_stores(&upgrade.object_stores);
-        debug_assert!(res.is_ok(), "Restoring object stores should not fail.");
+        db.restore_object_stores(&upgrade.object_stores)
     }
 
     /// Aborting the current upgrade for an origin.
@@ -1470,19 +1509,32 @@ impl IndexedDBManager {
                     "There should be a connection queue for the aborted upgrade."
                 );
             };
-            let Some(open_request) = queue.pop_front() else {
-                return debug_assert!(false, "There should be an open request to upgrade.");
+            // The identity check reads the front and only then pops it. Popping first
+            // and checking afterwards discards another connection's open request in
+            // release builds, where the failed assertion is not there to stop it.
+            let Some(front) = queue.front() else {
+                debug_assert!(false, "There should be an open request to upgrade.");
+                return;
             };
-            if open_request.get_id() != id {
-                return debug_assert!(
+            if front.get_id() != id {
+                debug_assert!(
                     false,
                     "Open request to abort should be at the head of the queue."
                 );
+                return;
             }
+            let Some(open_request) = queue.pop_front() else {
+                return;
+            };
             open_request.abort()
         };
-        if let Some(upgrade) = upgrade {
-            self.revert_aborted_upgrade(&key, &upgrade, proxy_map);
+        if let Some(upgrade) = upgrade &&
+            let Err(error) = self.revert_aborted_upgrade(&key, &upgrade, proxy_map)
+        {
+            error!(
+                "Failed to revert the aborted upgrade of {:?}: {error}",
+                key.name
+            );
         }
 
         self.remove_connection(&key, &id);
@@ -1500,7 +1552,10 @@ impl IndexedDBManager {
         proxy_map: StorageProxyMap,
     ) {
         for (name, ids) in pending_upgrades.into_iter() {
-            let mut upgrade_to_revert: Option<VersionUpgrade> = None;
+            // Every aborted request that carried an upgrade contributes a revert.
+            // Keeping only the first one left the remaining version bumps applied with
+            // nothing left in the queue to undo them.
+            let mut upgrades_to_revert: Vec<VersionUpgrade> = Vec::new();
             let key = IndexedDBDescription {
                 name: name.clone(),
                 origin: origin.clone(),
@@ -1508,32 +1563,37 @@ impl IndexedDBManager {
             for id in ids.iter() {
                 self.remove_connection(&key, id);
             }
-            {
-                let is_empty = {
-                    let Some(queue) = self.connection_queues.get_mut(&key) else {
-                        continue;
-                    };
-                    queue.retain_mut(|open_request| {
-                        if ids.contains(&open_request.get_id()) {
-                            let upgrade = open_request.abort();
-                            if upgrade_to_revert.is_none() &&
-                                let Some(upgrade) = upgrade
-                            {
-                                upgrade_to_revert = Some(upgrade);
-                            }
-                            false
-                        } else {
-                            true
-                        }
-                    });
-                    queue.is_empty()
+            let is_empty = {
+                let Some(queue) = self.connection_queues.get_mut(&key) else {
+                    continue;
                 };
-                if is_empty {
-                    self.connection_queues.remove(&key);
+                queue.retain_mut(|open_request| {
+                    if ids.contains(&open_request.get_id()) {
+                        if let Some(upgrade) = open_request.abort() {
+                            upgrades_to_revert.push(upgrade);
+                        }
+                        false
+                    } else {
+                        true
+                    }
+                });
+                queue.is_empty()
+            };
+            if is_empty {
+                self.connection_queues.remove(&key);
+            }
+            for upgrade in &upgrades_to_revert {
+                if let Err(error) = self.revert_aborted_upgrade(&key, upgrade, &proxy_map) {
+                    error!(
+                        "Failed to revert the aborted upgrade of {:?}: {error}",
+                        key.name
+                    );
                 }
             }
-            if let Some(upgrade) = upgrade_to_revert {
-                self.revert_aborted_upgrade(&key, &upgrade, &proxy_map);
+            if !is_empty {
+                // Requests queued behind the aborted ones are now at the front of a
+                // queue that nothing else is going to advance.
+                self.advance_connection_queue(key);
             }
         }
     }
@@ -1608,12 +1668,14 @@ impl IndexedDBManager {
     /// <https://w3c.github.io/IndexedDB/#upgrade-a-database>
     /// To upgrade a database with connection (a connection),
     /// a new version, and a request, run these steps:
-    fn upgrade_database(&mut self, key: IndexedDBDescription, new_version: u64) {
+    fn upgrade_database(&mut self, key: IndexedDBDescription, new_version: u64) -> DbResult<()> {
         let Some(queue) = self.connection_queues.get_mut(&key) else {
-            return debug_assert!(false, "A connection queue should exist.");
+            debug_assert!(false, "A connection queue should exist.");
+            return Err("No connection queue for the database being upgraded".to_string());
         };
         let Some(open_request) = queue.front_mut() else {
-            return debug_assert!(false, "An open request should be in the queue.");
+            debug_assert!(false, "An open request should be in the queue.");
+            return Err("No open request at the front of the connection queue".to_string());
         };
         let OpenRequest::Open {
             sender,
@@ -1627,52 +1689,83 @@ impl IndexedDBManager {
             proxy_map: _,
         } = open_request
         else {
-            return;
+            return Ok(());
         };
 
         // Step 1: Let db be connection’s database.
-        let db = self
-            .databases
-            .get_mut(&key)
-            .expect("Db should have been opened.");
+        let Some(db) = self.databases.get_mut(&key) else {
+            debug_assert!(false, "Db should have been opened.");
+            return Err("The database being upgraded is not open".to_string());
+        };
 
         // Step 2: Let transaction be a new upgrade transaction with connection used as connection.
         let transaction = self.serial_number_counter;
         self.serial_number_counter += 1;
 
-        // Step 3: Set transaction’s scope to connection’s object store set.
-        let scope = db
-            .object_store_names()
-            .expect("Fetching object store names should not fail.");
+        // Steps 3 through 8. The upgrade transaction and the pending-upgrade record are
+        // what the revert path reads, so the one durable write here is bracketed by
+        // both: it happens after the record that says how to undo it is installed, and
+        // the failure tail below removes the record and the registration together.
+        let mut scope = Vec::new();
+        let outcome = (|| -> DbResult<u64> {
+            // Step 3: Set transaction’s scope to connection’s object store set.
+            scope = db.object_store_names()?;
 
-        // Step 4: Set db’s upgrade transaction to transaction.
-        // Backend tracks the active upgrade transaction in `pending_upgrade` below.
-        db.register_transaction(transaction, IndexedDBTxnMode::Versionchange, scope.clone());
+            // Step 4: Set db’s upgrade transaction to transaction.
+            // Backend tracks the active upgrade transaction in `pending_upgrade` below.
+            db.register_transaction(
+                transaction,
+                IndexedDBTxnMode::Versionchange,
+                scope.clone(),
+            )?;
 
-        // Step 5: Set transaction’s state to inactive.
-        // Step 6: Start transaction.
-        // Backend transactions are started by the scheduler when requests are queued;
-        // newly created upgrade transactions are therefore initially inactive.
+            // Step 5: Set transaction’s state to inactive.
+            // Step 6: Start transaction.
+            // Backend transactions are started by the scheduler when requests are queued;
+            // newly created upgrade transactions are therefore initially inactive.
 
-        // Step 7: Let old version be db’s version.
-        let old_version = db.version().expect("DB should have a version.");
-        let object_stores = db
-            .object_stores()
-            .expect("Fetching object stores should not fail.");
+            // Step 7: Let old version be db’s version.
+            let old_version = db.version().map_err(|err| format!("{err:?}"))?;
+            let object_stores = db.object_stores()?;
 
-        // Step 8: Set db’s version to version. This change is considered part of the
-        // transaction, and so if the transaction is aborted, this change is reverted.
-        db.set_version(new_version)
-            .expect("Setting the version should not fail");
+            // Step 8: Set db’s version to version. This change is considered part of the
+            // transaction, and so if the transaction is aborted, this change is reverted.
+            let _ = pending_upgrade.insert(VersionUpgrade {
+                old: old_version,
+                new: new_version,
+                transaction,
+                object_stores,
+            });
+            db.set_version(new_version)?;
+            Ok(old_version)
+        })();
+
+        let old_version = match outcome {
+            Ok(old_version) => old_version,
+            Err(error) => {
+                // Nothing durable survived, so neither does the bookkeeping: the pending
+                // record goes away with the registration it describes, and the request is
+                // marked processed so the connection queue does not stay blocked behind a
+                // request that has already been answered.
+                *pending_upgrade = None;
+                *processed = true;
+                db.finish_transaction(transaction);
+                if sender
+                    .send(ConnectionMsg::DatabaseError {
+                        name: db_name.clone(),
+                        id: *id,
+                        error: BackendError::DbErr(error.clone()),
+                    })
+                    .is_err()
+                {
+                    error!("Couldn't queue task for indexeddb upgrade failure.");
+                }
+                return Err(error);
+            },
+        };
 
         // Step 9: Set request’s processed flag to true.
         *processed = true;
-        let _ = pending_upgrade.insert(VersionUpgrade {
-            old: old_version,
-            new: new_version,
-            transaction,
-            object_stores,
-        });
 
         // Step 10: Queue a database task to run these steps.
         if sender
@@ -1691,6 +1784,7 @@ impl IndexedDBManager {
 
         // Step 11: Wait for transaction to finish.
         // Queue progression remains blocked while `pending_upgrade` is set.
+        Ok(())
     }
 
     /// <https://w3c.github.io/IndexedDB/#open-a-database-connection>
@@ -1771,7 +1865,9 @@ impl IndexedDBManager {
         // Note: if we still need to wait, the algorithm will continue in the handling of the close message.
         if can_upgrade {
             // Step 10.6: Run upgrade a database using connection, version and request.
-            self.upgrade_database(key.clone(), version);
+            // A failed upgrade has already answered the request with a database error,
+            // so the prune below removes it and the queue keeps moving.
+            let _ = self.upgrade_database(key.clone(), version);
 
             let was_pruned = self.maybe_remove_front_from_queue(&key);
             if was_pruned {
@@ -1974,7 +2070,14 @@ impl IndexedDBManager {
             }
 
             // Step 10.6: Run upgrade a database using connection, version and request.
-            self.upgrade_database(key, version);
+            // The success path leaves the request pending until the upgrade transaction
+            // finishes. A failure has already answered it, so the queue is advanced here
+            // instead of waiting for a completion that will never arrive.
+            if self.upgrade_database(key.clone(), version).is_err() &&
+                self.maybe_remove_front_from_queue(&key)
+            {
+                self.advance_connection_queue(key);
+            }
             return;
         }
 
@@ -2196,7 +2299,9 @@ impl IndexedDBManager {
                     "An upgrade version should have been determined by now."
                 );
             };
-            self.upgrade_database(key.clone(), version);
+            // A failed upgrade has already answered the request with a database error,
+            // so the prune below removes it and the queue keeps moving.
+            let _ = self.upgrade_database(key.clone(), version);
 
             let was_pruned = self.maybe_remove_front_from_queue(&key);
             if was_pruned {
@@ -2278,18 +2383,16 @@ impl IndexedDBManager {
                 self.start_delete_database(idb_description, id, proxy_map, callback);
             },
             SyncOperation::GetObjectStore(sender, origin, db_name, store_name) => {
-                // FIXME:(arihant2math) Should we error out more aggressively here?
-                let result = self.get_database(origin, db_name).map(|db| {
-                    let key_generator_current_number = db.key_generator_current_number(&store_name);
-                    IndexedDBObjectStore {
-                        key_path: db.key_path(&store_name),
-                        has_key_generator: key_generator_current_number.is_some(),
-                        key_generator_current_number,
-                        indexes: db.indexes(&store_name).unwrap_or_default(),
-                        name: store_name,
-                    }
-                });
-                let _ = sender.send(result.ok_or(BackendError::DbNotFound));
+                // `object_store` is the same construction the upgrade path uses, and it
+                // now reports a failed metadata read instead of returning a store whose
+                // key path and key generator are indistinguishable from absent ones.
+                let result = match self.get_database(origin, db_name) {
+                    Some(db) => db
+                        .object_store(&store_name)
+                        .map_err(BackendError::DbErr),
+                    None => Err(BackendError::DbNotFound),
+                };
+                let _ = sender.send(result);
             },
             SyncOperation::Commit(callback, origin, db_name, txn) => {
                 // https://w3c.github.io/IndexedDB/#commit-a-transaction
@@ -2408,9 +2511,15 @@ impl IndexedDBManager {
                 if let Some(db) = self.databases.get_mut(&key) {
                     let transaction_id = self.serial_number_counter;
                     self.serial_number_counter += 1;
-                    db.register_transaction(transaction_id, mode, scope);
-                    db.schedule_transactions(origin, &db_name);
-                    let _ = sender.send(Ok(transaction_id));
+                    match db.register_transaction(transaction_id, mode, scope) {
+                        Ok(()) => {
+                            db.schedule_transactions(origin, &db_name);
+                            let _ = sender.send(Ok(transaction_id));
+                        },
+                        Err(error) => {
+                            let _ = sender.send(Err(BackendError::DbErr(error)));
+                        },
+                    }
                 } else {
                     let _ = sender.send(Err(BackendError::DbNotFound));
                 }
@@ -2581,14 +2690,15 @@ mod tests {
         let mut env = IndexedDBEnvironment::new(engine, sender);
 
         env.create_object_store("books", None, true).unwrap();
-        assert_eq!(env.key_generator_current_number("books"), Some(1));
+        assert_eq!(env.key_generator_current_number("books"), Ok(Some(1)));
 
-        env.register_transaction(1, IndexedDBTxnMode::Readwrite, vec!["books".to_string()]);
+        env.register_transaction(1, IndexedDBTxnMode::Readwrite, vec!["books".to_string()])
+            .unwrap();
         env.set_key_generator_current_number("books", 345680)
             .unwrap();
 
         env.abort_transaction(1);
 
-        assert_eq!(env.key_generator_current_number("books"), Some(1));
+        assert_eq!(env.key_generator_current_number("books"), Ok(Some(1)));
     }
 }

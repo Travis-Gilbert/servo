@@ -138,13 +138,14 @@ pub trait KvsEngine: MallocSizeOf + Send {
         on_complete: Box<dyn FnOnce() + Send + 'static>,
     );
 
-    fn key_generator_current_number(&self, store_name: &str) -> Option<i64>;
+    fn key_generator_current_number(&self, store_name: &str)
+    -> BackendResult<Option<i64>>;
     fn set_key_generator_current_number(
         &self,
         store_name: &str,
         current_number: i64,
     ) -> BackendResult<()>;
-    fn key_path(&self, store_name: &str) -> Option<KeyPath>;
+    fn key_path(&self, store_name: &str) -> BackendResult<Option<KeyPath>>;
     fn object_store_names(&self) -> BackendResult<Vec<String>>;
     fn indexes(&self, store_name: &str) -> BackendResult<Vec<IndexedDBIndex>>;
 
@@ -191,7 +192,8 @@ where
         (**self).process_transaction(transaction, on_complete)
     }
 
-    fn key_generator_current_number(&self, store_name: &str) -> Option<i64> {
+    fn key_generator_current_number(&self, store_name: &str)
+    -> BackendResult<Option<i64>> {
         (**self).key_generator_current_number(store_name)
     }
 
@@ -203,7 +205,7 @@ where
         (**self).set_key_generator_current_number(store_name, current_number)
     }
 
-    fn key_path(&self, store_name: &str) -> Option<KeyPath> {
+    fn key_path(&self, store_name: &str) -> BackendResult<Option<KeyPath>> {
         (**self).key_path(store_name)
     }
 
@@ -428,12 +430,15 @@ impl IndexedDBKeyRange {
     }
 
     pub fn is_singleton(&self) -> bool {
-        self.lower.is_some() && self.lower == self.upper && !self.lower_open && !self.upper_open
+        self.as_singleton().is_some()
     }
 
+    /// The bound reference and the singleton proof are produced by the same `?`, so
+    /// there is no place left to test one condition and unwrap a different one.
     pub fn as_singleton(&self) -> Option<&IndexedDBKeyType> {
-        if self.is_singleton() {
-            return Some(self.lower.as_ref().unwrap());
+        let lower = self.lower.as_ref()?;
+        if self.lower == self.upper && !self.lower_open && !self.upper_open {
+            return Some(lower);
         }
         None
     }
@@ -504,6 +509,15 @@ pub enum AsyncReadOnlyOperation {
         callback: GenericCallback<BackendResult<Vec<IndexedDBRecord>>>,
         key_range: IndexedDBKeyRange,
     },
+    /// <https://w3c.github.io/IndexedDB/#dom-idbindex-getallrecords>
+    ///
+    /// Records are returned in ascending key order. Direction is applied by the DOM,
+    /// the way `IDBCursor` already applies it, so no direction type crosses this seam.
+    GetAllRecords {
+        callback: GenericCallback<BackendResult<Vec<IndexedDBRecord>>>,
+        key_range: IndexedDBKeyRange,
+        count: Option<u32>,
+    },
 }
 
 impl AsyncReadOnlyOperation {
@@ -515,6 +529,7 @@ impl AsyncReadOnlyOperation {
             Self::GetAllItems { callback, .. } => callback.send(Err(error)),
             Self::Count { callback, .. } => callback.send(Err(error)),
             Self::Iterate { callback, .. } => callback.send(Err(error)),
+            Self::GetAllRecords { callback, .. } => callback.send(Err(error)),
         };
     }
 }

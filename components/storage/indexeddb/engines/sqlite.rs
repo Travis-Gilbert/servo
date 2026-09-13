@@ -27,6 +27,33 @@ mod object_data_model;
 mod object_store_index_model;
 mod object_store_model;
 
+/// Bytes already in the database that do not decode are corrupt storage, not a
+/// programming error. Reporting them as a `rusqlite::Error` lets the request reject
+/// through the path every other SQL failure already takes, instead of killing the
+/// storage thread and every other database it is serving.
+fn corrupt_storage(what: &str) -> Error {
+    Error::FromSqlConversionFailure(
+        0,
+        rusqlite::types::Type::Blob,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("stored IndexedDB {what} is not decodable"),
+        )),
+    )
+}
+
+fn decode_key(bytes: &[u8]) -> Result<IndexedDBKeyType, Error> {
+    encoding::deserialize(bytes).ok_or_else(|| corrupt_storage("key"))
+}
+
+fn decode_key_path(bytes: &[u8]) -> Result<KeyPath, Error> {
+    postcard::from_bytes(bytes).map_err(|_| corrupt_storage("key path"))
+}
+
+fn encode_key_path(key_path: &KeyPath) -> Result<Vec<u8>, Error> {
+    postcard::to_stdvec(key_path).map_err(|error| Error::ToSqlConversionFailure(Box::new(error)))
+}
+
 fn backend_error_from_sqlite_error(error: Error) -> BackendError {
     if is_sqlite_disk_full_error(&error) {
         BackendError::QuotaExceeded
@@ -239,7 +266,11 @@ impl SqliteEngine {
                 object_data_model::Column::Key,
                 object_data_model::Column::Data,
             ])
-            .and_where(query.and(Expr::col(object_data_model::Column::ObjectStoreId).is(store.id)));
+            .and_where(query.and(Expr::col(object_data_model::Column::ObjectStoreId).is(store.id)))
+            // Every operation reaching here (getAll, getAllKeys, getAllRecords, cursor
+            // iteration) is defined in key order, and a LIMIT without an ORDER BY truncates
+            // an unspecified subset rather than the first `count` records.
+            .order_by(object_data_model::Column::Key, sea_query::Order::Asc);
         if let Some(count) = count {
             sql_query.limit(count as u64);
         }
@@ -278,8 +309,9 @@ impl SqliteEngine {
         connection: &Connection,
         store: object_store_model::Model,
         key_range: IndexedDBKeyRange,
+        count: Option<u32>,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Error> {
-        Self::get_all(connection, store, key_range, None)
+        Self::get_all(connection, store, key_range, count)
             .map(|models| models.into_iter().map(|m| (m.key, m.data)).collect())
     }
 
@@ -579,7 +611,7 @@ impl SqliteEngine {
             "INSERT INTO object_store (name, key_path, auto_increment) VALUES (?, ?, ?)",
             params![
                 store_name.to_string(),
-                key_path.map(|v| postcard::to_stdvec(&v).unwrap()),
+                key_path.as_ref().map(encode_key_path).transpose()?,
                 auto_increment as i32
             ],
         )?;
@@ -649,7 +681,7 @@ impl SqliteEngine {
             params![
                 object_store.id,
                 index_name,
-                postcard::to_stdvec(&key_path).unwrap(),
+                encode_key_path(&key_path)?,
                 unique,
                 multi_entry,
             ],
@@ -685,7 +717,7 @@ impl SqliteEngine {
         let object_store = connection.query_row(
             "SELECT * FROM object_store WHERE name = ?",
             params![store_name.to_string()],
-            |row| Ok(object_store_model::Model::try_from(row).unwrap()),
+            |row| object_store_model::Model::try_from(row),
         )?;
 
         // Delete the index's records before the row that gives them their index_id.
@@ -906,10 +938,10 @@ impl KvsEngine for SqliteEngine {
                         };
                         let _ = callback.send(
                             result
-                                .map(|keys| {
-                                    keys.into_iter()
-                                        .map(|k| encoding::deserialize(&k).unwrap())
-                                        .collect()
+                                .and_then(|keys| {
+                                    keys.iter()
+                                        .map(|k| decode_key(k))
+                                        .collect::<Result<Vec<_>, Error>>()
                                 })
                                 .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
                         );
@@ -973,8 +1005,8 @@ impl KvsEngine for SqliteEngine {
                                 Self::index_records(&connection, &object_store, name, key_range, None)
                             },
                             KvsOperationTarget::ObjectStore => {
-                                Self::get_all_records(&connection, object_store, key_range).map(
-                                    |records| {
+                                Self::get_all_records(&connection, object_store, key_range, None)
+                                    .map(|records| {
                                         records
                                             .into_iter()
                                             .map(|(key, data)| SourceRecord {
@@ -989,16 +1021,64 @@ impl KvsEngine for SqliteEngine {
                         };
                         let _ = callback.send(
                             result
-                                .map(|records: Vec<SourceRecord>| {
+                                .and_then(|records: Vec<SourceRecord>| {
                                     records
                                         .into_iter()
-                                        .map(|record| IndexedDBRecord {
-                                            key: encoding::deserialize(&record.key).unwrap(),
-                                            primary_key: encoding::deserialize(&record.primary_key)
-                                                .unwrap(),
-                                            value: record.data,
+                                        .map(|record| {
+                                            Ok(IndexedDBRecord {
+                                                key: decode_key(&record.key)?,
+                                                primary_key: decode_key(&record.primary_key)?,
+                                                value: record.data,
+                                            })
                                         })
-                                        .collect()
+                                        .collect::<Result<Vec<_>, Error>>()
+                                })
+                                .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
+                        );
+                    },
+                    AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllRecords {
+                        callback,
+                        key_range,
+                        count,
+                    }) => {
+                        // Same shape as Iterate, with the spec's `count` pushed into the
+                        // query's LIMIT. Direction is not applied here: the DOM applies it,
+                        // the way IDBCursor already does. See ADR12.
+                        let result = match &context.target {
+                            KvsOperationTarget::Index { name } => Self::index_records(
+                                &connection,
+                                &object_store,
+                                name,
+                                key_range,
+                                count,
+                            ),
+                            KvsOperationTarget::ObjectStore => {
+                                Self::get_all_records(&connection, object_store, key_range, count)
+                                    .map(|records| {
+                                        records
+                                            .into_iter()
+                                            .map(|(key, data)| SourceRecord {
+                                                key: key.clone(),
+                                                primary_key: key,
+                                                data,
+                                            })
+                                            .collect()
+                                    })
+                            },
+                        };
+                        let _ = callback.send(
+                            result
+                                .and_then(|records: Vec<SourceRecord>| {
+                                    records
+                                        .into_iter()
+                                        .map(|record| {
+                                            Ok(IndexedDBRecord {
+                                                key: decode_key(&record.key)?,
+                                                primary_key: decode_key(&record.primary_key)?,
+                                                value: record.data,
+                                            })
+                                        })
+                                        .collect::<Result<Vec<_>, Error>>()
                                 })
                                 .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
                         );
@@ -1032,7 +1112,7 @@ impl KvsEngine for SqliteEngine {
                         };
                         let _ = callback.send(
                             result
-                                .map(|key| key.map(|k| encoding::deserialize(&k).unwrap()))
+                                .and_then(|key| key.as_deref().map(decode_key).transpose())
                                 .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
                         );
                     },
@@ -1054,8 +1134,19 @@ impl KvsEngine for SqliteEngine {
                             let _ = callback.send(BackendError::DbErr(format!("{error:?}")));
                         }
                     },
-                    AsyncOperation::Schema(AsyncSchemaOperation::CreateObjectStore { .. }) => {
-                        unreachable!("Should be handled above");
+                    AsyncOperation::Schema(AsyncSchemaOperation::CreateObjectStore {
+                        callback, ..
+                    }) => {
+                        // The pre-pass above handles this and continues, because the store
+                        // does not exist yet and so cannot survive the lookup every other
+                        // operation needs. Reaching here would mean the two patterns have
+                        // drifted apart. Report it rather than killing a storage thread that
+                        // is serving every other database in the process.
+                        let _ = callback.send(BackendError::DbErr(
+                            "CreateObjectStore reached the main dispatch; the pre-pass above \
+                             should have handled it"
+                                .to_owned(),
+                        ));
                     },
                     AsyncOperation::Schema(AsyncSchemaOperation::DeleteIndex { index_name, callback }) => {
                         if let Err(error) = Self::delete_index(&connection, &request.store_name, index_name) {
@@ -1083,18 +1174,21 @@ impl KvsEngine for SqliteEngine {
         });
     }
 
-    fn key_generator_current_number(&self, store_name: &str) -> Option<i64> {
-        self.connection
-            .prepare("SELECT * FROM object_store WHERE name = ?")
-            .and_then(|mut stmt| {
-                stmt.query_row(params![store_name.to_string()], |r| {
-                    let object_store = object_store_model::Model::try_from(r).unwrap();
-                    Ok(object_store.auto_increment)
-                })
+    fn key_generator_current_number(&self, store_name: &str) -> BackendResult<Option<i64>> {
+        let load = || -> Result<Option<i64>, Error> {
+            let mut stmt = self
+                .connection
+                .prepare("SELECT * FROM object_store WHERE name = ?")?;
+            stmt.query_row(params![store_name.to_string()], |row| {
+                Ok(object_store_model::Model::try_from(row)?.auto_increment)
             })
             .optional()
-            .unwrap()
-            .and_then(|current_number| (current_number != 0).then_some(current_number))
+        };
+        // Zero is the stored representation of "this store has no key generator". A failed
+        // read is a different answer and now reaches the caller as one.
+        Ok(load()
+            .map_err(backend_error_from_sqlite_error)?
+            .and_then(|current_number| (current_number != 0).then_some(current_number)))
     }
 
     fn set_key_generator_current_number(
@@ -1126,21 +1220,25 @@ impl KvsEngine for SqliteEngine {
         update().map_err(backend_error_from_sqlite_error)
     }
 
-    fn key_path(&self, store_name: &str) -> Option<KeyPath> {
-        self.connection
-            .prepare("SELECT * FROM object_store WHERE name = ?")
-            .and_then(|mut stmt| {
-                stmt.query_row(params![store_name.to_string()], |r| {
-                    let object_store = object_store_model::Model::try_from(r).unwrap();
-                    Ok(object_store
-                        .key_path
-                        .map(|key_path| postcard::from_bytes(&key_path).unwrap()))
-                })
+    /// `Ok(None)` still conflates "no such store" with "this store has no key path".
+    /// That conflation is the one the old `TODO: Wrong, same issues as has_key_generator`
+    /// named and it is unchanged here; what changed is that a failed read is no longer a
+    /// third thing hiding inside it.
+    fn key_path(&self, store_name: &str) -> BackendResult<Option<KeyPath>> {
+        let load = || -> Result<Option<KeyPath>, Error> {
+            let mut stmt = self
+                .connection
+                .prepare("SELECT * FROM object_store WHERE name = ?")?;
+            stmt.query_row(params![store_name.to_string()], |row| {
+                object_store_model::Model::try_from(row)?
+                    .key_path
+                    .map(|key_path| decode_key_path(&key_path))
+                    .transpose()
             })
             .optional()
-            .unwrap()
-            // TODO: Wrong, same issues as has_key_generator
-            .unwrap_or_default()
+            .map(Option::flatten)
+        };
+        load().map_err(backend_error_from_sqlite_error)
     }
 
     fn object_store_names(&self) -> BackendResult<Vec<String>> {
@@ -1168,7 +1266,7 @@ impl KvsEngine for SqliteEngine {
                     let model = object_store_index_model::Model::try_from(row)?;
                     Ok(IndexedDBIndex {
                         name: model.name,
-                        key_path: postcard::from_bytes(&model.key_path).unwrap(),
+                        key_path: decode_key_path(&model.key_path)?,
                         unique: model.unique_index,
                         multi_entry: model.multi_entry_index,
                     })
@@ -1375,7 +1473,7 @@ mod tests {
         let create_result = result.unwrap();
         assert_eq!(create_result, CreateObjectResult::AlreadyExists);
         // Ensure store was not overwritten
-        assert!(db.key_generator_current_number(store_name).is_some());
+        assert_eq!(db.key_generator_current_number(store_name), Ok(Some(1)));
     }
 
     #[test]
@@ -1446,7 +1544,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             db.key_path(store_name),
-            Some(KeyPath::String("test".to_string()))
+            Ok(Some(KeyPath::String("test".to_string())))
         );
     }
 
@@ -1504,6 +1602,7 @@ mod tests {
             vec![1, 2, 3],
             true,
             None,
+            &[],
         )
         .expect("Failed to insert item");
 
@@ -1760,6 +1859,7 @@ mod tests {
                     vec![key as u8],
                     false,
                     None,
+                    &[],
                 )
                 .expect("Failed to seed object store");
             }
