@@ -55,7 +55,12 @@ impl IndexedDBThreadFactory for GenericSender<IndexedDBThreadMsg> {
 
         let manager_sender = chan.clone();
 
-        thread::Builder::new()
+        // A storage thread factory cannot report failure: the trait returns `Self`, and all
+        // four storage threads are built by infallible calls. Aborting the process is the
+        // worse of the two answers available here. Every send on the returned channel fails
+        // once the receiving thread is absent, and the send sites already report that, so a
+        // browser that loses IndexedDB keeps running rather than dying with it.
+        if let Err(error) = thread::Builder::new()
             .name("IndexedDBManager".to_owned())
             .spawn(move || {
                 mem_profiler_chan.run_with_memory_reporting(
@@ -65,7 +70,11 @@ impl IndexedDBThreadFactory for GenericSender<IndexedDBThreadMsg> {
                     IndexedDBThreadMsg::CollectMemoryReport,
                 );
             })
-            .expect("Thread spawning failed");
+        {
+            error!(
+                "Failed to spawn the IndexedDB manager thread: {error}. IndexedDB is unavailable."
+            );
+        }
 
         chan
     }
@@ -610,8 +619,10 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
         // Likewise, if a transaction is aborted, the current number of the
         // key generator for each object store in the transaction’s scope is
         // reverted to the value it had before the transaction was started.
-        let res = self.restore_key_generators_after_abort(&key_generator_snapshots);
-        debug_assert!(res.is_ok(), "Restoring key generators should not fail.");
+        if let Err(error) = self.restore_key_generators_after_abort(&key_generator_snapshots)
+        {
+            error!("Failed to restore key generators after a transaction abort: {error}");
+        }
 
         // Keep scheduling metadata until script reports TransactionFinished.
         // https://w3c.github.io/IndexedDB/#transaction-lifetime
@@ -1399,14 +1410,12 @@ impl IndexedDBManager {
             // never be answered. Say so, rather than returning into a debug-only
             // assertion that release builds do not have.
             let Some(queue) = self.connection_queues.get_mut(&key) else {
-                debug_assert!(false, "A connection queue should exist.");
                 return error!(
                     "Upgrade of {:?} committed with no connection queue to report it to.",
                     key.name
                 );
             };
             let Some(front) = queue.front() else {
-                debug_assert!(false, "A pending open request should exist.");
                 return error!(
                     "Upgrade of {:?} committed with no open request to report it to.",
                     key.name
@@ -1465,10 +1474,10 @@ impl IndexedDBManager {
 
         let (request_id, proxy_map) = {
             let Some(queue) = self.connection_queues.get_mut(&key) else {
-                return debug_assert!(false, "A connection queue should exist.");
+                return warn!("No connection queue for the aborted upgrade transaction.");
             };
             let Some(front) = queue.front() else {
-                return debug_assert!(false, "A pending open request should exist.");
+                return warn!("No open request for the aborted upgrade transaction.");
             };
             let OpenRequest::Open {
                 pending_upgrade: Some(pending_upgrade),
@@ -1496,10 +1505,10 @@ impl IndexedDBManager {
                 let Some(queue) = self.connection_queues.get_mut(&key) else {
                     return;
                 };
-                if queue.is_empty() {
+                let Some(front) = queue.front() else {
                     return;
-                }
-                queue.front().expect("Queue is not empty.").is_open()
+                };
+                front.is_open()
             };
 
             if is_open {
@@ -1524,15 +1533,12 @@ impl IndexedDBManager {
     fn maybe_remove_front_from_queue(&mut self, key: &IndexedDBDescription) -> bool {
         let (is_empty, was_pruned) = {
             let Some(queue) = self.connection_queues.get_mut(key) else {
-                debug_assert!(false, "A connection queue should exist.");
+                warn!("No connection queue to prune for {:?}.", key.name);
                 return false;
             };
             let mut pruned = false;
-            let front_is_pending = queue.front().map(|record| record.is_pending());
-            if let Some(is_pending) = front_is_pending &&
-                !is_pending
-            {
-                queue.pop_front().expect("Queue has a non-pending item.");
+            if queue.front().is_some_and(|record| !record.is_pending()) {
+                queue.pop_front();
                 pruned = true
             }
             (queue.is_empty(), pruned)
@@ -1684,7 +1690,6 @@ impl IndexedDBManager {
         self.revert_schema_renames(key, upgrade);
 
         let Some(db) = self.databases.get_mut(key) else {
-            debug_assert!(false, "Db should have been created");
             return Err(format!(
                 "No open database to revert the aborted upgrade of {:?}",
                 key.name
@@ -1710,23 +1715,20 @@ impl IndexedDBManager {
         let key = IndexedDBDescription { name, origin };
         let upgrade = {
             let Some(queue) = self.connection_queues.get_mut(&key) else {
-                return debug_assert!(
-                    false,
-                    "There should be a connection queue for the aborted upgrade."
+                return warn!(
+                    "No connection queue for the aborted upgrade of {:?}.",
+                    key.name
                 );
             };
             // The identity check reads the front and only then pops it. Popping first
             // and checking afterwards discards another connection's open request in
             // release builds, where the failed assertion is not there to stop it.
             let Some(front) = queue.front() else {
-                debug_assert!(false, "There should be an open request to upgrade.");
+                warn!("No open request to abort for the upgrade of {:?}.", key.name);
                 return;
             };
             if front.get_id() != id {
-                debug_assert!(
-                    false,
-                    "Open request to abort should be at the head of the queue."
-                );
+                warn!("The open request to abort is not at the head of the connection queue.");
                 return;
             }
             let Some(open_request) = queue.pop_front() else {
@@ -1876,11 +1878,9 @@ impl IndexedDBManager {
     /// a new version, and a request, run these steps:
     fn upgrade_database(&mut self, key: IndexedDBDescription, new_version: u64) -> DbResult<()> {
         let Some(queue) = self.connection_queues.get_mut(&key) else {
-            debug_assert!(false, "A connection queue should exist.");
             return Err("No connection queue for the database being upgraded".to_string());
         };
         let Some(open_request) = queue.front_mut() else {
-            debug_assert!(false, "An open request should be in the queue.");
             return Err("No open request at the front of the connection queue".to_string());
         };
         let OpenRequest::Open {
@@ -1900,7 +1900,6 @@ impl IndexedDBManager {
 
         // Step 1: Let db be connection’s database.
         let Some(db) = self.databases.get_mut(&key) else {
-            debug_assert!(false, "Db should have been opened.");
             return Err("The database being upgraded is not open".to_string());
         };
 
@@ -2080,10 +2079,11 @@ impl IndexedDBManager {
             else {
                 return warn!("An request to open a connection should be in the queue.");
             };
-            debug_assert!(
-                pending_versionchange.contains(&from_id),
-                "The open request should be pending on the versionchange event for the connection sending the message."
-            );
+            if !pending_versionchange.contains(&from_id) {
+                warn!(
+                    "A versionchange acknowledgement arrived from a connection the open request was not waiting on."
+                );
+            }
 
             pending_versionchange.remove(&from_id);
 
@@ -2093,9 +2093,8 @@ impl IndexedDBManager {
             }
 
             let Some(version) = *version else {
-                return debug_assert!(
-                    false,
-                    "An upgrade version should have been determined by now."
+                return warn!(
+                    "No upgrade version was determined before the versionchange events completed."
                 );
             };
 
@@ -2137,10 +2136,10 @@ impl IndexedDBManager {
     /// The part where the open request is ready for processing.
     fn open_database(&mut self, key: IndexedDBDescription) {
         let Some(queue) = self.connection_queues.get_mut(&key) else {
-            return debug_assert!(false, "A connection queue should exist.");
+            return warn!("No connection queue for the database being opened.");
         };
         let Some(open_request) = queue.front_mut() else {
-            return debug_assert!(false, "An open request should be in the queue.");
+            return warn!("No open request at the front of the connection queue.");
         };
         let OpenRequest::Open {
             sender,
@@ -2154,9 +2153,8 @@ impl IndexedDBManager {
             proxy_map,
         } = open_request
         else {
-            return debug_assert!(
-                false,
-                "An request to open a connection should be in the queue."
+            return warn!(
+                "The entry at the front of the connection queue is not an open request."
             );
         };
 
@@ -2263,10 +2261,7 @@ impl IndexedDBManager {
         };
 
         let Some(version) = *version else {
-            return debug_assert!(
-                false,
-                "An upgrade version should have been determined by now."
-            );
+            return warn!("No upgrade version was determined while opening the database.");
         };
 
         // Step 7: If db’s version is greater than version,
@@ -2649,9 +2644,8 @@ impl IndexedDBManager {
         if can_upgrade {
             // Step 10.6: Run upgrade a database using connection, version and request.
             let Some(version) = version else {
-                return debug_assert!(
-                    false,
-                    "An upgrade version should have been determined by now."
+                return warn!(
+                    "No upgrade version was determined before the last connection closed."
                 );
             };
             // A failed upgrade has already answered the request with a database error,
@@ -2907,7 +2901,7 @@ impl IndexedDBManager {
                 self.handle_version_change_done(name, id, old_version, origin);
             },
             SyncOperation::Exit(_) => {
-                unreachable!("We must've already broken out of event loop.");
+                warn!("Received an Exit message after the event loop should have ended.");
             },
         }
     }
