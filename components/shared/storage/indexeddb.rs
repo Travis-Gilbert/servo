@@ -159,6 +159,19 @@ pub trait KvsEngine: MallocSizeOf + Send {
     ) -> BackendResult<CreateObjectResult>;
     fn delete_index(&self, store_name: &str, index_name: String) -> BackendResult<()>;
 
+    /// Rename a store without touching anything it holds. Reverting an aborted upgrade
+    /// needs this: deleting the renamed store and recreating it under its old name would
+    /// throw away the records the abort is supposed to be preserving.
+    fn rename_store(&self, store_name: &str, new_name: &str) -> BackendResult<()>;
+
+    /// Rename an index without touching its records, for the same reason.
+    fn rename_index(
+        &self,
+        store_name: &str,
+        index_name: &str,
+        new_name: &str,
+    ) -> BackendResult<()>;
+
     fn version(&self) -> BackendResult<u64>;
     fn set_version(&self, version: u64) -> BackendResult<()>;
 }
@@ -230,6 +243,19 @@ where
 
     fn delete_index(&self, store_name: &str, index_name: String) -> BackendResult<()> {
         (**self).delete_index(store_name, index_name)
+    }
+
+    fn rename_store(&self, store_name: &str, new_name: &str) -> BackendResult<()> {
+        (**self).rename_store(store_name, new_name)
+    }
+
+    fn rename_index(
+        &self,
+        store_name: &str,
+        index_name: &str,
+        new_name: &str,
+    ) -> BackendResult<()> {
+        (**self).rename_index(store_name, index_name, new_name)
     }
 
     fn version(&self) -> BackendResult<u64> {
