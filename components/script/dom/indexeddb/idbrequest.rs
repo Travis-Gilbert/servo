@@ -2,8 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-#![cfg_attr(crown, allow(crown::jscontext_first_arg))]
-
 use std::cell::Cell;
 
 use dom_struct::dom_struct;
@@ -13,9 +11,10 @@ use js::jsapi::Heap;
 use js::jsval::{DoubleValue, JSVal, NullValue, ObjectValue, UndefinedValue};
 use js::rust::HandleValue;
 use profile_traits::generic_callback::GenericCallback;
+use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{DomObject, reflect_dom_object_with_cx};
 use serde::{Deserialize, Serialize};
-use servo_base::generic_channel::{GenericSend, SendError};
+use servo_base::generic_channel::GenericSend;
 use storage_traits::indexeddb::{
     AsyncOperation, AsyncReadOnlyOperation, BackendError, BackendResult, BackfillIndexResult,
     IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord, IndexedDBThreadMsg, IndexedDBTxnMode,
@@ -23,28 +22,274 @@ use storage_traits::indexeddb::{
 };
 use stylo_atoms::Atom;
 
+use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::IDBCursorDirection;
+use crate::dom::bindings::codegen::Bindings::IDBObjectStoreBinding::IDBGetAllOptions;
 use crate::dom::bindings::codegen::Bindings::IDBRequestBinding::{
     IDBRequestMethods, IDBRequestReadyState,
 };
-use crate::dom::bindings::codegen::Bindings::IDBObjectStoreBinding::IDBGetAllOptions;
 use crate::dom::bindings::codegen::Bindings::IDBTransactionBinding::IDBTransactionMode;
+use crate::dom::bindings::codegen::UnionTypes::IDBObjectStoreOrIDBIndexOrIDBCursor;
 use crate::dom::bindings::error::{Error, Fallible, create_dom_exception};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
+use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::structuredclone;
 use crate::dom::domexception::DOMException;
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
+use crate::dom::indexeddb::idbcursor::{IDBCursor, IterationParam, iterate_cursor};
 use crate::dom::indexeddb::idbcursorwithvalue::IDBCursorWithValue;
+use crate::dom::indexeddb::idbindex::IDBIndex;
 use crate::dom::indexeddb::idbobjectstore::IDBObjectStore;
 use crate::dom::indexeddb::idbrecord::IDBRecord;
 use crate::dom::indexeddb::idbtransaction::IDBTransaction;
-use crate::dom::indexeddb::key::{
+use crate::indexeddb::{
     convert_value_to_key_range, is_potentially_valid_key_range, key_type_to_jsval, reply_lost,
 };
 use crate::realms::enter_auto_realm;
+
+/// <https://www.w3.org/TR/IndexedDB-3/#request-source>
+///
+/// Every request reaches the backend through an object store, because that is what names the
+/// records on the wire, but the source the spec exposes is whichever surface the method was
+/// called on. `IDBIndex`'s eight operations and `IDBCursor`'s `update` and `delete` all travel
+/// over an object store while reporting the index or the cursor as their source.
+#[derive(JSTraceable, MallocSizeOf)]
+#[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
+pub(crate) enum RequestSource {
+    ObjectStore(Dom<IDBObjectStore>),
+    Index(Dom<IDBIndex>),
+    Cursor(Dom<IDBCursor>),
+}
+
+/// Which projection of each record a `getAll`-family request answers with.
+///
+/// One backend read serves all three methods; only the shape of the answer differs.
+#[derive(Clone, Copy)]
+pub(crate) enum GetAllKind {
+    /// `getAll`: the stored value of each record.
+    Values,
+    /// `getAllKeys`: the object store key of each record.
+    PrimaryKeys,
+    /// `getAllRecords`: an `IDBRecord` per record.
+    Records,
+}
+
+impl GetAllKind {
+    /// `getAllKeys` never reads a stored value, and over a store of large values that is the
+    /// difference between shipping a list of keys and shipping a copy of the database.
+    pub(crate) fn shape(self) -> RecordsShape {
+        match self {
+            GetAllKind::PrimaryKeys => RecordsShape::KeysOnly,
+            GetAllKind::Values | GetAllKind::Records => RecordsShape::WithValues,
+        }
+    }
+}
+
+/// Whether a request may be held back by the transaction's outbound hold.
+#[derive(Clone, Copy)]
+enum OutboundHold {
+    /// The ordinary case: the hold, when it is set, takes this request.
+    Respect,
+    /// The request the hold is waiting for. Holding it would stall the transaction on itself.
+    Bypass,
+}
+
+/// Whether the answer to a request is reported to script.
+#[derive(Clone, Copy, PartialEq)]
+enum RequestVisibility {
+    /// The ordinary case: the answer arrives as a `success` or an `error` event fired at the
+    /// request, and an unhandled error event's default action aborts the transaction.
+    Script,
+    /// A half of a `create index` backfill.
+    ///
+    /// <https://w3c.github.io/IndexedDB/#dom-idbobjectstore-createindex> processes index
+    /// creation as an asynchronous request inside the upgrade transaction but never hands
+    /// script a request for it, so no event is fired at either half. A failure runs
+    /// `abort a transaction` with the error directly, which is how a unique index over records
+    /// that already share a key takes the upgrade transaction down.
+    Internal(BackfillHalf),
+}
+
+/// Which half of a `create index` backfill a request carries.
+///
+/// The two halves sit on opposite sides of the transaction's outbound hold, so which half a
+/// request is decides both where it goes in the queue and what its answer releases.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum BackfillHalf {
+    /// The read that collects the records the new index has to cover. It takes its ordinary
+    /// place in the outbound queue, because the records it has to see are the ones every
+    /// message ahead of it leaves behind.
+    Read,
+    /// The write that stores the keys extracted from those records. It bypasses the hold,
+    /// because the hold is what it is keeping the rest of the transaction waiting for, and its
+    /// answer is the point at which creating the index has either succeeded or failed. Only
+    /// then may the messages behind it go out: a request script placed after a `createIndex`
+    /// that fails is one the abort answers, not one the backend should ever see.
+    Write,
+}
+
+/// What the DOM should make of a `Vec<IndexedDBRecord>` answer.
+///
+/// Cursor iteration and the `getAll` family read the same records and so share one wire
+/// payload. This is what tells them apart, and it carries the part of each algorithm the
+/// backend was not told about.
+#[derive(Clone)]
+pub(crate) enum RecordsParam {
+    /// Move a cursor onto the next record the iteration selects.
+    Cursor(IterationParam),
+    /// Project the records the way `kind` names.
+    GetAll {
+        kind: GetAllKind,
+        direction: IDBCursorDirection,
+        count: Option<u32>,
+    },
+    /// Extract `index_name`'s keys from the records and send them back out as the write that
+    /// populates a newly created index.
+    ///
+    /// This request is not script visible. `create index` needs the index's key path evaluated
+    /// against every stored value, and only the script thread can do that, so the read comes
+    /// here and the keys go out again.
+    ///
+    /// Everything the second half needs is carried across the round trip rather than read back
+    /// off the object store when the records arrive, because the upgrade transaction goes on
+    /// running while they travel. `store_name` is the name the backend knows the store by, and
+    /// a rename placed after the `createIndex` is still held behind this round trip. The key
+    /// path and the multiEntry flag belong to the index the `createIndex` created, and a
+    /// `deleteIndex` placed after it has already taken that index off the store handle. The key
+    /// path is the storage thread's own, because a `RequestListener` travels to the task queue
+    /// and the DOM's `KeyPath` holds `DOMString`, which does not cross threads.
+    IndexBackfill {
+        store_name: String,
+        index_name: String,
+        key_path: KeyPath,
+        multi_entry: bool,
+    },
+}
+
+/// A resolved `getAll`, `getAllKeys` or `getAllRecords` request.
+///
+/// <https://w3c.github.io/IndexedDB/#create-request-to-retrieve-multiple-items>
+pub(crate) struct GetAllRequest {
+    /// The range the backend reads.
+    pub(crate) key_range: IndexedDBKeyRange,
+    /// The count the backend may apply during the read, which is not always the count the
+    /// request asked for.
+    pub(crate) count: Option<u32>,
+    /// The projection the DOM applies to the answer.
+    pub(crate) records_param: RecordsParam,
+}
+
+impl GetAllRequest {
+    /// Splits a resolved request into what the DOM applies after the read and what the backend
+    /// may apply during it.
+    ///
+    /// A count of zero is not a limit. The spec reads it as infinity, and a `LIMIT 0` would
+    /// answer with nothing at all. Of the counts that do limit, only `next` may be pushed down:
+    /// the backend answers in ascending key order with no duplicate filtering, so for every
+    /// other direction a count applied during the read would already have truncated the wrong
+    /// end of the range, or dropped records that the unique filter was going to remove anyway.
+    fn new(
+        kind: GetAllKind,
+        key_range: IndexedDBKeyRange,
+        direction: IDBCursorDirection,
+        count: Option<u32>,
+    ) -> Self {
+        let count = count.filter(|count| *count > 0);
+        let backend_count = match direction {
+            IDBCursorDirection::Next => count,
+            _ => None,
+        };
+        Self {
+            key_range,
+            count: backend_count,
+            records_param: RecordsParam::GetAll {
+                kind,
+                direction,
+                count,
+            },
+        }
+    }
+
+    /// `getAllRecords(options)`, whose single argument needs no disambiguation.
+    pub(crate) fn from_options(
+        cx: &mut JSContext,
+        kind: GetAllKind,
+        options: &IDBGetAllOptions,
+    ) -> Fallible<Self> {
+        let key_range = convert_value_to_key_range(cx, options.query.handle(), None)?;
+        Ok(Self::new(kind, key_range, options.direction, options.count))
+    }
+
+    /// `getAll(queryOrOptions, count)` and `getAllKeys(queryOrOptions, count)`, whose first
+    /// argument is either a query or an `IDBGetAllOptions`.
+    pub(crate) fn resolve(
+        cx: &mut JSContext,
+        kind: GetAllKind,
+        query_or_options: HandleValue,
+        count: Option<u32>,
+    ) -> Fallible<Self> {
+        // Step 8. If running is a potentially valid key range with queryOrOptions is true, the
+        // argument is the query and the direction is "next".
+        if is_potentially_valid_key_range(cx, query_or_options)? {
+            let key_range = convert_value_to_key_range(cx, query_or_options, None)?;
+            return Ok(Self::new(kind, key_range, IDBCursorDirection::Next, count));
+        }
+
+        // Step 9. Otherwise the argument is an IDBGetAllOptions, and the dictionary replaces
+        // the positional count whether or not it carries one of its own.
+        let options = match IDBGetAllOptions::new(cx, query_or_options) {
+            Ok(JsConversionResult::Success(options)) => options,
+            Ok(JsConversionResult::Failure(error)) => {
+                return Err(Error::Type(error.into_owned()));
+            },
+            Err(()) => return Err(Error::JSFailed),
+        };
+        Self::from_options(cx, kind, &options)
+    }
+}
+
+/// Applies the direction and count that `getAllRecords` resolves after the read.
+///
+/// The backend answers in ascending index key order and then ascending primary key order, for
+/// every direction. Unique filtering therefore keeps the first record of each key, which is the
+/// one with the lowest primary key, and it has to run before the reversal rather than after.
+/// Count is last, because it limits the records the direction chose and not the ones the range
+/// matched.
+fn project_records(
+    direction: IDBCursorDirection,
+    count: Option<u32>,
+    mut records: Vec<IndexedDBRecord>,
+) -> Vec<IndexedDBRecord> {
+    if matches!(
+        direction,
+        IDBCursorDirection::Nextunique | IDBCursorDirection::Prevunique
+    ) {
+        let mut previous: Option<IndexedDBKeyType> = None;
+        records.retain(|record| {
+            if previous.as_ref() == Some(&record.key) {
+                return false;
+            }
+            previous = Some(record.key.clone());
+            true
+        });
+    }
+
+    if matches!(
+        direction,
+        IDBCursorDirection::Prev | IDBCursorDirection::Prevunique
+    ) {
+        records.reverse();
+    }
+
+    if let Some(count) = count {
+        records.truncate(count as usize);
+    }
+
+    records
+}
 
 #[derive(Clone)]
 struct RequestListener {
@@ -128,6 +373,7 @@ impl From<BackfillIndexResult> for IdbResult {
         }
     }
 }
+
 impl From<()> for IdbResult {
     fn from(_value: ()) -> Self {
         Self::None
@@ -213,7 +459,6 @@ impl RequestListener {
                     // process dying.
                     if let Err(e) = key_type_to_jsval(cx, &key, answer.handle_mut()) {
                         warn!("Error converting an IndexedDB key to a value");
-
                         self.handle_async_request_error(&global, cx, request, e);
                         return;
                     }
@@ -227,7 +472,7 @@ impl RequestListener {
                             return;
                         }
                     }
-                    array.to_jsval(cx, answer.handle_mut());
+                    array.safe_to_jsval(cx, answer.handle_mut());
                 },
                 IdbResult::Value(serialized_data) => {
                     let result = postcard::from_bytes(&serialized_data)
@@ -255,7 +500,7 @@ impl RequestListener {
                             return;
                         };
                     }
-                    values.to_jsval(cx, answer.handle_mut());
+                    values.safe_to_jsval(cx, answer.handle_mut());
                 },
                 IdbResult::Count(count) => {
                     answer.handle_mut().set(DoubleValue(count as f64));
@@ -330,7 +575,7 @@ impl RequestListener {
                                 return;
                             }
                         }
-                        array.to_jsval(cx, answer.handle_mut());
+                        array.safe_to_jsval(cx, answer.handle_mut());
                     },
                     Some(RecordsParam::IndexBackfill {
                         store_name,
@@ -469,7 +714,6 @@ impl RequestListener {
             // FIXME:(arihant2math) dispatch correct error
             // Substep 2
             self.handle_async_request_error(&global, cx, request, Error::Data(None));
-
         }
     }
 
@@ -647,10 +891,6 @@ impl IDBRequest {
 
     pub fn clear_transaction(&self) {
         self.transaction.set(None);
-    }
-
-    pub fn unset_done_flag(&self) {
-        self.ready_state.set(IDBRequestReadyState::Pending);
     }
 
     fn is_done(&self) -> bool {
@@ -960,6 +1200,12 @@ impl IDBRequest {
             .database_access_task_source()
             .to_sendable();
 
+        // Step 4 has already added the request to the transaction's request list, so it has to
+        // be answered even if the operation cannot be started. Both are kept out of the closure
+        // below, which consumes the originals.
+        let unstarted_listener = response_listener.clone();
+        let unstarted_task_source = task_source.clone();
+
         let closure = move |message: Result<BackendResult<T>, SendError>| {
             let response_listener = response_listener.clone();
             // In multiprocess mode this runs on the router thread with a reply that crossed a
@@ -978,7 +1224,24 @@ impl IDBRequest {
                 );
             }));
         };
-        let callback = GenericCallback::new(closure).expect("Could not create callback");
+        let callback = match GenericCallback::new(closure) {
+            Ok(callback) => callback,
+            Err(error) => {
+                // No reply channel means no backend reply will ever arrive for a request the
+                // transaction is already counting, and a request that never settles wedges the
+                // transaction's commit bookkeeping. `asynchronously execute a request` reports
+                // an operation that cannot start by answering the request with an error, which
+                // is what `execute_async_failure` does for an already-failed operation.
+                warn!("Could not create an IndexedDB request callback: {error:?}");
+                unstarted_task_source.queue(task!(idb_request_unstarted: move |cx| {
+                    unstarted_listener.handle_async_request_finished(
+                        cx,
+                        Ok(IdbResult::Error(Error::Operation(None))),
+                    );
+                }));
+                return Ok(request);
+            },
+        };
         let operation = operation_fn(callback);
 
         // Every record-reading request answers with `Vec<IndexedDBRecord>`, so the parameter
@@ -1089,221 +1352,4 @@ impl IDBRequestMethods<crate::DomTypeHolder> for IDBRequest {
 
     // https://www.w3.org/TR/IndexedDB-3/#dom-idbrequest-onerror
     event_handler!(error, GetOnerror, SetOnerror);
-}
-
-pub(crate) enum RequestSource {
-    ObjectStore(Dom<IDBObjectStore>),
-    Index(Dom<IDBIndex>),
-    Cursor(Dom<IDBCursor>),
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum GetAllKind {
-    /// `getAll`: the stored value of each record.
-    Values,
-    /// `getAllKeys`: the object store key of each record.
-    PrimaryKeys,
-    /// `getAllRecords`: an `IDBRecord` per record.
-    Records,
-}
-
-impl GetAllKind {
-    /// `getAllKeys` never reads a stored value, and over a store of large values that is the
-    /// difference between shipping a list of keys and shipping a copy of the database.
-    pub(crate) fn shape(self) -> RecordsShape {
-        match self {
-            GetAllKind::PrimaryKeys => RecordsShape::KeysOnly,
-            GetAllKind::Values | GetAllKind::Records => RecordsShape::WithValues,
-        }
-    }
-}
-
-/// Whether a request may be held back by the transaction's outbound hold.
-#[derive(Clone, Copy)]
-enum OutboundHold {
-    /// The ordinary case: the hold, when it is set, takes this request.
-    Respect,
-    /// The request the hold is waiting for. Holding it would stall the transaction on itself.
-    Bypass,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum RequestVisibility {
-    /// The ordinary case: the answer arrives as a `success` or an `error` event fired at the
-    /// request, and an unhandled error event's default action aborts the transaction.
-    Script,
-    /// A half of a `create index` backfill.
-    ///
-    /// <https://w3c.github.io/IndexedDB/#dom-idbobjectstore-createindex> processes index
-    /// creation as an asynchronous request inside the upgrade transaction but never hands
-    /// script a request for it, so no event is fired at either half. A failure runs
-    /// `abort a transaction` with the error directly, which is how a unique index over records
-    /// that already share a key takes the upgrade transaction down.
-    Internal(BackfillHalf),
-}
-
-pub(crate) enum BackfillHalf {
-    /// The read that collects the records the new index has to cover. It takes its ordinary
-    /// place in the outbound queue, because the records it has to see are the ones every
-    /// message ahead of it leaves behind.
-    Read,
-    /// The write that stores the keys extracted from those records. It bypasses the hold,
-    /// because the hold is what it is keeping the rest of the transaction waiting for, and its
-    /// answer is the point at which creating the index has either succeeded or failed. Only
-    /// then may the messages behind it go out: a request script placed after a `createIndex`
-    /// that fails is one the abort answers, not one the backend should ever see.
-    Write,
-}
-#[derive(Clone)]
-pub(crate) enum RecordsParam {
-    /// Move a cursor onto the next record the iteration selects.
-    Cursor(IterationParam),
-    /// Project the records the way `kind` names.
-    GetAll {
-        kind: GetAllKind,
-        direction: IDBCursorDirection,
-        count: Option<u32>,
-    },
-    /// Extract `index_name`'s keys from the records and send them back out as the write that
-    /// populates a newly created index.
-    ///
-    /// This request is not script visible. `create index` needs the index's key path evaluated
-    /// against every stored value, and only the script thread can do that, so the read comes
-    /// here and the keys go out again.
-    ///
-    /// Everything the second half needs is carried across the round trip rather than read back
-    /// off the object store when the records arrive, because the upgrade transaction goes on
-    /// running while they travel. `store_name` is the name the backend knows the store by, and
-    /// a rename placed after the `createIndex` is still held behind this round trip. The key
-    /// path and the multiEntry flag belong to the index the `createIndex` created, and a
-    /// `deleteIndex` placed after it has already taken that index off the store handle. The key
-    /// path is the storage thread's own, because a `RequestListener` travels to the task queue
-    /// and the DOM's `KeyPath` holds `DOMString`, which does not cross threads.
-    IndexBackfill {
-        store_name: String,
-        index_name: String,
-        key_path: KeyPath,
-        multi_entry: bool,
-    },
-}
-
-/// A resolved `getAll`, `getAllKeys` or `getAllRecords` request.
-///
-/// <https://w3c.github.io/IndexedDB/#create-request-to-retrieve-multiple-items>
-pub(crate) struct GetAllRequest {
-    /// The range the backend reads.
-    pub(crate) key_range: IndexedDBKeyRange,
-    /// The count the backend may apply during the read, which is not always the count the
-    /// request asked for.
-    pub(crate) count: Option<u32>,
-    /// The projection the DOM applies to the answer.
-    pub(crate) records_param: RecordsParam,
-}
-
-impl GetAllRequest {
-    /// Splits a resolved request into what the DOM applies after the read and what the backend
-    /// may apply during it.
-    ///
-    /// A count of zero is not a limit. The spec reads it as infinity, and a `LIMIT 0` would
-    /// answer with nothing at all. Of the counts that do limit, only `next` may be pushed down:
-    /// the backend answers in ascending key order with no duplicate filtering, so for every
-    /// other direction a count applied during the read would already have truncated the wrong
-    /// end of the range, or dropped records that the unique filter was going to remove anyway.
-    fn new(
-        kind: GetAllKind,
-        key_range: IndexedDBKeyRange,
-        direction: IDBCursorDirection,
-        count: Option<u32>,
-    ) -> Self {
-        let count = count.filter(|count| *count > 0);
-        let backend_count = match direction {
-            IDBCursorDirection::Next => count,
-            _ => None,
-        };
-        Self {
-            key_range,
-            count: backend_count,
-            records_param: RecordsParam::GetAll {
-                kind,
-                direction,
-                count,
-            },
-        }
-    }
-
-    /// `getAllRecords(options)`, whose single argument needs no disambiguation.
-    pub(crate) fn from_options(
-        cx: &mut JSContext,
-        kind: GetAllKind,
-        options: &IDBGetAllOptions,
-    ) -> Fallible<Self> {
-        let key_range = convert_value_to_key_range(cx, options.query.handle(), None)?;
-        Ok(Self::new(kind, key_range, options.direction, options.count))
-    }
-
-    /// `getAll(queryOrOptions, count)` and `getAllKeys(queryOrOptions, count)`, whose first
-    /// argument is either a query or an `IDBGetAllOptions`.
-    pub(crate) fn resolve(
-        cx: &mut JSContext,
-        kind: GetAllKind,
-        query_or_options: HandleValue,
-        count: Option<u32>,
-    ) -> Fallible<Self> {
-        // Step 8. If running is a potentially valid key range with queryOrOptions is true, the
-        // argument is the query and the direction is "next".
-        if is_potentially_valid_key_range(cx, query_or_options)? {
-            let key_range = convert_value_to_key_range(cx, query_or_options, None)?;
-            return Ok(Self::new(kind, key_range, IDBCursorDirection::Next, count));
-        }
-
-        // Step 9. Otherwise the argument is an IDBGetAllOptions, and the dictionary replaces
-        // the positional count whether or not it carries one of its own.
-        let options = match IDBGetAllOptions::new(cx, query_or_options) {
-            Ok(JsConversionResult::Success(options)) => options,
-            Ok(JsConversionResult::Failure(error)) => {
-                return Err(Error::Type(error.into_owned()));
-            },
-            Err(()) => return Err(Error::JSFailed),
-        };
-        Self::from_options(cx, kind, &options)
-    }
-}
-/// Applies the direction and count that `getAllRecords` resolves after the read.
-///
-/// The backend answers in ascending index key order and then ascending primary key order, for
-/// every direction. Unique filtering therefore keeps the first record of each key, which is the
-/// one with the lowest primary key, and it has to run before the reversal rather than after.
-/// Count is last, because it limits the records the direction chose and not the ones the range
-/// matched.
-fn project_records(
-    direction: IDBCursorDirection,
-    count: Option<u32>,
-    mut records: Vec<IndexedDBRecord>,
-) -> Vec<IndexedDBRecord> {
-    if matches!(
-        direction,
-        IDBCursorDirection::Nextunique | IDBCursorDirection::Prevunique
-    ) {
-        let mut previous: Option<IndexedDBKeyType> = None;
-        records.retain(|record| {
-            if previous.as_ref() == Some(&record.key) {
-                return false;
-            }
-            previous = Some(record.key.clone());
-            true
-        });
-    }
-
-    if matches!(
-        direction,
-        IDBCursorDirection::Prev | IDBCursorDirection::Prevunique
-    ) {
-        records.reverse();
-    }
-
-    if let Some(count) = count {
-        records.truncate(count as usize);
-    }
-
-    records
 }

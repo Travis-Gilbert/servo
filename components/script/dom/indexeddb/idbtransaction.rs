@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::cell::Cell;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
@@ -10,8 +11,8 @@ use profile_traits::generic_callback::GenericCallback;
 use profile_traits::generic_channel::channel;
 use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericUnionTypes::StringOrStringSequence;
-use script_bindings::reflector::reflect_dom_object;
-use servo_base::generic_channel::{GenericSend, GenericSender, SendError};
+use script_bindings::reflector::reflect_dom_object_with_cx;
+use servo_base::generic_channel::{GenericSend, GenericSender};
 use servo_base::id::ScriptEventLoopId;
 use storage_traits::indexeddb::{
     BackendError, IndexedDBIndex, IndexedDBThreadMsg, IndexedDBTxnMode, KeyPath, SyncOperation,
@@ -41,7 +42,7 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::indexeddb::idbdatabase::IDBDatabase;
 use crate::dom::indexeddb::idbobjectstore::{IDBObjectStore, IDBObjectStoreAbortState};
 use crate::dom::indexeddb::idbrequest::IDBRequest;
-use crate::dom::indexeddb::key::{map_backend_error_to_dom_error, reply_lost};
+use crate::indexeddb::{map_backend_error_to_dom_error, reply_lost};
 
 #[dom_struct]
 pub struct IDBTransaction {
@@ -111,6 +112,7 @@ pub(crate) enum HeldOutbound {
     /// its way, because the write has to be ordered ahead of them.
     Barrier,
 }
+
 impl IDBTransaction {
     fn new_inherited(
         connection: &IDBDatabase,
@@ -188,8 +190,7 @@ impl IDBTransaction {
         scope: &DOMStringList,
         serial_number: u64,
     ) -> DomRoot<IDBTransaction> {
-        reflect_dom_object(
-            cx,
+        reflect_dom_object_with_cx(
             Box::new(IDBTransaction::new_inherited(
                 connection,
                 mode,
@@ -198,6 +199,7 @@ impl IDBTransaction {
                 serial_number,
             )),
             global,
+            cx,
         )
     }
 
@@ -380,34 +382,45 @@ impl IDBTransaction {
 
         // TODO: Reuse a shared transaction callback path (similar to IDBFactory
         // connection callbacks) instead of creating one per transaction operation.
-        let callback = GenericCallback::new(move |message: Result<TxnCompleteMsg, SendError>| {
-            let this = this.clone();
-            let task_source = task_source.clone();
-            task_source.queue(task!(handle_commit_result: move |cx| {
-                let this = this.root();
-                // A commit whose answer was lost is not a commit that happened. Firing
-                // `complete` at it would tell script that writes landed which may not
-                // have, so it takes the same path as a commit the backend refused.
-                let result = match message {
-                    Ok(message) => message.result,
-                    Err(error) => Err(reply_lost(error)),
-                };
-                match result {
-                    Ok(()) => {
-                        this.finalize_commit();
-                    }
-                    Err(_err) => {
-                         // TODO: Map backend commit/rollback failure to an appropriate DOMException
-                        this.initiate_abort(cx, Error::Operation(None));
+        let callback = GenericCallback::new(
+            move |message: Result<TxnCompleteMsg, SendError>| {
+                let this = this.clone();
+                let task_source = task_source.clone();
+                task_source.queue(task!(handle_commit_result: move |cx| {
+                    let this = this.root();
+                    // A commit whose answer was lost is not a commit that happened. Firing
+                    // `complete` at it would tell script that writes landed which may not
+                    // have, so it takes the same path as a commit the backend refused.
+                    let result = match message {
+                        Ok(message) => message.result,
+                        Err(error) => Err(reply_lost(error)),
+                    };
+                    match result {
+                        Ok(()) => {
+                            this.finalize_commit();
+                        }
+                        Err(_err) => {
+                             // TODO: Map backend commit/rollback failure to an appropriate DOMException
+                            this.initiate_abort(cx, Error::Operation(None));
 
-                        this.finalize_abort();
+                            this.finalize_abort();
+                        }
                     }
-                }
-                // TODO: https://w3c.github.io/IndexedDB/#commit-a-transaction
-                // Backend commit/rollback is not yet atomic.
-            }));
-        })
-        .expect("Could not create callback");
+                    // TODO: https://w3c.github.io/IndexedDB/#commit-a-transaction
+                    // Backend commit/rollback is not yet atomic.
+                }));
+            },
+        );
+        let callback = match callback {
+            Ok(callback) => callback,
+            Err(error) => {
+                // A commit that cannot be initiated is reported by returning false, which is
+                // what the failed send below does; `maybe_commit` answers that by aborting the
+                // transaction rather than leaving it waiting for a `complete` that cannot come.
+                warn!("Could not create the IndexedDB commit callback: {error:?}");
+                return false;
+            },
+        };
 
         let commit_operation = SyncOperation::Commit(
             callback,
@@ -620,18 +633,41 @@ impl IDBTransaction {
             .task_manager()
             .dom_manipulation_task_source()
             .to_sendable();
-        let callback = GenericCallback::new(move |message: Result<TxnCompleteMsg, SendError>| {
-            let this = this.clone();
-            let task_source = task_source.clone();
-            task_source.queue(task!(handle_abort_result: move || {
-                let this = this.root();
-                if let Err(error) = message {
-                    warn!("Lost the backend's answer to an abort: {error:?}");
-                }
-                this.finalize_abort();
-            }));
-        })
-        .expect("Could not create callback");
+        // Kept out of the closure below, which consumes the originals, so the abort can still
+        // be finalized if the backend can never be told about it.
+        let unsent_this = Trusted::new(self);
+        let unsent_task_source = task_source.clone();
+        let callback = GenericCallback::new(
+            move |message: Result<TxnCompleteMsg, SendError>| {
+                let this = this.clone();
+                let task_source = task_source.clone();
+                task_source.queue(task!(handle_abort_result: move || {
+                    let this = this.root();
+                    // The abort is finalized whichever way the reply went. The backend was
+                    // told to abort, and a transaction that never finalizes stays wedged
+                    // with its requests unanswered, so a lost answer is worth reporting and
+                    // not worth stopping for.
+                    if let Err(error) = message {
+                        warn!("Lost the backend's answer to an abort: {error:?}");
+                    }
+                    this.finalize_abort();
+                }));
+            },
+        );
+        let callback = match callback {
+            Ok(callback) => callback,
+            Err(error) => {
+                // The abort message carries this callback, so without it the backend is never
+                // told and the reply that would have run `finalize_abort` can never arrive.
+                // For the same reason the callback finalizes on a lost answer, finalize here:
+                // a transaction that never finalizes stays wedged with its requests unanswered.
+                warn!("Could not create the IndexedDB abort callback: {error:?}");
+                unsent_task_source.queue(task!(finalize_unsent_abort: move || {
+                    unsent_this.root().finalize_abort();
+                }));
+                return;
+            },
+        };
         let operation = SyncOperation::Abort(
             callback,
             global.origin().immutable().clone(),
@@ -857,8 +893,12 @@ impl IDBTransaction {
     ) -> Option<(IDBObjectStoreParameters, Vec<IndexedDBIndex>, Option<i64>)> {
         let global = self.global();
         let idb_sender = global.storage_threads().sender();
-        let (sender, receiver) =
-            channel(global.time_profiler_chan().clone()).expect("failed to create channel");
+        // A store whose parameters cannot even be asked for reads the same way to the caller as
+        // a store the backend could not find, which the `?`s below already report as `None`.
+        let Ok((sender, receiver)) = channel(global.time_profiler_chan().clone()) else {
+            warn!("Could not create a channel to read IndexedDB object store parameters.");
+            return None;
+        };
 
         let origin = global.origin().immutable().clone();
         let db_name = String::from(self.db.get_name());
@@ -889,30 +929,44 @@ impl IDBTransaction {
         ))
     }
 
-    pub(crate) fn create_abort_callback(&self) -> GenericCallback<BackendError> {
+    /// The callback an `AsyncSchemaOperation` carries to report why it failed.
+    ///
+    /// Returns `None` when the reply channel cannot be created. The operation cannot be sent
+    /// without it, so the callers report that the same way they report a send the storage
+    /// thread never took: the local handle state still changes and the failure is logged.
+    pub(crate) fn create_abort_callback(&self) -> Option<GenericCallback<BackendError>> {
         let trusted_transaction = Trusted::new(self);
         let task_source = self
             .global()
             .task_manager()
             .storage_task_source()
             .to_sendable();
-        GenericCallback::new(move |error: Result<BackendError, SendError>| {
-            let error = match error {
-                Ok(error) => error,
-                Err(error) => {
-                    return warn!(
-                        "Lost the reason an IndexedDB schema operation failed: {error:?}"
-                    );
-                },
-            };
-            let trusted_transaction = trusted_transaction.clone();
-            task_source.queue(task!(delete_failed: move |cx| {
-                let transaction = trusted_transaction.root();
-                transaction.initiate_abort(cx, map_backend_error_to_dom_error(error));
-                transaction.request_backend_abort();
-            }));
+        GenericCallback::new(
+                        move |error: Result<BackendError, SendError>| {
+                let error = match error {
+                    Ok(error) => error,
+                    // This callback exists only to carry the reason a schema operation
+                    // failed. Losing it loses the reason, not the abort, which the failing
+                    // operation drives on its own; but the reason is then gone for good,
+                    // so it is worth saying that it was lost.
+                    Err(error) => {
+                        return warn!(
+                            "Lost the reason an IndexedDB schema operation failed: {error:?}"
+                        );
+                    },
+                };
+                let trusted_transaction = trusted_transaction.clone();
+                task_source.queue(task!(delete_failed: move |cx| {
+                    let transaction = trusted_transaction.root();
+                    transaction.initiate_abort(cx, map_backend_error_to_dom_error(error));
+                    transaction.request_backend_abort();
+                }));
+            },
+        )
+        .inspect_err(|error| {
+            warn!("Could not create an IndexedDB schema operation abort callback: {error:?}");
         })
-        .expect("Could not create GenericCallback")
+        .ok()
     }
 }
 
