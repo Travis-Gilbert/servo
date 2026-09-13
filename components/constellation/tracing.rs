@@ -125,6 +125,7 @@ mod from_script {
         fn log_target(&self) -> &'static str {
             match self {
                 Self::ServiceWorkerAlgorithm(..) => target!("ServiceWorkerAlgorithm"),
+                Self::WebLock(..) => target!("WebLock"),
                 Self::CompleteMessagePortTransfer(..) => target!("CompleteMessagePortTransfer"),
                 Self::MessagePortTransferResult(..) => target!("MessagePortTransferResult"),
                 Self::NewMessagePort(..) => target!("NewMessagePort"),

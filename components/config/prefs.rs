@@ -202,6 +202,8 @@ pub struct Preferences {
     pub dom_script_asynch: bool,
     // feature: Storage API | #43976 | Web/API/Storage_API
     pub dom_storage_manager_api_enabled: bool,
+    // Web Locks API (Web/API/Web_Locks_API); fork feature, no upstream tracking issue is pinned.
+    pub dom_web_locks_enabled: bool,
     // feature: ServiceWorker | #36538 | Web/API/Service_Worker_API
     pub dom_serviceworker_enabled: bool,
     pub dom_serviceworker_timeout_seconds: i64,
@@ -463,6 +465,7 @@ impl Preferences {
             dom_sanitizer_enabled: false,
             dom_script_asynch: true,
             dom_storage_manager_api_enabled: false,
+            dom_web_locks_enabled: true,
             dom_serviceworker_enabled: false,
             dom_serviceworker_timeout_seconds: 60,
             dom_sharedworker_enabled: true,

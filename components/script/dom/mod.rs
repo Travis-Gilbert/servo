@@ -283,6 +283,8 @@ pub(crate) mod indexeddb;
 pub(crate) use self::indexeddb::*;
 pub(crate) mod intersectionobserver;
 pub(crate) use self::intersectionobserver::*;
+pub(crate) mod lockmanager;
+pub(crate) use self::lockmanager::*;
 pub(crate) mod media;
 pub(crate) use self::media::*;
 pub(crate) mod mimetype;

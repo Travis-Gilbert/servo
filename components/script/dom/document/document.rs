@@ -973,6 +973,9 @@ impl Document {
         if activity != DocumentActivity::FullyActive {
             self.window().suspend(cx);
             media.suspend(&client_context_id);
+            // <https://w3c.github.io/web-locks/#agent-integration>: a document that is
+            // no longer fully active releases its held locks and drops its requests.
+            self.window().as_global_scope().release_web_locks();
             return;
         }
 

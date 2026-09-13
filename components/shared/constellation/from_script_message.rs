@@ -441,6 +441,93 @@ pub enum DocumentState {
     Pending,
 }
 
+/// <https://w3c.github.io/web-locks/#lock-mode>
+#[derive(Clone, Copy, Debug, Deserialize, Eq, MallocSizeOf, PartialEq, Serialize)]
+pub enum WebLockMode {
+    /// <https://w3c.github.io/web-locks/#dom-lockmode-shared>
+    Shared,
+    /// <https://w3c.github.io/web-locks/#dom-lockmode-exclusive>
+    Exclusive,
+}
+
+/// One entry of a lock manager snapshot.
+/// <https://w3c.github.io/web-locks/#dictdef-lockinfo>
+#[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
+pub struct WebLockInfo {
+    /// <https://w3c.github.io/web-locks/#dom-lockinfo-name>
+    pub name: String,
+    /// <https://w3c.github.io/web-locks/#dom-lockinfo-mode>
+    pub mode: WebLockMode,
+    /// <https://w3c.github.io/web-locks/#dom-lockinfo-clientid>
+    pub client_id: String,
+}
+
+/// A message from a `LockManager` to the constellation's per-origin lock registry.
+/// Requests and locks are identified by the pair of the client id (one per
+/// environment settings object) and a request id the client allocates.
+/// <https://w3c.github.io/web-locks/#algorithms>
+#[derive(Debug, Deserialize, Serialize)]
+pub enum WebLockMessage {
+    /// <https://w3c.github.io/web-locks/#request-a-lock>
+    Request {
+        origin: ImmutableOrigin,
+        client_id: String,
+        request_id: u64,
+        name: String,
+        mode: WebLockMode,
+        if_available: bool,
+        steal: bool,
+        /// Whether the requesting agent dies with the pipeline the request
+        /// arrived from. False for shared workers, which outlive the document
+        /// that created them, so only their own teardown may release their locks.
+        pipeline_bound: bool,
+        result_handler: GenericCallback<WebLockResponse>,
+    },
+    /// <https://w3c.github.io/web-locks/#abort-the-request>
+    Abort {
+        origin: ImmutableOrigin,
+        client_id: String,
+        request_id: u64,
+    },
+    /// <https://w3c.github.io/web-locks/#release-the-lock>
+    Release {
+        origin: ImmutableOrigin,
+        client_id: String,
+        request_id: u64,
+    },
+    /// <https://w3c.github.io/web-locks/#snapshot-the-lock-state>
+    Query {
+        origin: ImmutableOrigin,
+        request_id: u64,
+        result_handler: GenericCallback<WebLockResponse>,
+    },
+    /// The client's environment is being destroyed: release its held locks
+    /// and drop its pending requests.
+    /// <https://w3c.github.io/web-locks/#agent-integration>
+    ClientGone {
+        origin: ImmutableOrigin,
+        client_id: String,
+    },
+}
+
+/// The constellation's reply to a [`WebLockMessage`], routed back to the
+/// `LockManager` that allocated `request_id`.
+#[derive(Debug, Deserialize, Serialize)]
+pub enum WebLockResponse {
+    /// The request became grantable and is now a held lock.
+    Granted { request_id: u64 },
+    /// The request was made with `ifAvailable` and was not grantable.
+    Unavailable { request_id: u64 },
+    /// A held lock was removed by a `steal` request from another client.
+    Stolen { request_id: u64 },
+    /// <https://w3c.github.io/web-locks/#dictdef-lockmanagersnapshot>
+    Snapshot {
+        request_id: u64,
+        held: Vec<WebLockInfo>,
+        pending: Vec<WebLockInfo>,
+    },
+}
+
 /// This trait allows creating a `ServiceWorkerManager` without depending on the `script`
 /// crate.
 pub trait ServiceWorkerManagerFactory {
@@ -610,6 +697,8 @@ pub enum ConstellationInterest {
 #[derive(Deserialize, IntoStaticStr, Serialize)]
 pub enum ScriptToConstellationMessage {
     ServiceWorkerAlgorithm(ServiceWorkerAlgorithm),
+    /// A Web Locks operation for the constellation's per-origin lock registry.
+    WebLock(WebLockMessage),
     /// Request to complete the transfer of a set of ports to a router.
     CompleteMessagePortTransfer(MessagePortRouterId, Vec<MessagePortId>),
     /// The results of attempting to complete the transfer of a batch of ports.

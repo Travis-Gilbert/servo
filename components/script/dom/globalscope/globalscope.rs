@@ -69,7 +69,7 @@ use servo_config::pref;
 use servo_constellation_traits::{
     BlobData, BlobImpl, BroadcastChannelMsg, ConstellationInterest, FileBlob, MessagePortImpl,
     MessagePortMsg, PortMessageTask, ScriptToConstellationChan, ScriptToConstellationMessage,
-    ScriptToConstellationSender,
+    ScriptToConstellationSender, WebLockMessage,
 };
 use servo_url::{ImmutableOrigin, MutableOrigin, ServoUrl};
 use storage_traits::StorageThreads;
@@ -221,6 +221,11 @@ pub(crate) struct GlobalScope {
 
     /// The broadcast channels state this global, if it is managing any.
     broadcast_channel_state: DomRefCell<BroadcastChannelState>,
+
+    /// The Web Locks client id of this global, once its `LockManager` exists.
+    /// Used to release the client's locks when the global is destroyed.
+    /// <https://w3c.github.io/web-locks/#agent-integration>
+    web_lock_client_id: DomRefCell<Option<String>>,
 
     /// Tracks the number of active listeners per constellation interest category.
     /// When the count transitions from 0 to 1, a RegisterInterest message is sent.
@@ -794,6 +799,7 @@ impl GlobalScope {
         Self {
             message_port_state: DomRefCell::new(MessagePortState::UnManaged),
             broadcast_channel_state: DomRefCell::new(BroadcastChannelState::UnManaged),
+            web_lock_client_id: DomRefCell::new(None),
             constellation_interest_counts: RefCell::new(HashMap::new()),
             blob_state: Default::default(),
             eventtarget: EventTarget::new_inherited(),
@@ -1039,6 +1045,7 @@ impl GlobalScope {
     pub(crate) fn remove_web_messaging_and_dedicated_workers_infra(&self) {
         self.remove_message_ports_router();
         self.remove_broadcast_channel_router();
+        self.release_web_locks();
 
         // Drop each ref to a worker explicitly now,
         // which will send a shutdown signal,
@@ -1047,6 +1054,28 @@ impl GlobalScope {
             .borrow_mut()
             .drain(0..)
             .for_each(drop);
+    }
+
+    /// Record the client id of this global's `LockManager`.
+    pub(crate) fn register_web_lock_client(&self, client_id: String) {
+        *self.web_lock_client_id.borrow_mut() = Some(client_id);
+    }
+
+    /// Tell the constellation that this global's Web Locks client is gone,
+    /// which releases its held locks and drops its pending requests.
+    /// <https://w3c.github.io/web-locks/#agent-integration>
+    /// Tell the constellation this global no longer holds or waits for any web lock.
+    /// Idempotent: the client id is kept so a document that leaves the fully active
+    /// state and later returns keeps its `LockManager` identity.
+    pub(crate) fn release_web_locks(&self) {
+        if let Some(client_id) = self.web_lock_client_id.borrow().as_ref() {
+            let _ = self.script_to_constellation_chan().send(
+                ScriptToConstellationMessage::WebLock(WebLockMessage::ClientGone {
+                    origin: self.origin().immutable().clone(),
+                    client_id: client_id.clone(),
+                }),
+            );
+        }
     }
 
     /// Update our state to un-managed,

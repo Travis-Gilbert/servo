@@ -19,6 +19,7 @@ mod process_manager;
 mod sandboxing;
 mod serviceworker;
 mod session_history;
+mod web_locks;
 
 pub use crate::constellation::{Constellation, InitialConstellationState};
 pub use crate::embedder::ConstellationToEmbedderMsg;
