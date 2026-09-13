@@ -29,7 +29,6 @@ use crate::dom::bindings::structuredclone;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::indexeddb::idbindex::IDBIndex;
 use crate::dom::indexeddb::idbobjectstore::IDBObjectStore;
-use crate::dom::indexeddb::idbrequest::IDBRequest;
 use crate::dom::indexeddb::idbtransaction::IDBTransaction;
 use crate::dom::indexeddb::key::{convert_value_to_key, key_type_to_jsval};
 
@@ -653,8 +652,12 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
                 "The cursor has no effective key to update".to_owned(),
             )));
         };
-        self.effective_object_store()
-            .store_record_with_known_key(cx, value, &effective_key)
+        self.effective_object_store().store_record_with_known_key(
+            cx,
+            RequestSource::Cursor(Dom::from_ref(self)),
+            value,
+            &effective_key,
+        )
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbcursor-delete>
@@ -670,8 +673,11 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
                 "The cursor has no effective key to delete".to_owned(),
             )));
         };
-        self.effective_object_store()
-            .delete_record_with_known_key(cx, &effective_key)
+        self.effective_object_store().delete_record_with_known_key(
+            cx,
+            RequestSource::Cursor(Dom::from_ref(self)),
+            &effective_key,
+        )
     }
 }
 
