@@ -111,21 +111,32 @@ pub enum KvsOperationTarget {
 ///
 /// `keys` contains one entry per index record to write. A multi-entry index is flattened by the
 /// script layer before it reaches the backend; an empty vector means extraction produced no index
-/// record, unless `keys_are_the_record_key` is set. The backend retains responsibility for
+/// record, unless `record_key_placement` is set. The backend retains responsibility for
 /// uniqueness checks using its index schema.
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, PartialEq, Serialize)]
 pub struct KvsIndexUpdate {
     pub index_name: String,
     pub keys: Vec<IndexedDBKeyType>,
-    /// Set when this index's key path is the store's key path and the record's key had not been
-    /// generated when the update was built.
-    ///
-    /// An index key that is the store's own key cannot be extracted from a value the key has not
-    /// been injected into yet, so the script layer leaves `keys` empty and the engine fills it
-    /// with the key the record is stored under. The engine fills it before the uniqueness check,
-    /// so `createIndex('by_id', 'id', { unique: true })` on an `autoIncrement` store still
-    /// refuses a duplicate.
-    pub keys_are_the_record_key: bool,
+    /// Where the record's own key belongs in this index's key, when the engine is what generates
+    /// it. `keys` is empty while this is set, and the engine fills it in.
+    pub record_key_placement: Option<RecordKeyPlacement>,
+}
+
+/// Where the record's own key belongs inside an index key the engine has to finish building.
+///
+/// A store that generates keys into an in-line key path does not write the key into the value it
+/// stores, because only the engine knows whether the insertion survived and therefore what the
+/// key is. An index whose key path reaches that same key path cannot be extracted from such a
+/// value, so the script layer names the hole and the engine fills it before the uniqueness check.
+/// That ordering is what lets `createIndex('by_id', 'id', { unique: true })` on an `autoIncrement`
+/// store still refuse a duplicate.
+#[derive(Clone, Debug, Deserialize, MallocSizeOf, PartialEq, Serialize)]
+pub enum RecordKeyPlacement {
+    /// The index key is the record's key itself.
+    WholeKey,
+    /// The index key is a sequence, and every `None` here is the record's key. The `Some`
+    /// components were extracted from the value, in the index key path's own order.
+    InSequence(Vec<Option<IndexedDBKeyType>>),
 }
 
 #[derive(MallocSizeOf)]
