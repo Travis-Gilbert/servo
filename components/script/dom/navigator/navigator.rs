@@ -133,6 +133,7 @@ pub(crate) struct Navigator {
     mediasession: MutNullableDom<MediaSession>,
     clipboard: MutNullableDom<Clipboard>,
     storage: MutNullableDom<StorageManager>,
+    locks: MutNullableDom<LockManager>,
     #[cfg(feature = "webgpu")]
     gpu: MutNullableDom<GPU>,
     /// <https://www.w3.org/TR/gamepad/#dfn-hasgamepadgesture>
@@ -162,6 +163,7 @@ impl Navigator {
             mediasession: Default::default(),
             clipboard: Default::default(),
             storage: Default::default(),
+            locks: Default::default(),
             #[cfg(feature = "webgpu")]
             gpu: Default::default(),
             #[cfg(feature = "gamepad")]
@@ -522,6 +524,11 @@ impl NavigatorMethods<crate::DomTypeHolder> for Navigator {
     fn Storage(&self, cx: &mut js::context::JSContext) -> DomRoot<StorageManager> {
         self.storage
             .or_init(|| StorageManager::new(cx, &self.global()))
+    }
+
+    /// <https://w3c.github.io/web-locks/#dom-navigatorlocks-locks>
+    fn Locks(&self, cx: &mut JSContext) -> DomRoot<LockManager> {
+        self.locks.or_init(|| LockManager::new(cx, &self.global()))
     }
 
     /// <https://w3c.github.io/beacon/#sec-processing-model>

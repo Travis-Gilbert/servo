@@ -24,6 +24,7 @@ mod sandboxing;
 mod screenshot_readiness_request;
 mod serviceworker;
 mod session_history;
+mod web_locks;
 
 pub use crate::constellation::{Constellation, InitialConstellationState};
 pub use crate::embedder::ConstellationToEmbedderMsg;

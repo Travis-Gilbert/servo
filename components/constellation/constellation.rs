@@ -390,6 +390,10 @@ pub struct Constellation<STF, SWF> {
     /// A map of origin to sender to a Service worker manager.
     sw_managers: HashMap<ImmutableOrigin, GenericSender<ServiceWorkerMsg>>,
 
+    /// Every origin's Web Locks queue and held set.
+    /// <https://w3c.github.io/web-locks/#lock-managers>
+    web_locks: WebLockRegistry,
+
     /// A channel for the constellation to send messages to the
     /// time profiler thread.
     pub(crate) time_profiler_chan: time::ProfilerChan,
@@ -695,6 +699,7 @@ where
                     private_storage_threads: state.private_storage_threads,
                     system_font_service: state.system_font_service,
                     sw_managers: Default::default(),
+                    web_locks: Default::default(),
                     browsing_context_group_set: Default::default(),
                     browsing_context_group_next_id: Default::default(),
                     message_ports: Default::default(),
@@ -1796,6 +1801,9 @@ where
             },
             ScriptToConstellationMessage::ScriptNewIFrame(load_info) => {
                 self.handle_script_new_iframe(load_info);
+            },
+            ScriptToConstellationMessage::WebLock(message) => {
+                self.web_locks.handle_message(source_pipeline_id, message);
             },
             ScriptToConstellationMessage::CreateAuxiliaryWebView(load_info) => {
                 self.handle_script_new_auxiliary(load_info);
@@ -3048,6 +3056,9 @@ where
             set.remove(&pipeline_id);
             !set.is_empty()
         });
+
+        // Release any Web Locks the pipeline's globals did not release themselves.
+        self.web_locks.pipeline_exited(pipeline_id);
 
         // Now that the Script and Constellation parts of Servo no longer have a reference to
         // this pipeline, tell `Paint` that it has shut down. This is delayed until the

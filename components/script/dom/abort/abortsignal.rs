@@ -30,6 +30,7 @@ use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
+use crate::dom::lockmanager::WebLockAbortRequest;
 use crate::dom::readablestream::PipeTo;
 use crate::fetch::fetch::{DeferredFetchRecordId, FetchContext};
 use crate::realms::enter_auto_realm;
@@ -54,6 +55,8 @@ pub(crate) enum AbortAlgorithm {
     ),
     /// <https://fetch.spec.whatwg.org/#dom-window-fetchlater>
     FetchLater(#[no_trace] DeferredFetchRecordId),
+    /// <https://w3c.github.io/web-locks/#dom-lockmanager-request>
+    WebLockRequest(WebLockAbortRequest),
 }
 
 #[derive(Clone, JSTraceable, MallocSizeOf)]
@@ -202,6 +205,11 @@ impl AbortSignal {
                     .fetch_group()
                     .deferred_fetch_record_for_id(deferred_fetch_record_id)
                     .abort();
+            },
+            AbortAlgorithm::WebLockRequest(request) => {
+                rooted!(&in(cx) let mut reason = UndefinedValue());
+                reason.set(self.abort_reason.get());
+                request.run(cx, reason.handle());
             },
             AbortAlgorithm::DomEventListener(removable_listener) => {
                 removable_listener.event_target.remove_event_listener(
