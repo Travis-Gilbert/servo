@@ -42,7 +42,7 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::indexeddb::idbcursor::{IDBCursor, IterationParam, ObjectStoreOrIndex};
 use crate::dom::indexeddb::idbcursorwithvalue::IDBCursorWithValue;
 use crate::dom::indexeddb::idbindex::IDBIndex;
-use crate::dom::indexeddb::idbrequest::IDBRequest;
+use crate::dom::indexeddb::idbrequest::{IDBRequest, RequestSource};
 use crate::dom::indexeddb::idbtransaction::IDBTransaction;
 use crate::indexeddb::{
     ExtractionResult, can_inject_key_into_value, convert_value_to_key, convert_value_to_key_range,
@@ -433,6 +433,7 @@ impl IDBObjectStore {
     pub(crate) fn store_record_with_known_key(
         &self,
         cx: &mut JSContext,
+        source: RequestSource,
         value: HandleValue,
         key: &IndexedDBKeyType,
     ) -> Fallible<DomRoot<IDBRequest>> {
@@ -458,9 +459,10 @@ impl IDBObjectStore {
         // Storing a record also rebuilds its index records, so they are extracted from the
         // finished clone and travel with the operation, exactly as they do for `put`.
         let index_updates = self.extract_index_updates(cx, cloned_js_value.handle())?;
-        IDBRequest::execute_async_with_context(
+        IDBRequest::execute_async_from_source(
             cx,
             self,
+            source,
             KvsOperationContext {
                 target: KvsOperationTarget::ObjectStore,
                 index_updates,
@@ -486,11 +488,14 @@ impl IDBObjectStore {
     pub(crate) fn delete_record_with_known_key(
         &self,
         cx: &mut JSContext,
+        source: RequestSource,
         key: &IndexedDBKeyType,
     ) -> Fallible<DomRoot<IDBRequest>> {
-        IDBRequest::execute_async(
+        IDBRequest::execute_async_from_source(
             cx,
             self,
+            source,
+            KvsOperationContext::default(),
             |callback| {
                 AsyncOperation::ReadWrite(AsyncReadWriteOperation::RemoveItem {
                     callback,

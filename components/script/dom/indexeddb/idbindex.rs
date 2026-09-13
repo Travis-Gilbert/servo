@@ -26,7 +26,7 @@ use crate::dom::idbobjectstore::KeyPath;
 use crate::dom::indexeddb::idbcursor::{IDBCursor, IterationParam, ObjectStoreOrIndex};
 use crate::dom::indexeddb::idbcursorwithvalue::IDBCursorWithValue;
 use crate::dom::indexeddb::idbobjectstore::IDBObjectStore;
-use crate::dom::indexeddb::idbrequest::IDBRequest;
+use crate::dom::indexeddb::idbrequest::{IDBRequest, RequestSource};
 use crate::indexeddb::convert_value_to_key_range;
 
 #[dom_struct]
@@ -199,9 +199,10 @@ impl IDBIndex {
             count: None,
         };
 
-        IDBRequest::execute_async_with_context(
+        IDBRequest::execute_async_from_source(
             cx,
             &self.object_store,
+            RequestSource::Index(Dom::from_ref(self)),
             self.operation_context(),
             |callback| {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
@@ -325,9 +326,10 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
         // Step 7. Return the result (an IDBRequest) of running asynchronously execute a request
         // with this and operation.
         serialized_query.and_then(|q| {
-            IDBRequest::execute_async_with_context(
+            IDBRequest::execute_async_from_source(
                 cx,
                 &self.object_store,
+                RequestSource::Index(Dom::from_ref(self)),
                 self.operation_context(),
                 |callback| {
                     AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetItem {
@@ -362,9 +364,10 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
         // Step 7. Return the result (an IDBRequest) of running asynchronously execute a request
         // with this and operation.
         serialized_query.and_then(|q| {
-            IDBRequest::execute_async_with_context(
+            IDBRequest::execute_async_from_source(
                 cx,
                 &self.object_store,
+                RequestSource::Index(Dom::from_ref(self)),
                 self.operation_context(),
                 |callback| {
                     AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetKey {
@@ -404,9 +407,10 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
         // Step 7. Return the result (an IDBRequest) of running asynchronously execute a request
         // with this and operation.
         serialized_query.and_then(|q| {
-            IDBRequest::execute_async_with_context(
+            IDBRequest::execute_async_from_source(
                 cx,
                 &self.object_store,
+                RequestSource::Index(Dom::from_ref(self)),
                 self.operation_context(),
                 |callback| {
                     AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllItems {
@@ -447,9 +451,10 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
         // Step 7. Return the result (an IDBRequest) of running asynchronously execute a request
         // with this and operation.
         serialized_query.and_then(|q| {
-            IDBRequest::execute_async_with_context(
+            IDBRequest::execute_async_from_source(
                 cx,
                 &self.object_store,
+                RequestSource::Index(Dom::from_ref(self)),
                 self.operation_context(),
                 |callback| {
                     AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllKeys {
@@ -485,9 +490,10 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
         // Step 7. Return the result (an IDBRequest) of running asynchronously execute a request
         // with this and operation.
         serialized_query.and_then(|q| {
-            IDBRequest::execute_async_with_context(
+            IDBRequest::execute_async_from_source(
                 cx,
                 &self.object_store,
+                RequestSource::Index(Dom::from_ref(self)),
                 self.operation_context(),
                 |callback| {
                     AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Count {

@@ -11,6 +11,7 @@ use js::jsapi::Heap;
 use js::jsval::{DoubleValue, JSVal, ObjectValue, UndefinedValue};
 use js::rust::HandleValue;
 use profile_traits::generic_callback::GenericCallback;
+use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{DomObject, reflect_dom_object_with_cx};
 use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::GenericSend;
@@ -25,22 +26,38 @@ use crate::dom::bindings::codegen::Bindings::IDBRequestBinding::{
     IDBRequestMethods, IDBRequestReadyState,
 };
 use crate::dom::bindings::codegen::Bindings::IDBTransactionBinding::IDBTransactionMode;
+use crate::dom::bindings::codegen::UnionTypes::IDBObjectStoreOrIDBIndexOrIDBCursor;
 use crate::dom::bindings::error::{Error, Fallible, create_dom_exception};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
-use crate::dom::bindings::root::{DomRoot, MutNullableDom};
+use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::structuredclone;
 use crate::dom::domexception::DOMException;
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
-use crate::dom::indexeddb::idbcursor::{IterationParam, iterate_cursor};
+use crate::dom::indexeddb::idbcursor::{IDBCursor, IterationParam, iterate_cursor};
 use crate::dom::indexeddb::idbcursorwithvalue::IDBCursorWithValue;
+use crate::dom::indexeddb::idbindex::IDBIndex;
 use crate::dom::indexeddb::idbobjectstore::IDBObjectStore;
 use crate::dom::indexeddb::idbtransaction::IDBTransaction;
 use crate::indexeddb::key_type_to_jsval;
 use crate::realms::enter_auto_realm;
+
+/// <https://www.w3.org/TR/IndexedDB-3/#request-source>
+///
+/// Every request reaches the backend through an object store, because that is what names the
+/// records on the wire, but the source the spec exposes is whichever surface the method was
+/// called on. `IDBIndex`'s eight operations and `IDBCursor`'s `update` and `delete` all travel
+/// over an object store while reporting the index or the cursor as their source.
+#[derive(JSTraceable, MallocSizeOf)]
+#[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
+pub(crate) enum RequestSource {
+    ObjectStore(Dom<IDBObjectStore>),
+    Index(Dom<IDBIndex>),
+    Cursor(Dom<IDBCursor>),
+}
 
 #[derive(Clone)]
 struct RequestListener {
@@ -419,7 +436,7 @@ pub struct IDBRequest {
     #[ignore_malloc_size_of = "mozjs"]
     result: Heap<JSVal>,
     error: MutNullableDom<DOMException>,
-    source: MutNullableDom<IDBObjectStore>,
+    source: DomRefCell<Option<RequestSource>>,
     transaction: MutNullableDom<IDBTransaction>,
     ready_state: Cell<IDBRequestReadyState>,
 }
@@ -441,8 +458,8 @@ impl IDBRequest {
         reflect_dom_object_with_cx(Box::new(IDBRequest::new_inherited()), global, cx)
     }
 
-    pub fn set_source(&self, source: Option<&IDBObjectStore>) {
-        self.source.set(source);
+    pub(crate) fn set_source(&self, source: RequestSource) {
+        *self.source.borrow_mut() = Some(source);
     }
 
     pub fn set_ready_state_done(&self) {
@@ -491,7 +508,7 @@ impl IDBRequest {
     // https://www.w3.org/TR/IndexedDB-3/#asynchronously-execute-a-request
     pub fn execute_async<T, F>(
         cx: &mut JSContext,
-        source: &IDBObjectStore,
+        store: &IDBObjectStore,
         operation_fn: F,
         request: Option<DomRoot<IDBRequest>>,
         iteration_param: Option<IterationParam>,
@@ -502,8 +519,38 @@ impl IDBRequest {
     {
         Self::execute_async_with_context(
             cx,
-            source,
+            store,
             KvsOperationContext::default(),
+            operation_fn,
+            request,
+            iteration_param,
+        )
+    }
+
+    /// `asynchronously execute a request` where the request's source is not the object store
+    /// that carries the transaction and the store name.
+    ///
+    /// Only `IDBIndex` and `IDBCursor` need this. Everything the backend is told still derives
+    /// from `store`; `source` is the DOM surface the method was called on, and the two are not
+    /// the same thing.
+    pub(crate) fn execute_async_from_source<T, F>(
+        cx: &mut JSContext,
+        store: &IDBObjectStore,
+        source: RequestSource,
+        context: KvsOperationContext,
+        operation_fn: F,
+        request: Option<DomRoot<IDBRequest>>,
+        iteration_param: Option<IterationParam>,
+    ) -> Fallible<DomRoot<IDBRequest>>
+    where
+        T: Into<IdbResult> + for<'a> Deserialize<'a> + Serialize + Send + Sync + 'static,
+        F: FnOnce(GenericCallback<BackendResult<T>>) -> AsyncOperation,
+    {
+        Self::execute_async_inner(
+            cx,
+            store,
+            Some(source),
+            context,
             operation_fn,
             request,
             iteration_param,
@@ -521,7 +568,23 @@ impl IDBRequest {
     /// variants, only the context that selects which records they range over.
     pub fn execute_async_with_context<T, F>(
         cx: &mut JSContext,
-        source: &IDBObjectStore,
+        store: &IDBObjectStore,
+        context: KvsOperationContext,
+        operation_fn: F,
+        request: Option<DomRoot<IDBRequest>>,
+        iteration_param: Option<IterationParam>,
+    ) -> Fallible<DomRoot<IDBRequest>>
+    where
+        T: Into<IdbResult> + for<'a> Deserialize<'a> + Serialize + Send + Sync + 'static,
+        F: FnOnce(GenericCallback<BackendResult<T>>) -> AsyncOperation,
+    {
+        Self::execute_async_inner(cx, store, None, context, operation_fn, request, iteration_param)
+    }
+
+    fn execute_async_inner<T, F>(
+        cx: &mut JSContext,
+        store: &IDBObjectStore,
+        source: Option<RequestSource>,
         context: KvsOperationContext,
         operation_fn: F,
         request: Option<DomRoot<IDBRequest>>,
@@ -532,7 +595,7 @@ impl IDBRequest {
         F: FnOnce(GenericCallback<BackendResult<T>>) -> AsyncOperation,
     {
         // Step 1: Let transaction be the transaction associated with source.
-        let transaction = source.transaction();
+        let transaction = store.transaction();
         let global = transaction.global();
         // Step 2: Assert: transaction is active.
         if !transaction.is_active() || !transaction.is_usable() {
@@ -544,7 +607,9 @@ impl IDBRequest {
         // Step 3: If request was not given, let request be a new request with source as source.
         let request = request.unwrap_or_else(|| {
             let new_request = IDBRequest::new(cx, &global);
-            new_request.set_source(Some(source));
+            new_request.set_source(
+                source.unwrap_or_else(|| RequestSource::ObjectStore(Dom::from_ref(store))),
+            );
             new_request.set_transaction(&transaction);
             new_request
         });
@@ -611,7 +676,7 @@ impl IDBRequest {
             .send(IndexedDBThreadMsg::Async(
                 global.origin().immutable().clone(),
                 String::from(transaction.get_db_name()),
-                String::from(source.get_name()),
+                String::from(store.get_name()),
                 context,
                 transaction.get_serial_number(),
                 request_id,
@@ -658,8 +723,23 @@ impl IDBRequestMethods<crate::DomTypeHolder> for IDBRequest {
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbrequest-source>
-    fn GetSource(&self) -> Option<DomRoot<IDBObjectStore>> {
-        self.source.get()
+    fn GetSource(&self) -> Option<IDBObjectStoreOrIDBIndexOrIDBCursor> {
+        // A cursor's reflector is the `IDBCursorWithValue` object when the cursor has one, so
+        // rooting it as an `IDBCursor` still hands script back the object it already holds.
+        self.source
+            .borrow()
+            .as_ref()
+            .map(|source| match source {
+                RequestSource::ObjectStore(store) => {
+                    IDBObjectStoreOrIDBIndexOrIDBCursor::IDBObjectStore(store.as_rooted())
+                },
+                RequestSource::Index(index) => {
+                    IDBObjectStoreOrIDBIndexOrIDBCursor::IDBIndex(index.as_rooted())
+                },
+                RequestSource::Cursor(cursor) => {
+                    IDBObjectStoreOrIDBIndexOrIDBCursor::IDBCursor(cursor.as_rooted())
+                },
+            })
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbrequest-transaction>
