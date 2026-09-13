@@ -100,8 +100,14 @@ impl IDBDatabase {
         self.name.clone()
     }
 
+    /// The connection's object store set, as `objectStoreNames` reports it.
+    ///
+    /// <https://w3c.github.io/IndexedDB/#dom-idbdatabase-objectstorenames> and
+    /// <https://w3c.github.io/IndexedDB/#dom-idbtransaction-objectstorenames> both sort, and an
+    /// upgrade transaction reads its names through here, so the sort belongs on this side rather
+    /// than on each caller.
     pub fn object_stores(&self, cx: &mut JSContext) -> DomRoot<DOMStringList> {
-        DOMStringList::new(cx, &self.global(), self.object_store_names.borrow().clone())
+        DOMStringList::new_sorted(cx, &self.global(), &*self.object_store_names.borrow())
     }
 
     pub(crate) fn object_store_names_snapshot(&self) -> Vec<DOMString> {
@@ -444,7 +450,7 @@ impl IDBDatabaseMethods<crate::DomTypeHolder> for IDBDatabase {
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbdatabase-objectstorenames>
     fn ObjectStoreNames(&self, cx: &mut JSContext) -> DomRoot<DOMStringList> {
-        DOMStringList::new_sorted(cx, &self.global(), &*self.object_store_names.borrow())
+        self.object_stores(cx)
     }
 
     /// <https://w3c.github.io/IndexedDB/#dom-idbdatabase-close>
