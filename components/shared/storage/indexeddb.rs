@@ -595,6 +595,12 @@ pub enum AsyncSchemaOperation {
     DeleteObjectStore {
         callback: GenericCallback<BackendError>,
     },
+    /// Rename an existing object store in the database.
+    /// The store being renamed is the one named by the message's `store_name`.
+    RenameObjectStore {
+        callback: GenericCallback<BackendError>,
+        new_name: String,
+    },
 }
 
 impl AsyncSchemaOperation {
@@ -607,6 +613,9 @@ impl AsyncSchemaOperation {
                 let _ = callback.send(error);
             },
             AsyncSchemaOperation::DeleteObjectStore { callback, .. } => {
+                let _ = callback.send(error);
+            },
+            AsyncSchemaOperation::RenameObjectStore { callback, .. } => {
                 let _ = callback.send(error);
             },
         };
