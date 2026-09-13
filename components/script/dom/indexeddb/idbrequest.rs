@@ -521,7 +521,7 @@ impl RequestListener {
                             None => Ok(()),
                         });
                     if let Err(e) = result {
-                        warn!("Error reading structuredclone data");
+                        warn!("Error reading the stored record");
                         self.handle_async_request_error(&global, cx, request, e);
                         return;
                     };
@@ -550,7 +550,7 @@ impl RequestListener {
                         let cursor = match iterate_cursor(&global, cx, param, records) {
                             Ok(cursor) => cursor,
                             Err(e) => {
-                                warn!("Error reading structuredclone data");
+                                warn!("Error reading the cursor's record");
                                 self.handle_async_request_error(&global, cx, request, e);
                                 return;
                             },
@@ -593,14 +593,14 @@ impl RequestListener {
                                 GetAllKind::Values => (|| {
                                     let data = postcard::from_bytes(&record.value)
                                         .map_err(|_| Error::Data(None))?;
-                                    // The deserialized message ports belong to the value, which
-                                    // is now rooted in the array. Nothing here owns them.
                                     structuredclone::read(
                                         cx,
                                         &global,
                                         data,
                                         array.handle_mut_at(i),
                                     )?;
+                                    // The deserialized message ports belong to the value, which
+                                    // is now rooted in the array. Nothing here owns them.
                                     // A store that generates keys into an in-line key path does
                                     // not write the key into the value, so it goes back in here.
                                     if let Some(store) = &store {

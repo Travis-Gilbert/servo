@@ -16,6 +16,7 @@ use storage_traits::indexeddb::{
     BackendError, BackendResult, BackfillIndexResult, CreateObjectResult, IndexBackfillEntry,
     IndexedDBDescription, IndexedDBIndex, IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord,
     IndexedDBTxnMode, KeyPath, KvsEngine, KvsIndexUpdate, KvsOperationTarget, KvsTransaction,
+    RecordKeyPlacement,
     PutItemResult, RecordsShape,
 };
 
@@ -1232,16 +1233,31 @@ impl KvsEngine for SqliteEngine {
                                 )
                             },
                         };
-                        // An index whose key path is the store's key path indexes the record
-                        // under the key the record is stored under. Script cannot extract that
-                        // key from a value it was never injected into, so it marks the update and
-                        // the key is filled in here, ahead of the uniqueness check `put_item`
+                        // An index whose key path reaches the store's key path indexes the
+                        // record under the key the record is stored under. Script cannot extract
+                        // that key from a value it was never injected into, so it names the hole
+                        // and the key is filled in here, ahead of the uniqueness check `put_item`
                         // runs.
                         let mut index_updates = context.index_updates;
                         for update in &mut index_updates {
-                            if update.keys_are_the_record_key {
-                                update.keys = vec![key.clone()];
-                            }
+                            update.keys = match update.record_key_placement.take() {
+                                None => continue,
+                                // The index is on the store's own key path.
+                                Some(RecordKeyPlacement::WholeKey) => vec![key.clone()],
+                                // The index is on a sequence that lists the store's key path, so
+                                // the generated key fills each hole the script layer left.
+                                Some(RecordKeyPlacement::InSequence(components)) => {
+                                    vec![IndexedDBKeyType::Array(
+                                        components
+                                            .into_iter()
+                                            .map(|component| match component {
+                                                Some(component) => component,
+                                                None => key.clone(),
+                                            })
+                                            .collect(),
+                                    )]
+                                },
+                            };
                         }
                         let _ = callback.send(
                             Self::put_item(

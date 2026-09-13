@@ -20,6 +20,7 @@ use storage_traits::indexeddb::{
     self, AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, AsyncSchemaOperation,
     BackfillIndexResult, IndexBackfillEntry, IndexedDBKeyRange, IndexedDBKeyType,
     IndexedDBRecord, IndexedDBThreadMsg, KvsIndexUpdate, KvsOperationContext, KvsOperationTarget,
+    RecordKeyPlacement,
     RecordsShape,
 };
 
@@ -97,6 +98,23 @@ struct IDBObjectStoreRollbackState {
     rollback_name: Option<DOMString>,
     #[no_trace]
     rollback_indexes: Vec<indexeddb::IndexedDBIndex>,
+}
+
+/// How far an index's key path reaches into the store's key path, for a record whose key the
+/// engine has not generated yet.
+///
+/// `Untouched` is the ordinary case: the value carries everything the index needs. The other
+/// three say the engine has to finish the key, or that the record earns no entry at all.
+enum RecordKeyReach {
+    /// The index's key path does not name the store's key path.
+    Untouched,
+    /// The index's key is the record's key.
+    WholeKey,
+    /// The index's key is a sequence, with the record's key at each `None`.
+    InSequence(Vec<Option<IndexedDBKeyType>>),
+    /// The index's key path reaches the store's key path, but another component of the sequence
+    /// did not evaluate to a valid key, so the record earns no entry in this index.
+    Dropped,
 }
 
 #[dom_struct]
@@ -297,18 +315,59 @@ impl IDBObjectStore {
         self.has_key_generator
     }
 
-    /// Whether an index's key path names exactly what the store's key path names.
+    /// Where this index's key path reaches the store's key path, for a record whose key the
+    /// engine has not generated yet.
     ///
     /// Only a `String` key path can belong to a store with a key generator; `createObjectStore`
-    /// refuses `autoIncrement` beside a sequence key path or an empty one, so a sequence here is
-    /// never the store's own key path.
-    fn index_key_path_is_the_store_key_path(&self, index_key_path: &KeyPath) -> bool {
-        match (self.key_path.as_ref(), index_key_path) {
-            (Some(KeyPath::String(store_path)), KeyPath::String(index_path)) => {
-                store_path == index_path
-            },
-            _ => false,
+    /// refuses `autoIncrement` beside a sequence key path or an empty one. An index has no such
+    /// restriction, so it reaches the store's key path either by naming it outright or by listing
+    /// it among the components of a sequence, and `idbobjectstore_createIndex.any.js` builds both.
+    #[expect(unsafe_code)]
+    fn record_key_reach(
+        &self,
+        cx: &mut JSContext,
+        value: HandleValue,
+        index_key_path: &KeyPath,
+    ) -> Fallible<RecordKeyReach> {
+        let Some(KeyPath::String(store_path)) = self.key_path.as_ref() else {
+            return Ok(RecordKeyReach::Untouched);
+        };
+        let KeyPath::StringSequence(components) = index_key_path else {
+            return Ok(match index_key_path {
+                KeyPath::String(index_path) if index_path == store_path => {
+                    RecordKeyReach::WholeKey
+                },
+                _ => RecordKeyReach::Untouched,
+            });
+        };
+        if !components.iter().any(|component| component == store_path) {
+            return Ok(RecordKeyReach::Untouched);
         }
+        // A sequence key path evaluates one component at a time and fails as a whole if any one
+        // of them fails, so the components that are not the record's key are extracted here one
+        // by one and a single failure takes the record out of this index. `createIndex` refuses
+        // `multiEntry` beside a sequence key path, so every component is a plain key.
+        let mut extracted = Vec::with_capacity(components.len());
+        for component in components {
+            if component == store_path {
+                extracted.push(None);
+                continue;
+            }
+            let result = extract_key(cx, value, &KeyPath::String(component.clone()), Some(false));
+            match result {
+                Ok(ExtractionResult::Key(key)) => extracted.push(Some(key)),
+                Ok(ExtractionResult::Invalid | ExtractionResult::Failure) => {
+                    return Ok(RecordKeyReach::Dropped);
+                },
+                // An exception thrown while evaluating one component takes the record out of the
+                // index the same way a failure does, and the pending exception has to go with it.
+                Err(_) => {
+                    unsafe { JS_ClearPendingException(cx) };
+                    return Ok(RecordKeyReach::Dropped);
+                },
+            }
+        }
+        Ok(RecordKeyReach::InSequence(extracted))
     }
 
     /// Put the record's key back into a value the store never wrote it into.
@@ -510,7 +569,7 @@ impl IDBObjectStore {
         Ok(())
     }
 
-    /// The index records this store's declared indexes produce for `value`.
+    /// The index records this store's declared indexes produce for `value`, one update per index.
     ///
     /// This is steps 6.1 through 6.4 of "store a record into an object store". Only the script
     /// thread can run them: an index key is extracted by evaluating a key path against the
@@ -521,20 +580,13 @@ impl IDBObjectStore {
     /// what makes an index sparse. A multiEntry index contributes one record per distinct element
     /// of its extracted array key; every other index contributes one record. Uniqueness is left
     /// to the backend, which is the only place that can see the records already stored.
-    #[expect(unsafe_code)]
-    /// The index records a stored value produces, one update per index.
     ///
     /// `key_comes_from_the_generator` says the engine has not chosen this record's key yet, so
-    /// the value does not carry it. An index whose key path is the store's key path indexes a
-    /// record under that same key, and extracting it from this value therefore fails. Those
-    /// indexes are marked rather than dropped, and the engine fills their key in once it has
-    /// generated one.
-    ///
-    /// Known gap: an index whose key path is a sequence with the store's key path among its
-    /// components is dropped rather than marked, because the mark is one key and filling one
-    /// position of a sequence needs the position on the wire. No test in
-    /// `tests/wpt/tests/IndexedDB` builds one, and `resources/reading-autoincrement-common.js`
-    /// builds the plain case this handles.
+    /// the value does not carry it. An index that reaches the store's key path indexes the record
+    /// under that key, so extracting it from this value fails. Those indexes carry a
+    /// `RecordKeyPlacement` rather than a key, and the engine fills the hole once it has
+    /// generated one. `record_key_reach` is what tells the cases apart.
+    #[expect(unsafe_code)]
     fn extract_index_updates(
         &self,
         cx: &mut JSContext,
@@ -557,6 +609,31 @@ impl IDBObjectStore {
             .collect::<Vec<_>>();
         let mut updates = Vec::with_capacity(indexes.len());
         for (index_name, key_path, multi_entry) in indexes {
+            // An index that reaches the store's key path indexes the record under a key that is
+            // not in this value, so it is answered before extraction rather than by it.
+            let reach = if key_comes_from_the_generator {
+                self.record_key_reach(cx, value, &key_path)?
+            } else {
+                RecordKeyReach::Untouched
+            };
+            let placement = match reach {
+                // Step 6.2. A component that did not evaluate to a valid key takes the record out
+                // of this index, the same as any other extraction failure.
+                RecordKeyReach::Dropped => continue,
+                RecordKeyReach::WholeKey => Some(RecordKeyPlacement::WholeKey),
+                RecordKeyReach::InSequence(components) => {
+                    Some(RecordKeyPlacement::InSequence(components))
+                },
+                RecordKeyReach::Untouched => None,
+            };
+            if let Some(placement) = placement {
+                updates.push(KvsIndexUpdate {
+                    index_name,
+                    keys: Vec::new(),
+                    record_key_placement: Some(placement),
+                });
+                continue;
+            }
             // Step 6.1. Let index key be the result of extracting a key from a value using a key
             // path with value, index's key path, and index's multiEntry flag.
             let extracted = match extract_key(cx, value, &key_path, Some(multi_entry)) {
@@ -576,27 +653,13 @@ impl IDBObjectStore {
                 ExtractionResult::Key(IndexedDBKeyType::Array(elements)) if multi_entry => elements,
                 // Step 6.3. Otherwise the whole extracted key is the one index key.
                 ExtractionResult::Key(key) => vec![key],
-                // An index on the store's own key path finds nothing in a value the generated key
-                // has not been injected into. The engine fills this in with the key it generates,
-                // before it checks the index for a uniqueness conflict.
-                ExtractionResult::Failure
-                    if key_comes_from_the_generator
-                        && self.index_key_path_is_the_store_key_path(&key_path) =>
-                {
-                    updates.push(KvsIndexUpdate {
-                        index_name,
-                        keys: Vec::new(),
-                        keys_are_the_record_key: true,
-                    });
-                    continue;
-                },
                 // Step 6.2. Invalid or failure leaves the record out of this index.
                 ExtractionResult::Invalid | ExtractionResult::Failure => continue,
             };
             updates.push(KvsIndexUpdate {
                 index_name,
                 keys,
-                keys_are_the_record_key: false,
+                record_key_placement: None,
             });
         }
         Ok(updates)
