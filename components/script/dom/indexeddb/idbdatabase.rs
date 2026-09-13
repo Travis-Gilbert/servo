@@ -42,6 +42,9 @@ pub struct IDBDatabase {
     object_store_names: DomRefCell<Vec<DOMString>>,
     /// <https://w3c.github.io/IndexedDB/#database-upgrade-transaction>
     upgrade_transaction: MutNullableDom<IDBTransaction>,
+    /// Serial of the upgrade transaction most recently cleared successfully. This distinguishes
+    /// an idempotent repeated cleanup from an unrelated cleanup request after state was lost.
+    last_cleared_upgrade_transaction: Cell<Option<u64>>,
 
     #[no_trace]
     id: Uuid,
@@ -51,6 +54,37 @@ pub struct IDBDatabase {
     close_pending: Cell<bool>,
 }
 
+pub(crate) enum UpgradeTransactionClear {
+    Cleared,
+    AlreadyCleared,
+}
+
+pub(crate) enum UpgradeTransactionClearError {
+    Missing {
+        requested: u64,
+        last_cleared: Option<u64>,
+    },
+    Mismatch {
+        requested: u64,
+        current: u64,
+    },
+}
+
+fn classify_upgrade_transaction_clear(
+    current: Option<u64>,
+    last_cleared: Option<u64>,
+    requested: u64,
+) -> Result<UpgradeTransactionClear, UpgradeTransactionClearError> {
+    match current {
+        Some(current) if current == requested => Ok(UpgradeTransactionClear::Cleared),
+        Some(current) => Err(UpgradeTransactionClearError::Mismatch { requested, current }),
+        None if last_cleared == Some(requested) => Ok(UpgradeTransactionClear::AlreadyCleared),
+        None => Err(UpgradeTransactionClearError::Missing {
+            requested,
+            last_cleared,
+        }),
+    }
+}
 impl IDBDatabase {
     pub fn new_inherited(
         name: DOMString,
@@ -67,6 +101,7 @@ impl IDBDatabase {
                 object_store_names.into_iter().map(Into::into).collect(),
             ),
             upgrade_transaction: Default::default(),
+            last_cleared_upgrade_transaction: Cell::new(None),
             close_pending: Cell::new(false),
         }
     }
@@ -150,23 +185,32 @@ impl IDBDatabase {
         self.upgrade_transaction.set(Some(transaction));
     }
 
-    pub(crate) fn clear_upgrade_transaction(&self, transaction: &IDBTransaction) {
-        // Both callers reach this from an upgrade transaction that finished, so the connection
-        // should still be holding it. With nothing set there is nothing to clear, which is the
-        // state this method exists to reach.
-        let Some(current) = self.upgrade_transaction.get() else {
-            warn!("clear_upgrade_transaction called but no upgrade transaction is set.");
-            return;
-        };
+    pub(crate) fn clear_upgrade_transaction(
+        &self,
+        transaction: &IDBTransaction,
+    ) -> Result<UpgradeTransactionClear, UpgradeTransactionClearError> {
+        let requested = transaction.get_serial_number();
+        let current = self
+            .upgrade_transaction
+            .get()
+            .map(|transaction| transaction.get_serial_number());
+        let result = classify_upgrade_transaction_clear(
+            current,
+            self.last_cleared_upgrade_transaction.get(),
+            requested,
+        );
 
-        // A connection holds one upgrade transaction at a time, so the caller should be it.
-        // Clearing regardless is what the release build has always done, and leaving a
-        // transaction set here would keep the connection out of an upgrade forever.
-        if &*current != transaction {
-            warn!("clear_upgrade_transaction called with non-current transaction.");
+        match result {
+            Ok(UpgradeTransactionClear::Cleared) => {
+                self.upgrade_transaction.set(None);
+                self.last_cleared_upgrade_transaction.set(Some(requested));
+            },
+            Ok(UpgradeTransactionClear::AlreadyCleared) => {},
+            Err(error) => {
+                warn!("Could not clear IndexedDB upgrade transaction: {error:?}");
+            },
         }
-
-        self.upgrade_transaction.set(None);
+        result
     }
 
     /// <https://w3c.github.io/IndexedDB/#eventdef-idbdatabase-versionchange>
@@ -365,29 +409,25 @@ impl IDBDatabaseMethods<crate::DomTypeHolder> for IDBDatabase {
             },
         });
 
-        match transaction.create_abort_callback() {
-            Some(callback) => {
-                let operation = AsyncSchemaOperation::CreateObjectStore {
-                    callback,
-                    key_path: key_paths,
-                    auto_increment,
-                };
-
-                if transaction
-                    .send_or_hold(IndexedDBThreadMsg::AsyncSchemaOperation {
-                        origin: self.global().origin().immutable().clone(),
-                        database_name: self.name.to_string(),
-                        store_name: name.to_string(),
-                        operation,
-                        transaction_serial_number: transaction.get_serial_number(),
-                    })
-                    .is_err()
-                {
-                    warn!("Could not send AsyncSchemaOperation");
-                }
-            },
-            None => warn!("Could not send AsyncSchemaOperation"),
-        }
+        let operation = AsyncSchemaOperation::CreateObjectStore {
+            callback: transaction.create_abort_callback()?,
+            key_path: key_paths,
+            auto_increment,
+        };
+        transaction
+            .send_or_hold(IndexedDBThreadMsg::AsyncSchemaOperation {
+                origin: self.global().origin().immutable().clone(),
+                database_name: self.name.to_string(),
+                store_name: name.to_string(),
+                operation,
+                transaction_serial_number: transaction.get_serial_number(),
+            })
+            .map_err(|()| {
+                warn!("Could not send CreateObjectStore to the IndexedDB backend");
+                Error::Operation(Some(
+                    "Could not send the create object store operation".to_owned(),
+                ))
+            })?;
 
         self.object_store_names.borrow_mut().push(name);
         transaction.register_object_store_handle(&object_store.get_name(), &object_store);
@@ -415,6 +455,27 @@ impl IDBDatabaseMethods<crate::DomTypeHolder> for IDBDatabase {
             return Err(Error::NotFound(None));
         }
 
+        // Queue destruction before mutating the connection and handle metadata. If callback
+        // construction or transport fails, script receives the structured failure while its
+        // view still agrees with the backend.
+        let operation = AsyncSchemaOperation::DeleteObjectStore {
+            callback: transaction.create_abort_callback()?,
+        };
+        transaction
+            .send_or_hold(IndexedDBThreadMsg::AsyncSchemaOperation {
+                origin: self.global().origin().immutable().clone(),
+                database_name: self.name.to_string(),
+                store_name: name.to_string(),
+                operation,
+                transaction_serial_number: transaction.get_serial_number(),
+            })
+            .map_err(|()| {
+                warn!("Could not send DeleteObjectStore to the IndexedDB backend");
+                Error::Operation(Some(
+                    "Could not send the delete object store operation".to_owned(),
+                ))
+            })?;
+
         // Step 5
         self.object_store_names
             .borrow_mut()
@@ -424,26 +485,6 @@ impl IDBDatabaseMethods<crate::DomTypeHolder> for IDBDatabase {
         // transaction, remove all entries from its index set.
         if let Some(store) = transaction.object_store_handle(&name) {
             store.clear_index_set();
-        }
-
-        // Step 7
-        match transaction.create_abort_callback() {
-            Some(callback) => {
-                let operation = AsyncSchemaOperation::DeleteObjectStore { callback };
-                if transaction
-                    .send_or_hold(IndexedDBThreadMsg::AsyncSchemaOperation {
-                        origin: self.global().origin().immutable().clone(),
-                        database_name: self.name.to_string(),
-                        store_name: name.to_string(),
-                        operation,
-                        transaction_serial_number: transaction.get_serial_number(),
-                    })
-                    .is_err()
-                {
-                    warn!("Could not send AsyncSchemaOperation");
-                }
-            },
-            None => warn!("Could not send AsyncSchemaOperation"),
         }
 
         Ok(())
@@ -481,4 +522,40 @@ impl IDBDatabaseMethods<crate::DomTypeHolder> for IDBDatabase {
 
     // https://www.w3.org/TR/IndexedDB-3/#dom-idbdatabase-onversionchange
     event_handler!(versionchange, GetOnversionchange, SetOnversionchange);
+}
+
+mod tests {
+    use super::{
+        UpgradeTransactionClear, UpgradeTransactionClearError, classify_upgrade_transaction_clear,
+    };
+
+    #[test]
+    fn upgrade_cleanup_is_idempotent_only_for_the_last_cleared_transaction() {
+        assert_eq!(
+            classify_upgrade_transaction_clear(None, Some(7), 7),
+            Ok(UpgradeTransactionClear::AlreadyCleared)
+        );
+        assert_eq!(
+            classify_upgrade_transaction_clear(None, Some(7), 8),
+            Err(UpgradeTransactionClearError::Missing {
+                requested: 8,
+                last_cleared: Some(7),
+            })
+        );
+    }
+
+    #[test]
+    fn upgrade_cleanup_rejects_a_different_current_transaction() {
+        assert_eq!(
+            classify_upgrade_transaction_clear(Some(9), Some(7), 8),
+            Err(UpgradeTransactionClearError::Mismatch {
+                requested: 8,
+                current: 9,
+            })
+        );
+        assert_eq!(
+            classify_upgrade_transaction_clear(Some(8), Some(7), 8),
+            Ok(UpgradeTransactionClear::Cleared)
+        );
+    }
 }
