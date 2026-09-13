@@ -42,7 +42,7 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::indexeddb::idbdatabase::IDBDatabase;
 use crate::dom::indexeddb::idbobjectstore::{IDBObjectStore, IDBObjectStoreAbortState};
 use crate::dom::indexeddb::idbrequest::IDBRequest;
-use crate::indexeddb::map_backend_error_to_dom_error;
+use crate::indexeddb::{map_backend_error_to_dom_error, reply_lost};
 
 #[dom_struct]
 pub struct IDBTransaction {
@@ -155,6 +155,11 @@ impl IDBTransaction {
     }
 
     /// Does a blocking call to create a backend transaction and get its id.
+    ///
+    /// Fails when the backend cannot be reached, which `IDBDatabase.transaction()` turns into
+    /// a thrown exception. That is the one place an IndexedDB failure has nowhere else to go:
+    /// every other operation already owns a request to fail, and this one is what the request
+    /// would have belonged to.
     pub fn new(
         cx: &mut JSContext,
         global: &GlobalScope,
@@ -162,10 +167,10 @@ impl IDBTransaction {
         mode: IDBTransactionMode,
         durability: IDBTransactionDurability,
         scope: &DOMStringList,
-    ) -> DomRoot<IDBTransaction> {
+    ) -> Fallible<DomRoot<IDBTransaction>> {
         let serial_number =
-            IDBTransaction::create_transaction(global, connection.get_name(), mode, scope);
-        IDBTransaction::new_with_serial(
+            IDBTransaction::create_transaction(global, connection.get_name(), mode, scope)?;
+        Ok(IDBTransaction::new_with_serial(
             cx,
             global,
             connection,
@@ -173,7 +178,7 @@ impl IDBTransaction {
             durability,
             scope,
             serial_number,
-        )
+        ))
     }
 
     pub(crate) fn new_with_serial(
@@ -198,12 +203,17 @@ impl IDBTransaction {
         )
     }
 
+    /// Ask the backend to open a transaction and block until it answers with the identity.
+    ///
+    /// Each failure below is the storage thread being gone or not answering, which script can
+    /// do nothing about. What it can do is see an exception rather than a dead tab, which is
+    /// what these used to be: three panics on a path every `transaction()` call takes.
     fn create_transaction(
         global: &GlobalScope,
         db_name: DOMString,
         mode: IDBTransactionMode,
         scope: &DOMStringList,
-    ) -> u64 {
+    ) -> Fallible<u64> {
         let backend_mode = match mode {
             IDBTransactionMode::Readonly => IndexedDBTxnMode::Readonly,
             IDBTransactionMode::Readwrite => IndexedDBTxnMode::Readwrite,
@@ -213,20 +223,34 @@ impl IDBTransaction {
             .filter_map(|i| scope.Item(i))
             .map(String::from)
             .collect();
-        let (sender, receiver) = channel(global.time_profiler_chan().clone()).unwrap();
+        let Some((sender, receiver)) = channel(global.time_profiler_chan().clone()) else {
+            return Err(Error::Operation(Some(
+                "IndexedDB could not open a channel to the storage backend".to_owned(),
+            )));
+        };
 
-        global
+        let operation = SyncOperation::CreateTransaction {
+            sender,
+            origin: global.origin().immutable().clone(),
+            db_name: String::from(db_name),
+            mode: backend_mode,
+            scope,
+        };
+        if let Err(error) = global
             .storage_threads()
-            .send(IndexedDBThreadMsg::Sync(SyncOperation::CreateTransaction {
-                sender,
-                origin: global.origin().immutable().clone(),
-                db_name: String::from(db_name),
-                mode: backend_mode,
-                scope,
-            }))
-            .expect("Failed to send IndexedDBThreadMsg::Sync");
+            .send(IndexedDBThreadMsg::Sync(operation))
+        {
+            return Err(Error::Operation(Some(format!(
+                "IndexedDB could not reach the storage backend: {error:?}"
+            ))));
+        }
 
-        receiver.recv().unwrap().expect("CreateTransaction failed")
+        match receiver.recv() {
+            Ok(result) => result.map_err(map_backend_error_to_dom_error),
+            Err(error) => Err(map_backend_error_to_dom_error(BackendError::ReplyLost(
+                format!("{error:?}"),
+            ))),
+        }
     }
 
     /// <https://w3c.github.io/IndexedDB/#transaction-lifecycle>
@@ -365,8 +389,14 @@ impl IDBTransaction {
                 let task_source = task_source.clone();
                 task_source.queue(task!(handle_commit_result: move |cx| {
                     let this = this.root();
-                    let message = message.expect("Could not unwrap message");
-                    match message.result {
+                    // A commit whose answer was lost is not a commit that happened. Firing
+                    // `complete` at it would tell script that writes landed which may not
+                    // have, so it takes the same path as a commit the backend refused.
+                    let result = match message {
+                        Ok(message) => message.result,
+                        Err(error) => Err(reply_lost(error)),
+                    };
+                    match result {
                         Ok(()) => {
                             this.finalize_commit();
                         }
@@ -593,7 +623,13 @@ impl IDBTransaction {
                 let task_source = task_source.clone();
                 task_source.queue(task!(handle_abort_result: move || {
                     let this = this.root();
-                    let _ = message.expect("Could not unwrap message");
+                    // The abort is finalized whichever way the reply went. The backend was
+                    // told to abort, and a transaction that never finalizes stays wedged
+                    // with its requests unanswered, so a lost answer is worth reporting and
+                    // not worth stopping for.
+                    if let Err(error) = message {
+                        warn!("Lost the backend's answer to an abort: {error}");
+                    }
                     this.finalize_abort();
                 }));
             },
@@ -835,12 +871,11 @@ impl IDBTransaction {
 
         let _ = idb_sender.send(IndexedDBThreadMsg::Sync(operation));
 
-        // First unwrap for ipc
-        // Second unwrap will never happen unless this db gets manually deleted somehow
+        // A lost reply and a store the backend could not find are both `None` here, which the
+        // caller reads as the store not being there. The comments this replaces described
+        // unwraps that no longer exist.
         let object_store = receiver.recv().ok()?.ok()?;
 
-        // First unwrap for ipc
-        // Second unwrap will never happen unless this db gets manually deleted somehow
         let key_path = object_store.key_path.map(|key_path| match key_path {
             KeyPath::String(string) => StringOrStringSequence::String(string.into()),
             KeyPath::Sequence(seq) => {
@@ -867,8 +902,17 @@ impl IDBTransaction {
         GenericCallback::new(
             self.global().time_profiler_chan().clone(),
             move |error: Result<BackendError, ipc_channel::IpcError>| {
-                let Ok(error) = error else {
-                    return;
+                let error = match error {
+                    Ok(error) => error,
+                    // This callback exists only to carry the reason a schema operation
+                    // failed. Losing it loses the reason, not the abort, which the failing
+                    // operation drives on its own; but the reason is then gone for good,
+                    // so it is worth saying that it was lost.
+                    Err(error) => {
+                        return warn!(
+                            "Lost the reason an IndexedDB schema operation failed: {error}"
+                        );
+                    },
                 };
                 let trusted_transaction = trusted_transaction.clone();
                 task_source.queue(task!(delete_failed: move |cx| {

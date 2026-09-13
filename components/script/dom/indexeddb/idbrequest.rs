@@ -46,7 +46,7 @@ use crate::dom::indexeddb::idbobjectstore::IDBObjectStore;
 use crate::dom::indexeddb::idbrecord::IDBRecord;
 use crate::dom::indexeddb::idbtransaction::IDBTransaction;
 use crate::indexeddb::{
-    convert_value_to_key_range, is_potentially_valid_key_range, key_type_to_jsval,
+    convert_value_to_key_range, is_potentially_valid_key_range, key_type_to_jsval, reply_lost,
 };
 use crate::realms::enter_auto_realm;
 
@@ -1202,10 +1202,15 @@ impl IDBRequest {
 
         let closure = move |message: Result<BackendResult<T>, ipc_channel::IpcError>| {
             let response_listener = response_listener.clone();
+            // In multiprocess mode this runs on the router thread with a reply that crossed a
+            // process boundary, so it can arrive as a transport error. That is one request's
+            // failure, and it has a request to fail; panicking here would instead take down
+            // every page in the content process.
+            let result = message.unwrap_or_else(|error| Err(reply_lost(error)));
             task_source.queue(task!(request_callback: move |cx| {
                 response_listener.handle_async_request_finished(
                     cx,
-                    message.expect("Could not unwrap message").inspect_err(|e| {
+                    result.inspect_err(|e| {
                         if let BackendError::DbErr(e) = e {
                             error!("Error in IndexedDB operation: {}", e);
                         }

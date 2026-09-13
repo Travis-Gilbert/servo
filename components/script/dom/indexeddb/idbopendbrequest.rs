@@ -30,7 +30,7 @@ use crate::dom::indexeddb::idbdatabase::IDBDatabase;
 use crate::dom::indexeddb::idbrequest::IDBRequest;
 use crate::dom::indexeddb::idbtransaction::IDBTransaction;
 use crate::dom::indexeddb::idbversionchangeevent::IDBVersionChangeEvent;
-use crate::indexeddb::map_backend_error_to_dom_error;
+use crate::indexeddb::{map_backend_error_to_dom_error, reply_lost};
 use crate::realms::enter_auto_realm;
 
 #[derive(Clone)]
@@ -263,7 +263,12 @@ impl IDBOpenDBRequest {
         let callback = GenericCallback::new(global.time_profiler_chan().clone(), move |message| {
             let response_listener = response_listener.clone();
             task_source.queue(task!(request_callback: move |cx| {
-                response_listener.handle_delete_db(cx, message.unwrap());
+                // A delete whose answer was lost is a delete that failed as far as script
+                // can tell, and the request is there to say so.
+                let message = message.unwrap_or_else(|error| {
+                    DeleteDatabaseMsg::Done(Err(reply_lost(error)))
+                });
+                response_listener.handle_delete_db(cx, message);
             }))
         })
         .expect("Could not create delete database callback");

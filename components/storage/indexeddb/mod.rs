@@ -1531,24 +1531,6 @@ impl IndexedDBManager {
         }
     }
 
-    /// Revert the backing database state after aborting an upgrade transaction.
-    ///
-    /// <https://w3c.github.io/IndexedDB/#abort-an-upgrade-transaction>
-    /// IndexedDB §5.8 step 3 restores the previous version, or `0` if the database
-    /// was newly created. Step 4 restores the previous object store set, or the
-    /// empty set if the database was newly created. Servo eagerly creates the
-    /// backing database with version `0` and no stores during open, so aborting
-    /// that first upgrade must roll back to the pre-creation state by deleting the
-    /// placeholder backing store entirely.
-    ///
-    /// Related: <https://github.com/servo/servo/pull/42998>
-    /// Revert the effects of an aborted upgrade.
-    ///
-    /// The snapshot is borrowed rather than consumed, and every step is individually
-    /// idempotent: deleting a database that is already gone, setting a version that is
-    /// already `old`, and restoring object stores that already match are all no-ops.
-    /// A caller whose revert failed therefore still holds everything a second attempt
-    /// needs, and a partially applied revert converges when it is re-run.
     /// Append a rename to the pending upgrade's log so an abort can undo it.
     ///
     /// A rename that reaches here without a matching pending upgrade cannot be reverted,
@@ -1624,6 +1606,23 @@ impl IndexedDBManager {
         }
     }
 
+    /// Revert the backing database state after aborting an upgrade transaction.
+    ///
+    /// <https://w3c.github.io/IndexedDB/#abort-an-upgrade-transaction>
+    /// IndexedDB §5.8 step 3 restores the previous version, or `0` if the database
+    /// was newly created. Step 4 restores the previous object store set, or the
+    /// empty set if the database was newly created. Servo eagerly creates the
+    /// backing database with version `0` and no stores during open, so aborting
+    /// that first upgrade must roll back to the pre-creation state by deleting the
+    /// placeholder backing store entirely.
+    ///
+    /// The snapshot is borrowed rather than consumed, and every step is individually
+    /// idempotent: deleting a database that is already gone, setting a version that is
+    /// already `old`, and restoring object stores that already match are all no-ops.
+    /// A caller whose revert failed therefore still holds everything a second attempt
+    /// needs, and a partially applied revert converges when it is re-run.
+    ///
+    /// Related: <https://github.com/servo/servo/pull/42998>
     fn revert_aborted_upgrade(
         &mut self,
         key: &IndexedDBDescription,

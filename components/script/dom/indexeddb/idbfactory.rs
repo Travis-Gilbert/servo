@@ -35,7 +35,7 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::indexeddb::idbopendbrequest::IDBOpenDBRequest;
 use crate::dom::promise::Promise;
 use crate::dom::types::IDBTransaction;
-use crate::indexeddb::{convert_value_to_key, map_backend_error_to_dom_error};
+use crate::indexeddb::{convert_value_to_key, map_backend_error_to_dom_error, reply_lost};
 
 /// A non-jstraceable string wrapper for use in `HashMapTracedValues`.
 #[derive(Clone, Debug, Eq, Hash, MallocSizeOf, PartialEq)]
@@ -675,7 +675,9 @@ impl IDBFactoryMethods<crate::DomTypeHolder> for IDBFactory {
             .database_access_task_source()
             .to_sendable();
         let callback = GenericCallback::new(global.time_profiler_chan().clone(), move |message| {
-            let result: BackendResult<Vec<DatabaseInfo>> = message.unwrap();
+            // The promise is the thing to reject when the storage process stops answering.
+            let result: BackendResult<Vec<DatabaseInfo>> =
+                message.unwrap_or_else(|error| Err(reply_lost(error)));
             let Some(trusted_promise) = trusted_promise.take() else {
                 return error!("Callback for `DataBases` called twice.");
             };

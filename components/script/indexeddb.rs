@@ -557,6 +557,24 @@ pub fn convert_value_to_key_range(
     Ok(IndexedDBKeyRange::only(key))
 }
 
+/// The backend error that stands in for an answer which never arrived.
+///
+/// A reply from the storage thread is delivered as `Result<T, ipc_channel::IpcError>`. In
+/// single-process mode it is always `Ok`; in multiprocess mode the storage thread is another
+/// process, so the reply can be lost to a closed channel or fail to deserialize. Every caller
+/// is a callback that already has a request, promise or transaction to fail, and those run on
+/// the router thread, where a panic ends the whole content process rather than the one
+/// operation that went wrong.
+pub(crate) fn reply_lost(error: ipc_channel::IpcError) -> BackendError {
+    BackendError::ReplyLost(error.to_string())
+}
+
+/// The DOM error a request carries when the backend answered with one.
+///
+/// Every backend failure except a quota overrun lands on `OperationError`. The spec names
+/// `UnknownError` for an implementation failure it has no specific error for, but Servo's
+/// `DOMErrorName` has no such name, and inventing one here would change the exception
+/// vocabulary of every API in the engine rather than of IndexedDB.
 pub(crate) fn map_backend_error_to_dom_error(error: BackendError) -> Error {
     match error {
         BackendError::QuotaExceeded => Error::QuotaExceeded {
@@ -564,9 +582,13 @@ pub(crate) fn map_backend_error_to_dom_error(error: BackendError) -> Error {
             requested: None,
         },
         BackendError::DbErr(details) => {
-            Error::Operation(Some(format!("IndexedDB open failed: {details}")))
+            Error::Operation(Some(format!("IndexedDB operation failed: {details}")))
         },
-        other => Error::Operation(Some(format!("IndexedDB open failed: {other:?}"))),
+        // The backend never got to fail: its answer did not survive the trip back.
+        BackendError::ReplyLost(details) => Error::Operation(Some(format!(
+            "IndexedDB lost the storage backend's answer: {details}"
+        ))),
+        other => Error::Operation(Some(format!("IndexedDB operation failed: {other:?}"))),
     }
 }
 

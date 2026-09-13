@@ -36,6 +36,13 @@ pub enum BackendError {
     QuotaExceeded,
     /// The transaction was aborted
     Abort,
+    /// The backend's answer never arrived intact.
+    ///
+    /// In multiprocess mode the storage thread runs in another process, so a reply can be lost
+    /// to a closed channel or fail to deserialize. Nothing went wrong in the backend, so this
+    /// is not a [`DbError`]; what failed is the round trip. The string is the transport's own
+    /// account of it, kept because that is the only description of the failure that exists.
+    ReplyLost(String),
 
     DbErr(DbError),
 }
@@ -53,6 +60,7 @@ impl Display for BackendError {
             BackendError::StoreNotFound => write!(f, "StoreNotFound"),
             BackendError::QuotaExceeded => write!(f, "QuotaExceeded"),
             BackendError::Abort => write!(f, "Abort"),
+            BackendError::ReplyLost(err) => write!(f, "ReplyLost({err})"),
             BackendError::DbErr(err) => write!(f, "{err}"),
         }
     }
