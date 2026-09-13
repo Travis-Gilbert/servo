@@ -8,6 +8,7 @@ use js::gc::MutableHandleValue;
 use js::rust::HandleValue;
 use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericBindings::IDBIndexBinding::IDBIndexMethods;
+use script_bindings::codegen::GenericBindings::IDBObjectStoreBinding::IDBGetAllOptions;
 use script_bindings::codegen::GenericBindings::IDBTransactionBinding::IDBTransactionMode;
 use script_bindings::error::{Error, ErrorResult};
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
@@ -18,6 +19,7 @@ use storage_traits::indexeddb::{
 
 use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::IDBCursorDirection;
 use crate::dom::bindings::error::Fallible;
+use crate::dom::bindings::trace::RootedTraceableBox;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
@@ -26,7 +28,7 @@ use crate::dom::idbobjectstore::KeyPath;
 use crate::dom::indexeddb::idbcursor::{IDBCursor, IterationParam, ObjectStoreOrIndex};
 use crate::dom::indexeddb::idbcursorwithvalue::IDBCursorWithValue;
 use crate::dom::indexeddb::idbobjectstore::IDBObjectStore;
-use crate::dom::indexeddb::idbrequest::{IDBRequest, RequestSource};
+use crate::dom::indexeddb::idbrequest::{IDBRequest, RecordsParam, RequestSource};
 use crate::indexeddb::convert_value_to_key_range;
 
 #[dom_struct]
@@ -211,7 +213,7 @@ impl IDBIndex {
                 })
             },
             None,
-            Some(iteration_param),
+            Some(RecordsParam::Cursor(iteration_param)),
         )
         .inspect(|request| cursor.set_request(request))
     }
@@ -423,6 +425,49 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
                 None,
             )
         })
+    }
+
+    /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbindex-getallrecords>
+    fn GetAllRecords(
+        &self,
+        cx: &mut JSContext,
+        options: RootedTraceableBox<IDBGetAllOptions>,
+    ) -> Fallible<DomRoot<IDBRequest>> {
+        // Step 1. Let transaction be this's transaction.
+        // Step 2. Let index be this's index.
+        // Step 3. If index or index's object store has been deleted, throw an
+        // "InvalidStateError" DOMException.
+        self.verify_not_deleted()?;
+
+        // Step 4. If transaction's state is not active, then throw a
+        // "TransactionInactiveError" DOMException.
+        self.check_transaction_active()?;
+
+        // Step 5. Let range be the result of converting a value to a key range with
+        // options["query"]. Rethrow any exceptions.
+        let key_range = convert_value_to_key_range(cx, options.query.handle(), None)?;
+
+        // Step 6. Let operation be an algorithm to run retrieve multiple records from an index
+        // with the current Realm record, index, range, options["direction"] and
+        // options["count"] if given.
+        // Step 7. Return the result (an IDBRequest) of running asynchronously execute a request
+        // with this and operation.
+        let (records_param, count) = RecordsParam::get_all(&options);
+        IDBRequest::execute_async_from_source(
+            cx,
+            &self.object_store,
+            RequestSource::Index(Dom::from_ref(self)),
+            self.operation_context(),
+            |callback| {
+                AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllRecords {
+                    callback,
+                    key_range,
+                    count,
+                })
+            },
+            None,
+            Some(records_param),
+        )
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbindex-getallkeys>

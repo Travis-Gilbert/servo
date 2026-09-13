@@ -22,6 +22,8 @@ use storage_traits::indexeddb::{
 };
 use stylo_atoms::Atom;
 
+use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::IDBCursorDirection;
+use crate::dom::bindings::codegen::Bindings::IDBObjectStoreBinding::IDBGetAllOptions;
 use crate::dom::bindings::codegen::Bindings::IDBRequestBinding::{
     IDBRequestMethods, IDBRequestReadyState,
 };
@@ -41,6 +43,7 @@ use crate::dom::indexeddb::idbcursor::{IDBCursor, IterationParam, iterate_cursor
 use crate::dom::indexeddb::idbcursorwithvalue::IDBCursorWithValue;
 use crate::dom::indexeddb::idbindex::IDBIndex;
 use crate::dom::indexeddb::idbobjectstore::IDBObjectStore;
+use crate::dom::indexeddb::idbrecord::IDBRecord;
 use crate::dom::indexeddb::idbtransaction::IDBTransaction;
 use crate::indexeddb::key_type_to_jsval;
 use crate::realms::enter_auto_realm;
@@ -59,10 +62,91 @@ pub(crate) enum RequestSource {
     Cursor(Dom<IDBCursor>),
 }
 
+/// What the DOM should make of a `Vec<IndexedDBRecord>` answer.
+///
+/// Cursor iteration and `getAllRecords` read the same records and so share one wire payload.
+/// This is what tells them apart, and it carries the part of each algorithm the backend was not
+/// told about.
+#[derive(Clone)]
+pub(crate) enum RecordsParam {
+    /// Move a cursor onto the next record the iteration selects.
+    Cursor(IterationParam),
+    /// Project the records into an `IDBRecord` array.
+    GetAll {
+        direction: IDBCursorDirection,
+        count: Option<u32>,
+    },
+}
+
+impl RecordsParam {
+    /// Splits a `getAllRecords` options dictionary into what the DOM applies after the read and
+    /// what the backend may apply during it.
+    ///
+    /// A count of zero is not a limit. The spec reads it as infinity, and a `LIMIT 0` would
+    /// answer with nothing at all. Of the counts that do limit, only `next` may be pushed down:
+    /// the backend answers in ascending key order with no duplicate filtering, so for every
+    /// other direction a count applied during the read would already have truncated the wrong
+    /// end of the range, or dropped records that the unique filter was going to remove anyway.
+    pub(crate) fn get_all(options: &IDBGetAllOptions) -> (Self, Option<u32>) {
+        let count = options.count.filter(|count| *count > 0);
+        let backend_count = match options.direction {
+            IDBCursorDirection::Next => count,
+            _ => None,
+        };
+        (
+            RecordsParam::GetAll {
+                direction: options.direction,
+                count,
+            },
+            backend_count,
+        )
+    }
+}
+
+/// Applies the direction and count that `getAllRecords` resolves after the read.
+///
+/// The backend answers in ascending index key order and then ascending primary key order, for
+/// every direction. Unique filtering therefore keeps the first record of each key, which is the
+/// one with the lowest primary key, and it has to run before the reversal rather than after.
+/// Count is last, because it limits the records the direction chose and not the ones the range
+/// matched.
+fn project_records(
+    direction: IDBCursorDirection,
+    count: Option<u32>,
+    mut records: Vec<IndexedDBRecord>,
+) -> Vec<IndexedDBRecord> {
+    if matches!(
+        direction,
+        IDBCursorDirection::Nextunique | IDBCursorDirection::Prevunique
+    ) {
+        let mut previous: Option<IndexedDBKeyType> = None;
+        records.retain(|record| {
+            if previous.as_ref() == Some(&record.key) {
+                return false;
+            }
+            previous = Some(record.key.clone());
+            true
+        });
+    }
+
+    if matches!(
+        direction,
+        IDBCursorDirection::Prev | IDBCursorDirection::Prevunique
+    ) {
+        records.reverse();
+    }
+
+    if let Some(count) = count {
+        records.truncate(count as usize);
+    }
+
+    records
+}
+
 #[derive(Clone)]
 struct RequestListener {
     request: Trusted<IDBRequest>,
-    iteration_param: Option<IterationParam>,
+    records_param: Option<RecordsParam>,
     request_id: u64,
 }
 
@@ -251,38 +335,76 @@ impl RequestListener {
                 IdbResult::Count(count) => {
                     answer.handle_mut().set(DoubleValue(count as f64));
                 },
-                IdbResult::Iterate(records) => {
-                    let param = self.iteration_param.as_ref().expect(
-                        "iteration_param must be provided by IDBRequest::execute_async for Iterate",
-                    );
-                    let cursor = match iterate_cursor(&global, cx, param, records) {
-                        Ok(cursor) => cursor,
-                        Err(e) => {
-                            warn!("Error reading structuredclone data");
-                            Self::handle_async_request_error(
-                                &global,
-                                cx,
-                                request,
-                                e,
-                                self.request_id,
-                            );
-                            return;
-                        },
-                    };
-                    if let Some(cursor) = cursor {
-                        match cursor.downcast::<IDBCursorWithValue>() {
-                            Some(cursor_with_value) => {
-                                answer.handle_mut().set(ObjectValue(
-                                    *cursor_with_value.reflector().get_jsobject(),
-                                ));
+                IdbResult::Iterate(records) => match self.records_param.as_ref() {
+                    Some(RecordsParam::Cursor(param)) => {
+                        let cursor = match iterate_cursor(&global, cx, param, records) {
+                            Ok(cursor) => cursor,
+                            Err(e) => {
+                                warn!("Error reading structuredclone data");
+                                Self::handle_async_request_error(
+                                    &global,
+                                    cx,
+                                    request,
+                                    e,
+                                    self.request_id,
+                                );
+                                return;
                             },
-                            None => {
-                                answer
-                                    .handle_mut()
-                                    .set(ObjectValue(*cursor.reflector().get_jsobject()));
-                            },
+                        };
+                        if let Some(cursor) = cursor {
+                            match cursor.downcast::<IDBCursorWithValue>() {
+                                Some(cursor_with_value) => {
+                                    answer.handle_mut().set(ObjectValue(
+                                        *cursor_with_value.reflector().get_jsobject(),
+                                    ));
+                                },
+                                None => {
+                                    answer
+                                        .handle_mut()
+                                        .set(ObjectValue(*cursor.reflector().get_jsobject()));
+                                },
+                            }
                         }
-                    }
+                    },
+                    Some(RecordsParam::GetAll { direction, count }) => {
+                        let records = project_records(*direction, *count, records);
+                        rooted!(&in(cx) let mut array = vec![JSVal::default(); records.len()]);
+                        for (i, record) in records.into_iter().enumerate() {
+                            match IDBRecord::new(cx, &global, record) {
+                                Ok(idb_record) => {
+                                    array.handle_mut_at(i).set(ObjectValue(
+                                        *idb_record.reflector().get_jsobject(),
+                                    ));
+                                },
+                                Err(e) => {
+                                    warn!("Error building an IDBRecord");
+                                    Self::handle_async_request_error(
+                                        &global,
+                                        cx,
+                                        request,
+                                        e,
+                                        self.request_id,
+                                    );
+                                    return;
+                                },
+                            }
+                        }
+                        array.safe_to_jsval(cx, answer.handle_mut());
+                    },
+                    // The pairing is asserted where the operation is sent, so reaching here
+                    // means the backend answered with records for a request that reads none.
+                    // The request rejects; it is not a reason to end the content process.
+                    None => {
+                        warn!("IndexedDB answered with records for a request that reads none");
+                        Self::handle_async_request_error(
+                            &global,
+                            cx,
+                            request,
+                            Error::InvalidState(None),
+                            self.request_id,
+                        );
+                        return;
+                    },
                 },
                 IdbResult::None => {
                     // no-op
@@ -511,7 +633,7 @@ impl IDBRequest {
         store: &IDBObjectStore,
         operation_fn: F,
         request: Option<DomRoot<IDBRequest>>,
-        iteration_param: Option<IterationParam>,
+        records_param: Option<RecordsParam>,
     ) -> Fallible<DomRoot<IDBRequest>>
     where
         T: Into<IdbResult> + for<'a> Deserialize<'a> + Serialize + Send + Sync + 'static,
@@ -523,7 +645,7 @@ impl IDBRequest {
             KvsOperationContext::default(),
             operation_fn,
             request,
-            iteration_param,
+            records_param,
         )
     }
 
@@ -540,7 +662,7 @@ impl IDBRequest {
         context: KvsOperationContext,
         operation_fn: F,
         request: Option<DomRoot<IDBRequest>>,
-        iteration_param: Option<IterationParam>,
+        records_param: Option<RecordsParam>,
     ) -> Fallible<DomRoot<IDBRequest>>
     where
         T: Into<IdbResult> + for<'a> Deserialize<'a> + Serialize + Send + Sync + 'static,
@@ -553,7 +675,7 @@ impl IDBRequest {
             context,
             operation_fn,
             request,
-            iteration_param,
+            records_param,
         )
     }
 
@@ -572,13 +694,13 @@ impl IDBRequest {
         context: KvsOperationContext,
         operation_fn: F,
         request: Option<DomRoot<IDBRequest>>,
-        iteration_param: Option<IterationParam>,
+        records_param: Option<RecordsParam>,
     ) -> Fallible<DomRoot<IDBRequest>>
     where
         T: Into<IdbResult> + for<'a> Deserialize<'a> + Serialize + Send + Sync + 'static,
         F: FnOnce(GenericCallback<BackendResult<T>>) -> AsyncOperation,
     {
-        Self::execute_async_inner(cx, store, None, context, operation_fn, request, iteration_param)
+        Self::execute_async_inner(cx, store, None, context, operation_fn, request, records_param)
     }
 
     fn execute_async_inner<T, F>(
@@ -588,7 +710,7 @@ impl IDBRequest {
         context: KvsOperationContext,
         operation_fn: F,
         request: Option<DomRoot<IDBRequest>>,
-        iteration_param: Option<IterationParam>,
+        records_param: Option<RecordsParam>,
     ) -> Fallible<DomRoot<IDBRequest>>
     where
         T: Into<IdbResult> + for<'a> Deserialize<'a> + Serialize + Send + Sync + 'static,
@@ -627,7 +749,7 @@ impl IDBRequest {
 
         let response_listener = RequestListener {
             request: Trusted::new(&request),
-            iteration_param: iteration_param.clone(),
+            records_param: records_param.clone(),
             request_id,
         };
 
@@ -653,19 +775,23 @@ impl IDBRequest {
             .expect("Could not create callback");
         let operation = operation_fn(callback);
 
-        if matches!(
-            operation,
-            AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate { .. })
-        ) {
-            assert!(
-                iteration_param.is_some(),
-                "iteration_param must be provided for Iterate"
-            );
-        } else {
-            assert!(
-                iteration_param.is_none(),
-                "iteration_param should not be provided for operation other than Iterate"
-            );
+        // Both record-reading operations answer with `Vec<IndexedDBRecord>`, so the parameter
+        // is the only thing that says which algorithm the answer belongs to. Pairing it with
+        // the operation here is what lets the result handler treat a missing one as a protocol
+        // error rather than guess.
+        match &operation {
+            AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate { .. }) => assert!(
+                matches!(records_param, Some(RecordsParam::Cursor(_))),
+                "Iterate must be paired with RecordsParam::Cursor"
+            ),
+            AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllRecords { .. }) => assert!(
+                matches!(records_param, Some(RecordsParam::GetAll { .. })),
+                "GetAllRecords must be paired with RecordsParam::GetAll"
+            ),
+            _ => assert!(
+                records_param.is_none(),
+                "records_param should not be provided for an operation that reads no records"
+            ),
         }
 
         // Start is a backend database task (spec). Script does not model it with a

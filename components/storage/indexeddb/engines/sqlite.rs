@@ -271,7 +271,10 @@ impl SqliteEngine {
             // iteration) is defined in key order, and a LIMIT without an ORDER BY truncates
             // an unspecified subset rather than the first `count` records.
             .order_by(object_data_model::Column::Key, sea_query::Order::Asc);
-        if let Some(count) = count {
+        // "If count is not given or is 0 (zero), let count be infinity."
+        // <https://w3c.github.io/IndexedDB/#retrieve-multiple-values-from-an-object-store>
+        // A `LIMIT 0` answers with nothing, which is the opposite of what a zero count asks for.
+        if let Some(count) = count.filter(|count| *count > 0) {
             sql_query.limit(count as u64);
         }
         let (sql, values) = sql_query.build_rusqlite(SqliteQueryBuilder);
@@ -361,7 +364,8 @@ impl SqliteEngine {
         ];
         append_range_predicate(&mut sql, &mut values, "i.value", &key_range);
         sql.push_str(" ORDER BY i.value ASC, i.object_data_key ASC");
-        if let Some(count) = count {
+        // A zero count is infinity, not an empty answer. See `get_all`.
+        if let Some(count) = count.filter(|count| *count > 0) {
             sql.push_str(" LIMIT ?");
             values.push(Value::Integer(count as i64));
         }

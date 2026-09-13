@@ -31,7 +31,7 @@ use crate::dom::bindings::structuredclone;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::indexeddb::idbindex::IDBIndex;
 use crate::dom::indexeddb::idbobjectstore::IDBObjectStore;
-use crate::dom::indexeddb::idbrequest::{IDBRequest, RequestSource};
+use crate::dom::indexeddb::idbrequest::{IDBRequest, RecordsParam, RequestSource};
 use crate::dom::indexeddb::idbtransaction::IDBTransaction;
 use crate::indexeddb::{convert_value_to_key, key_type_to_jsval};
 
@@ -330,7 +330,7 @@ impl IDBCursor {
                 })
             },
             Some(request),
-            Some(iteration_param),
+            Some(RecordsParam::Cursor(iteration_param)),
         )
         .map(|_| ())
     }
