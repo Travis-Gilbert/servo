@@ -1409,7 +1409,9 @@ pub fn run_content_process(token: String) {
     not(target_env = "ohos"),
 ))]
 fn create_sandbox() {
-    panic!("Sandboxing is not supported on Windows, iOS, ARM, RISC-V targets and android.");
+    ChildSandbox::new(content_process_sandbox_profile())
+        .activate()
+        .expect("Failed to activate sandbox!");
 }
 
 #[cfg(any(
