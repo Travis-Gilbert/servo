@@ -1158,6 +1158,32 @@ struct IndexedDBManager {
 }
 
 impl IndexedDBManager {
+    /// The version `databases()` may report for one database: the version its last committed
+    /// upgrade left, not one an upgrade transaction still in flight has already written.
+    ///
+    /// <https://w3c.github.io/IndexedDB/#upgrade-a-database> step 8 sets the database's version
+    /// before the transaction carrying the change commits, and
+    /// [`Self::revert_aborted_upgrade`] puts it back if that transaction aborts. So while an
+    /// upgrade runs, the stored version is a value no other connection may see yet, and
+    /// <https://w3c.github.io/IndexedDB/#dom-idbfactory-databases> runs in parallel with it.
+    ///
+    /// This is what keeps a database being created invisible as well as one being migrated: a
+    /// creation upgrade reports the 0 it came from, and step 4.3.4 skips a version of 0.
+    fn committed_version(&self, description: &IndexedDBDescription, live: u64) -> u64 {
+        self.connection_queues
+            .get(description)
+            .and_then(|queue| {
+                queue.iter().find_map(|request| match request {
+                    OpenRequest::Open {
+                        pending_upgrade: Some(upgrade),
+                        ..
+                    } => Some(upgrade.old),
+                    _ => None,
+                })
+            })
+            .unwrap_or(live)
+    }
+
     fn new(
         port: GenericReceiver<IndexedDBThreadMsg>,
         manager_sender: GenericSender<IndexedDBThreadMsg>,
@@ -2658,6 +2684,7 @@ impl IndexedDBManager {
                     .filter_map(|(description, info)| {
                         // Step 4.3: For each db of databases:
                         if let Ok(version) = info.version() {
+                            let version = self.committed_version(description, version);
                             // Step 4.3.4: If db’s version is 0, then continue.
                             if version == 0 {
                                 None
