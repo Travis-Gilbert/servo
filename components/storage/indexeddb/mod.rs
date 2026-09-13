@@ -2623,6 +2623,7 @@ impl IndexedDBManager {
                     .filter_map(|(description, info)| {
                         // Step 4.3: For each db of databases:
                         if let Ok(version) = info.version() {
+                            let version = self.committed_version(description, version);
                             // Step 4.3.4: If db’s version is 0, then continue.
                             if version == 0 {
                                 None
@@ -4389,6 +4390,7 @@ impl IndexedDBManager {
                     .filter_map(|(description, info)| {
                         // Step 4.3: For each db of databases:
                         if let Ok(version) = info.version() {
+                            let version = self.committed_version(description, version);
                             // Step 4.3.4: If db’s version is 0, then continue.
                             if version == 0 {
                                 None
