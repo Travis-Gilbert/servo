@@ -929,24 +929,29 @@ impl IDBObjectStore {
 
     /// The caller must ensure that the original index exists.
     pub(crate) fn rename_index(&self, name: &DOMString, new_name: &DOMString) {
-        let operation = AsyncSchemaOperation::RenameIndex {
-            callback: self.transaction.create_abort_callback(),
-            index_name: name.to_string(),
-            new_name: new_name.to_string(),
-        };
+        match self.transaction.create_abort_callback() {
+            Some(callback) => {
+                let operation = AsyncSchemaOperation::RenameIndex {
+                    callback,
+                    index_name: name.to_string(),
+                    new_name: new_name.to_string(),
+                };
 
-        if self
-            .transaction
-            .send_or_hold(IndexedDBThreadMsg::AsyncSchemaOperation {
-                origin: self.global().origin().immutable().clone(),
-                database_name: self.db_name.to_string(),
-                store_name: self.name.borrow().clone().into(),
-                operation,
-                transaction_serial_number: self.transaction.get_serial_number(),
-            })
-            .is_err()
-        {
-            warn!("Could not send AsyncSchemaOperation");
+                if self
+                    .transaction
+                    .send_or_hold(IndexedDBThreadMsg::AsyncSchemaOperation {
+                        origin: self.global().origin().immutable().clone(),
+                        database_name: self.db_name.to_string(),
+                        store_name: self.name.borrow().clone().into(),
+                        operation,
+                        transaction_serial_number: self.transaction.get_serial_number(),
+                    })
+                    .is_err()
+                {
+                    warn!("Could not send AsyncSchemaOperation");
+                }
+            },
+            None => warn!("Could not send AsyncSchemaOperation"),
         }
 
         // We also need to update the key in the index set
@@ -1311,22 +1316,27 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
         // every later request against it by name. Without this the rename lived only on
         // the handle, and the first request issued after the upgrade transaction
         // committed failed against a store the backend still held under the old name.
-        let operation = AsyncSchemaOperation::RenameObjectStore {
-            callback: self.transaction.create_abort_callback(),
-            new_name: name.to_string(),
-        };
-        if self
-            .transaction
-            .send_or_hold(IndexedDBThreadMsg::AsyncSchemaOperation {
-                origin: self.global().origin().immutable().clone(),
-                database_name: self.db_name.to_string(),
-                store_name: old_name.to_string(),
-                operation,
-                transaction_serial_number: self.transaction.get_serial_number(),
-            })
-            .is_err()
-        {
-            warn!("Could not send AsyncSchemaOperation");
+        match self.transaction.create_abort_callback() {
+            Some(callback) => {
+                let operation = AsyncSchemaOperation::RenameObjectStore {
+                    callback,
+                    new_name: name.to_string(),
+                };
+                if self
+                    .transaction
+                    .send_or_hold(IndexedDBThreadMsg::AsyncSchemaOperation {
+                        origin: self.global().origin().immutable().clone(),
+                        database_name: self.db_name.to_string(),
+                        store_name: old_name.to_string(),
+                        operation,
+                        transaction_serial_number: self.transaction.get_serial_number(),
+                    })
+                    .is_err()
+                {
+                    warn!("Could not send AsyncSchemaOperation");
+                }
+            },
+            None => warn!("Could not send AsyncSchemaOperation"),
         }
 
         transaction
@@ -1424,8 +1434,13 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
         // Set index’s name to name and key path to keyPath. If unique is set, set index’s unique flag.
         // If multiEntry is set, set index’s multiEntry flag.
         let stored_key_path: indexeddb::KeyPath = key_path.clone().into();
+        // The operation carries the callback, so one that cannot be created is one that cannot
+        // be sent, which this method already reports as an "UnknownError" DOMException below.
+        let Some(callback) = self.transaction.create_abort_callback() else {
+            return Err(Error::Operation(None));
+        };
         let operation = AsyncSchemaOperation::CreateIndex {
-            callback: self.transaction.create_abort_callback(),
+            callback,
             index_name: name.to_string(),
             key_path: stored_key_path.clone(),
             unique: options.unique,
@@ -1494,8 +1509,13 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
         // Step 7. Remove index from this object store handle's index set.
         self.index_set.borrow_mut().retain(|n, _| n != &name);
         // Step 8. Destroy index.
+        // The operation carries the callback, so one that cannot be created is one that cannot
+        // be sent, which this method already reports as an "UnknownError" DOMException below.
+        let Some(callback) = self.transaction.create_abort_callback() else {
+            return Err(Error::Operation(None));
+        };
         let operation = AsyncSchemaOperation::DeleteIndex {
-            callback: self.transaction.create_abort_callback(),
+            callback,
             index_name: name.to_string(),
         };
         if self

@@ -411,8 +411,17 @@ impl IDBTransaction {
                     // Backend commit/rollback is not yet atomic.
                 }));
             },
-        )
-        .expect("Could not create callback");
+        );
+        let callback = match callback {
+            Ok(callback) => callback,
+            Err(error) => {
+                // A commit that cannot be initiated is reported by returning false, which is
+                // what the failed send below does; `maybe_commit` answers that by aborting the
+                // transaction rather than leaving it waiting for a `complete` that cannot come.
+                warn!("Could not create the IndexedDB commit callback: {error:?}");
+                return false;
+            },
+        };
 
         let commit_operation = SyncOperation::Commit(
             callback,
@@ -625,6 +634,10 @@ impl IDBTransaction {
             .task_manager()
             .dom_manipulation_task_source()
             .to_sendable();
+        // Kept out of the closure below, which consumes the originals, so the abort can still
+        // be finalized if the backend can never be told about it.
+        let unsent_this = Trusted::new(self);
+        let unsent_task_source = task_source.clone();
         let callback = GenericCallback::new(
             global.time_profiler_chan().clone(),
             move |message: Result<TxnCompleteMsg, ipc_channel::IpcError>| {
@@ -642,8 +655,21 @@ impl IDBTransaction {
                     this.finalize_abort();
                 }));
             },
-        )
-        .expect("Could not create callback");
+        );
+        let callback = match callback {
+            Ok(callback) => callback,
+            Err(error) => {
+                // The abort message carries this callback, so without it the backend is never
+                // told and the reply that would have run `finalize_abort` can never arrive.
+                // For the same reason the callback finalizes on a lost answer, finalize here:
+                // a transaction that never finalizes stays wedged with its requests unanswered.
+                warn!("Could not create the IndexedDB abort callback: {error:?}");
+                unsent_task_source.queue(task!(finalize_unsent_abort: move || {
+                    unsent_this.root().finalize_abort();
+                }));
+                return;
+            },
+        };
         let operation = SyncOperation::Abort(
             callback,
             global.origin().immutable().clone(),
@@ -869,8 +895,12 @@ impl IDBTransaction {
     ) -> Option<(IDBObjectStoreParameters, Vec<IndexedDBIndex>, Option<i64>)> {
         let global = self.global();
         let idb_sender = global.storage_threads().sender();
-        let (sender, receiver) =
-            channel(global.time_profiler_chan().clone()).expect("failed to create channel");
+        // A store whose parameters cannot even be asked for reads the same way to the caller as
+        // a store the backend could not find, which the `?`s below already report as `None`.
+        let Ok((sender, receiver)) = channel(global.time_profiler_chan().clone()) else {
+            warn!("Could not create a channel to read IndexedDB object store parameters.");
+            return None;
+        };
 
         let origin = global.origin().immutable().clone();
         let db_name = String::from(self.db.get_name());
@@ -901,7 +931,12 @@ impl IDBTransaction {
         ))
     }
 
-    pub(crate) fn create_abort_callback(&self) -> GenericCallback<BackendError> {
+    /// The callback an `AsyncSchemaOperation` carries to report why it failed.
+    ///
+    /// Returns `None` when the reply channel cannot be created. The operation cannot be sent
+    /// without it, so the callers report that the same way they report a send the storage
+    /// thread never took: the local handle state still changes and the failure is logged.
+    pub(crate) fn create_abort_callback(&self) -> Option<GenericCallback<BackendError>> {
         let trusted_transaction = Trusted::new(self);
         let task_source = self
             .global()
@@ -931,7 +966,10 @@ impl IDBTransaction {
                 }));
             },
         )
-        .expect("Could not create GenericCallback")
+        .inspect_err(|error| {
+            warn!("Could not create an IndexedDB schema operation abort callback: {error:?}");
+        })
+        .ok()
     }
 }
 

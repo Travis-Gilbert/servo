@@ -202,9 +202,13 @@ impl IDBFactory {
     }
 
     /// Setup the callback to the backend service, if this hasn't been done already.
-    fn get_or_setup_callback(&self) -> GenericCallback<ConnectionMsg> {
+    ///
+    /// Returns `None` when the reply channel cannot be created. The factory has no way to
+    /// reach the storage thread without one, and the open request that asked for it reports
+    /// that as a DOMException rather than taking the content process down.
+    fn get_or_setup_callback(&self) -> Option<GenericCallback<ConnectionMsg>> {
         if let Some(cb) = self.callback.borrow().as_ref() {
-            return cb.clone();
+            return Some(cb.clone());
         }
 
         let global = self.global();
@@ -225,12 +229,18 @@ impl IDBFactory {
                 let factory = response_listener.root();
                 factory.handle_connection_message(cx, response)
             }));
-        })
-        .expect("Could not create open database callback");
+        });
+        let callback = match callback {
+            Ok(callback) => callback,
+            Err(error) => {
+                warn!("Could not create the IndexedDB open database callback: {error:?}");
+                return None;
+            },
+        };
 
         *self.callback.borrow_mut() = Some(callback.clone());
 
-        callback
+        Some(callback)
     }
 
     fn get_request(&self, name: String, request_id: &Uuid) -> Option<DomRoot<IDBOpenDBRequest>> {
@@ -471,13 +481,18 @@ impl IDBFactory {
         let global = self.global();
         let request_id = request.get_id();
 
+        // The callback is obtained before the request is recorded as pending, so a factory
+        // that cannot talk to the storage thread does not leave behind a connection entry
+        // that nothing will ever answer.
+        let Some(callback) = self.get_or_setup_callback() else {
+            return Err(());
+        };
+
         {
             let mut pending = self.connections.borrow_mut();
             let outer = pending.entry(DBName(name.to_string())).or_default();
             outer.insert(request_id, Dom::from_ref(request));
         }
-
-        let callback = self.get_or_setup_callback();
 
         // Step 5: Run these steps in parallel:
         // Step 5.1: Let result be the result of opening a database connection,
@@ -705,8 +720,18 @@ impl IDBFactoryMethods<crate::DomTypeHolder> for IDBFactory {
                 },
             }
             }));
-        })
-        .expect("Could not create databases callback");
+        });
+        let callback = match callback {
+            Ok(callback) => callback,
+            Err(error) => {
+                // Step 4 cannot start without a reply channel. `databases()` reports failure
+                // by rejecting its promise, which is also how the steps below report a
+                // backend error, so the rejection goes there rather than into a panic.
+                warn!("Could not create the IndexedDB databases callback: {error:?}");
+                p.reject_error(cx, Error::Operation(None));
+                return p;
+            },
+        };
 
         let get_operation = SyncOperation::GetDatabases(callback, storage_key);
         if global

@@ -362,23 +362,28 @@ impl IDBDatabaseMethods<crate::DomTypeHolder> for IDBDatabase {
             },
         });
 
-        let operation = AsyncSchemaOperation::CreateObjectStore {
-            callback: transaction.create_abort_callback(),
-            key_path: key_paths,
-            auto_increment,
-        };
+        match transaction.create_abort_callback() {
+            Some(callback) => {
+                let operation = AsyncSchemaOperation::CreateObjectStore {
+                    callback,
+                    key_path: key_paths,
+                    auto_increment,
+                };
 
-        if transaction
-            .send_or_hold(IndexedDBThreadMsg::AsyncSchemaOperation {
-                origin: self.global().origin().immutable().clone(),
-                database_name: self.name.to_string(),
-                store_name: name.to_string(),
-                operation,
-                transaction_serial_number: transaction.get_serial_number(),
-            })
-            .is_err()
-        {
-            warn!("Could not send AsyncSchemaOperation");
+                if transaction
+                    .send_or_hold(IndexedDBThreadMsg::AsyncSchemaOperation {
+                        origin: self.global().origin().immutable().clone(),
+                        database_name: self.name.to_string(),
+                        store_name: name.to_string(),
+                        operation,
+                        transaction_serial_number: transaction.get_serial_number(),
+                    })
+                    .is_err()
+                {
+                    warn!("Could not send AsyncSchemaOperation");
+                }
+            },
+            None => warn!("Could not send AsyncSchemaOperation"),
         }
 
         self.object_store_names.borrow_mut().push(name);
@@ -419,20 +424,23 @@ impl IDBDatabaseMethods<crate::DomTypeHolder> for IDBDatabase {
         }
 
         // Step 7
-        let operation = AsyncSchemaOperation::DeleteObjectStore {
-            callback: transaction.create_abort_callback(),
-        };
-        if transaction
-            .send_or_hold(IndexedDBThreadMsg::AsyncSchemaOperation {
-                origin: self.global().origin().immutable().clone(),
-                database_name: self.name.to_string(),
-                store_name: name.to_string(),
-                operation,
-                transaction_serial_number: transaction.get_serial_number(),
-            })
-            .is_err()
-        {
-            warn!("Could not send AsyncSchemaOperation");
+        match transaction.create_abort_callback() {
+            Some(callback) => {
+                let operation = AsyncSchemaOperation::DeleteObjectStore { callback };
+                if transaction
+                    .send_or_hold(IndexedDBThreadMsg::AsyncSchemaOperation {
+                        origin: self.global().origin().immutable().clone(),
+                        database_name: self.name.to_string(),
+                        store_name: name.to_string(),
+                        operation,
+                        transaction_serial_number: transaction.get_serial_number(),
+                    })
+                    .is_err()
+                {
+                    warn!("Could not send AsyncSchemaOperation");
+                }
+            },
+            None => warn!("Could not send AsyncSchemaOperation"),
         }
 
         Ok(())

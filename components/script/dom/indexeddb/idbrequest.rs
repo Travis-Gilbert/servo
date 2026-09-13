@@ -1200,6 +1200,12 @@ impl IDBRequest {
             .database_access_task_source()
             .to_sendable();
 
+        // Step 4 has already added the request to the transaction's request list, so it has to
+        // be answered even if the operation cannot be started. Both are kept out of the closure
+        // below, which consumes the originals.
+        let unstarted_listener = response_listener.clone();
+        let unstarted_task_source = task_source.clone();
+
         let closure = move |message: Result<BackendResult<T>, ipc_channel::IpcError>| {
             let response_listener = response_listener.clone();
             // In multiprocess mode this runs on the router thread with a reply that crossed a
@@ -1218,8 +1224,24 @@ impl IDBRequest {
                 );
             }));
         };
-        let callback = GenericCallback::new(global.time_profiler_chan().clone(), closure)
-            .expect("Could not create callback");
+        let callback = match GenericCallback::new(global.time_profiler_chan().clone(), closure) {
+            Ok(callback) => callback,
+            Err(error) => {
+                // No reply channel means no backend reply will ever arrive for a request the
+                // transaction is already counting, and a request that never settles wedges the
+                // transaction's commit bookkeeping. `asynchronously execute a request` reports
+                // an operation that cannot start by answering the request with an error, which
+                // is what `execute_async_failure` does for an already-failed operation.
+                warn!("Could not create an IndexedDB request callback: {error:?}");
+                unstarted_task_source.queue(task!(idb_request_unstarted: move |cx| {
+                    unstarted_listener.handle_async_request_finished(
+                        cx,
+                        Ok(IdbResult::Error(Error::Operation(None))),
+                    );
+                }));
+                return Ok(request);
+            },
+        };
         let operation = operation_fn(callback);
 
         // Every record-reading request answers with `Vec<IndexedDBRecord>`, so the parameter

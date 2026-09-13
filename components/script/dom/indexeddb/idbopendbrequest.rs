@@ -270,8 +270,17 @@ impl IDBOpenDBRequest {
                 });
                 response_listener.handle_delete_db(cx, message);
             }))
-        })
-        .expect("Could not create delete database callback");
+        });
+        let callback = match callback {
+            Ok(callback) => callback,
+            Err(error) => {
+                // Without a reply channel the delete cannot be asked for at all, which is the
+                // same failure as a send the storage thread never took; `deleteDatabase()`
+                // turns this `Err` into an "UnknownError" DOMException.
+                warn!("Could not create the IndexedDB delete database callback: {error:?}");
+                return Err(());
+            },
+        };
 
         let delete_operation =
             SyncOperation::DeleteDatabase(callback, storage_key, name, proxy_map, self.get_id());
