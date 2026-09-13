@@ -24,7 +24,6 @@ use storage_traits::indexeddb::{
 
 use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::IDBCursorDirection;
 use crate::dom::bindings::codegen::Bindings::IDBDatabaseBinding::IDBObjectStoreParameters;
-use crate::dom::bindings::codegen::Bindings::IDBObjectStoreBinding::IDBObjectStoreMethods;
 use crate::dom::bindings::codegen::Bindings::IDBTransactionBinding::{
     IDBTransactionMethods, IDBTransactionMode,
 };
@@ -722,7 +721,7 @@ impl IDBObjectStore {
                 })
             },
             None,
-            Some(iteration_param),
+            Some(RecordsParam::Cursor(iteration_param)),
         )
         .inspect(|request| cursor.set_request(request))
     }
@@ -965,6 +964,46 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
                 None,
             )
         })
+    }
+
+    /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbobjectstore-getallrecords>
+    fn GetAllRecords(
+        &self,
+        cx: &mut JSContext,
+        options: RootedTraceableBox<IDBGetAllOptions>,
+    ) -> Fallible<DomRoot<IDBRequest>> {
+        // Step 1. Let transaction be this's transaction.
+        // Step 2. Let store be this's object store.
+        // Step 3. If store has been deleted, throw an "InvalidStateError" DOMException.
+        self.verify_not_deleted()?;
+
+        // Step 4. If transaction's state is not active, then throw a
+        // "TransactionInactiveError" DOMException.
+        self.check_transaction_active()?;
+
+        // Step 5. Let range be the result of converting a value to a key range with
+        // options["query"]. Rethrow any exceptions.
+        let key_range = convert_value_to_key_range(cx, options.query.handle(), None)?;
+
+        // Step 6. Let operation be an algorithm to run retrieve multiple records from an object
+        // store with the current Realm record, store, range, options["direction"] and
+        // options["count"] if given.
+        // Step 7. Return the result (an IDBRequest) of running asynchronously execute a request
+        // with this and operation.
+        let (records_param, count) = RecordsParam::get_all(&options);
+        IDBRequest::execute_async(
+            cx,
+            self,
+            |callback| {
+                AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllRecords {
+                    callback,
+                    key_range,
+                    count,
+                })
+            },
+            None,
+            Some(records_param),
+        )
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbobjectstore-getallkeys>

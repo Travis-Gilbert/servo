@@ -27,6 +27,7 @@ interface IDBObjectStore {
   [NewObject, Throws] IDBRequest getAllKeys(optional any query,
                                     optional [EnforceRange] unsigned long count);
   [NewObject, Throws] IDBRequest count(optional any query);
+  [NewObject, Throws] IDBRequest getAllRecords(optional IDBGetAllOptions options = {});
 
   [NewObject, Throws] IDBRequest openCursor(optional any query,
                                     optional IDBCursorDirection direction = "next");
@@ -39,6 +40,13 @@ interface IDBObjectStore {
                                    (DOMString or sequence<DOMString>) keyPath,
                                    optional IDBIndexParameters options = {});
   [Throws] undefined deleteIndex(DOMString name);
+};
+
+// https://w3c.github.io/IndexedDB/#dictdef-idbgetalloptions
+dictionary IDBGetAllOptions {
+  any query = null;
+  [EnforceRange] unsigned long count;
+  IDBCursorDirection direction = "next";
 };
 
 // https://w3c.github.io/IndexedDB/#dictdef-idbindexparameters

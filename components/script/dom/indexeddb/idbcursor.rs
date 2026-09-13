@@ -78,14 +78,23 @@ pub(crate) struct IDBCursor {
 }
 
 impl IDBCursor {
-    #[cfg_attr(crown, expect(crown::unrooted_must_root))]
-    pub(crate) fn new_inherited(
-        transaction: &IDBTransaction,
-        direction: IDBCursorDirection,
-        got_value: bool,
-        source: ObjectStoreOrIndex,
-        range: IndexedDBKeyRange,
-        key_only: bool,
+    pub(crate) fn check_transaction_active(&self) -> ErrorResult {
+        if !self.transaction.is_active() || !self.transaction.is_usable() {
+            Err(Error::TransactionInactive(Some(
+                "Transaction is not active".to_owned(),
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// The preconditions `update` and `delete` share: steps 2 through 6 of both algorithms,
+    /// in the order their exceptions are observable in.
+    ///
+    /// Kept separate from `check_transaction_and_source` because the read-only check falls
+    /// between the inactive check and the deleted check, and the three iteration methods have
+    /// no read-only check at all.
+
     ) -> IDBCursor {
         IDBCursor {
             reflector_: Reflector::new(),
@@ -107,15 +116,7 @@ impl IDBCursor {
 
     #[cfg_attr(crown, expect(crown::unrooted_must_root))]
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        cx: &mut JSContext,
-        global: &GlobalScope,
-        transaction: &IDBTransaction,
-        direction: IDBCursorDirection,
-        got_value: bool,
-        source: ObjectStoreOrIndex,
-        range: IndexedDBKeyRange,
-        key_only: bool,
+
     ) -> DomRoot<IDBCursor> {
         reflect_dom_object(
             cx,
@@ -158,31 +159,6 @@ impl IDBCursor {
         }
     }
 
-    pub(crate) fn set_request(&self, request: &IDBRequest) {
-        self.request.set(Some(request));
-    }
-
-    pub(crate) fn value(&self, mut out: MutableHandleValue) {
-        out.set(self.value.get());
-    }
-
-    /// <https://www.w3.org/TR/IndexedDB-3/#cursor-effective-key>
-    pub(crate) fn effective_key(&self) -> Option<IndexedDBKeyType> {
-        match &self.source {
-            ObjectStoreOrIndex::ObjectStore(_) => self.position.borrow().clone(),
-            ObjectStoreOrIndex::Index(_) => self.object_store_position.borrow().clone(),
-        }
-    }
-
-    /// <https://www.w3.org/TR/IndexedDB-3/#cursor-effective-object-store>
-    pub(crate) fn effective_object_store(&self) -> DomRoot<IDBObjectStore> {
-        match &self.source {
-            ObjectStoreOrIndex::ObjectStore(store) => store.as_rooted(),
-            ObjectStoreOrIndex::Index(index) => index.object_store(),
-        }
-    }
-
-    /// Keep index cursors on the index record set when advance/continue reuse their request.
     fn operation_context(&self) -> KvsOperationContext {
         match &self.source {
             ObjectStoreOrIndex::ObjectStore(_) => KvsOperationContext::default(),
@@ -195,29 +171,6 @@ impl IDBCursor {
         }
     }
 
-    pub(crate) fn verify_not_deleted(&self) -> ErrorResult {
-        match &self.source {
-            ObjectStoreOrIndex::ObjectStore(store) => store.verify_not_deleted(),
-            ObjectStoreOrIndex::Index(index) => index.verify_not_deleted(),
-        }
-    }
-
-    pub(crate) fn check_transaction_active(&self) -> ErrorResult {
-        if !self.transaction.is_active() || !self.transaction.is_usable() {
-            Err(Error::TransactionInactive(Some(
-                "Transaction is not active".to_owned(),
-            )))
-        } else {
-            Ok(())
-        }
-    }
-
-    /// The preconditions `update` and `delete` share: steps 2 through 6 of both algorithms,
-    /// in the order their exceptions are observable in.
-    ///
-    /// Kept separate from `check_transaction_and_source` because the read-only check falls
-    /// between the inactive check and the deleted check, and the three iteration methods have
-    /// no read-only check at all.
     fn check_writable(&self) -> Fallible<()> {
         // Step 2. If transaction's state is not active, throw a "TransactionInactiveError"
         // DOMException.
@@ -258,6 +211,42 @@ impl IDBCursor {
         }
 
         Ok(())
+    }
+
+    ) -> Fallible<()> {
+        // Unset this's got value flag.
+        self.got_value.set(false);
+
+        // Let request be this's request. Set request's done flag to false.
+        let request = self.request.get().ok_or(Error::InvalidState(Some(
+            "The cursor has no request".to_owned(),
+        )))?;
+        request.set_ready_state_pending();
+
+        let iteration_param = IterationParam {
+            cursor: Trusted::new(self),
+            key,
+            primary_key,
+            count,
+        };
+        let key_range = self.range.clone();
+
+        // Run the steps to asynchronously execute a request with this as source and the steps
+        // to iterate a cursor as operation, reusing request.
+        IDBRequest::execute_async_with_context(
+            cx,
+            &self.effective_object_store(),
+            self.operation_context(),
+            |callback| {
+                AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
+                    callback,
+                    key_range,
+                })
+            },
+            Some(request),
+            Some(RecordsParam::Cursor(iteration_param)),
+        )
+        .map(|_| ())
     }
 }
 

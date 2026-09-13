@@ -10,6 +10,7 @@ pub(crate) mod idbindex;
 pub(crate) mod idbkeyrange;
 pub(crate) mod idbobjectstore;
 pub(crate) mod idbopendbrequest;
+pub(crate) mod idbrecord;
 pub(crate) mod idbrequest;
 pub(crate) mod idbtransaction;
 pub(crate) mod idbversionchangeevent;
