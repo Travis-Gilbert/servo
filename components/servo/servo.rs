@@ -1361,10 +1361,6 @@ pub fn run_content_process(token: String) {
             media_platform::init();
             content_process_diagnostic(diagnostics, "media-ready");
 
-            // Start the fetch thread for this content process.
-            let fetch_thread_join_handle = start_fetch_thread();
-            content_process_diagnostic(diagnostics, "fetch-thread-started");
-
             set_logger(
                 new_event_loop_info
                     .initial_script_state
@@ -1404,11 +1400,10 @@ pub fn run_content_process(token: String) {
 
             StyleThreadPool::shutdown();
 
-            // Shut down the fetch thread started above.
-            exit_fetch_thread();
-            fetch_thread_join_handle
-                .join()
-                .expect("Failed to join on the fetch thread in the constellation");
+            // Shut down the `FetchThread` if it had been started in the course of execution.
+            content_process_diagnostic(diagnostics, "fetch-thread-exiting");
+            FetchThread::exit();
+            content_process_diagnostic(diagnostics, "fetch-thread-exited");
         },
         UnprivilegedContent::ServiceWorker(content) => {
             content.start::<ServiceWorkerManager>();
