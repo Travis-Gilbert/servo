@@ -17,15 +17,12 @@ use std::time::Duration;
 
 use embedder_traits::user_contents::{
     UserContentManagerId, UserScript, UserScriptId, UserStyleSheet, UserStyleSheetId,
-    DocumentLayoutSnapshot, DocumentLayoutSnapshotError, EmbedderControlId,
-    ViewportDetails, WebDriverCommandMsg, WebViewPoint,
-    EmbedderControlResponse, HitTestResult, InputEventAndId, JavaScriptEvaluationId,
 };
 use embedder_traits::{
-    MediaSessionActionType, NewWebViewDetails, PaintHitTestResult, Theme, TraversalId, UrlRequest,
-    ViewportDetails, WebDriverCommandMsg, WebViewPoint,
     DocumentLayoutSnapshot, DocumentLayoutSnapshotError, EmbedderControlId,
     EmbedderControlResponse, HitTestResult, InputEventAndId, JavaScriptEvaluationId,
+    MediaSessionActionType, NewWebViewDetails, PaintHitTestResult, Theme, TraversalId, UrlRequest,
+    ViewportDetails, WebDriverCommandMsg, WebViewPoint,
 };
 pub use from_script_message::*;
 use malloc_size_of_derive::MallocSizeOf;
