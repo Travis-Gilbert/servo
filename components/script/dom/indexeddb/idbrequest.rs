@@ -1255,15 +1255,22 @@ impl IDBRequest {
         // is the only thing that says which algorithm the answer belongs to. Pairing it with
         // the operation here is what lets the result handler treat a missing one as a protocol
         // error rather than guess.
-        match &operation {
-            AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate { .. }) => assert!(
-                records_param.is_some(),
+        //
+        // A mispaired parameter is a wiring mistake in the caller rather than anything script
+        // can provoke, and the result handler already reports a missing one as a protocol
+        // error, so say so and let it.
+        let iterates = matches!(
+            operation,
+            AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate { .. })
+        );
+        match (iterates, records_param.is_some()) {
+            (true, false) => warn!(
                 "Iterate must carry the RecordsParam that names the algorithm reading it"
             ),
-            _ => assert!(
-                records_param.is_none(),
+            (false, true) => warn!(
                 "records_param should not be provided for an operation that reads no records"
             ),
+            _ => {},
         }
 
         // Start is a backend database task (spec). Script does not model it with a

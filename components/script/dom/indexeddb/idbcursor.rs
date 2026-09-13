@@ -675,12 +675,25 @@ pub(crate) fn iterate_cursor(
     let direction = cursor.direction;
 
     // Step 3. Assert: if primaryKey is given, source is an index and direction is "next" or "prev".
+    //
+    // A primary key only reaches here from continuePrimaryKey(), whose steps 4 and 5 already
+    // threw "InvalidAccessError" for any other source or direction. A primary key that
+    // arrives anyway would be read against the wrong shape of record, so the request fails
+    // rather than the process.
     if primary_key.is_some() {
-        assert!(matches!(source, ObjectStoreOrIndex::Index(..)));
-        assert!(matches!(
-            direction,
-            IDBCursorDirection::Next | IDBCursorDirection::Prev
-        ));
+        match (source, direction) {
+            (
+                ObjectStoreOrIndex::Index(..),
+                IDBCursorDirection::Next | IDBCursorDirection::Prev,
+            ) => {},
+            _ => {
+                warn!(
+                    "iterate_cursor was given a primary key for a cursor that is not an index \
+                     cursor in direction next or prev."
+                );
+                return Err(Error::InvalidAccess(None));
+            },
+        }
     }
 
     // Step 4. Let records be the list of records in source.
