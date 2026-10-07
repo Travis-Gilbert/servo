@@ -204,8 +204,23 @@ fn test_default_storage_preserves_profile_and_session_boundaries() {
         get_web_storage(&public, WebStorageType::Session, other_webview, &origin),
         None
     );
+    set_web_storage(
+        &public,
+        WebStorageType::Local,
+        TEST_WEBVIEW_ID,
+        &foreign,
+        "foreign-durable",
+    );
     public.clear_webstorage_for_sites(WebStorageType::Local, &["example.com"]);
-    assert!(public.webstorage_origins(WebStorageType::Local).is_empty());
+    // Reads already registered the foreign origin. Clearing one site must
+    // remove only its descriptor and preserve the unrelated site's data.
+    let descriptors = public.webstorage_origins(WebStorageType::Local);
+    assert_eq!(descriptors.len(), 1);
+    assert_eq!(descriptors[0].name, foreign.ascii_serialization());
+    assert_eq!(
+        get_web_storage(&public, WebStorageType::Local, TEST_WEBVIEW_ID, &foreign),
+        Some("foreign-durable".into())
+    );
     assert_eq!(
         get_web_storage(&public, WebStorageType::Local, TEST_WEBVIEW_ID, &origin),
         None
