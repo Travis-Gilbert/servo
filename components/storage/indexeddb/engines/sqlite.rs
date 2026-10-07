@@ -1769,7 +1769,7 @@ mod tests {
         }
         let tmp_dir = tempfile::tempdir().unwrap();
         let handle: ClientStorageThreadHandle =
-            ClientStorageThreadFactory::new(Some(tmp_dir.path().to_path_buf()), true, None);
+            ClientStorageThreadFactory::new(Some(tmp_dir.path().to_path_buf()), true);
 
         let storage_proxy_map = handle
             .obtain_a_storage_bottle_map(

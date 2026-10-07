@@ -7,7 +7,6 @@ mod engines;
 use std::borrow::ToOwned;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
 use std::thread;
 
 use log::{debug, error, warn};
@@ -37,18 +36,13 @@ use crate::indexeddb::engines::SqliteEngine;
 use crate::shared::is_sqlite_disk_full_error;
 
 pub trait IndexedDBThreadFactory {
-    fn new(
-        mem_profiler_chan: MemProfilerChan,
-        reporter_name: String,
-        factory: Option<Arc<dyn IndexedDbEngineFactory>>,
-    ) -> Self;
+    fn new(mem_profiler_chan: MemProfilerChan, reporter_name: String) -> Self;
 }
 
 impl IndexedDBThreadFactory for GenericSender<IndexedDBThreadMsg> {
     fn new(
         mem_profiler_chan: MemProfilerChan,
         reporter_name: String,
-        factory: Option<Arc<dyn IndexedDbEngineFactory>>,
     ) -> GenericSender<IndexedDBThreadMsg> {
         let (chan, port) = generic_channel::channel().unwrap();
         let chan2 = chan.clone();
@@ -64,7 +58,7 @@ impl IndexedDBThreadFactory for GenericSender<IndexedDBThreadMsg> {
             .name("IndexedDBManager".to_owned())
             .spawn(move || {
                 mem_profiler_chan.run_with_memory_reporting(
-                    || IndexedDBManager::new(port, manager_sender, factory).start(),
+                    || IndexedDBManager::new(port, manager_sender).start(),
                     reporter_name,
                     chan2,
                     IndexedDBThreadMsg::CollectMemoryReport,
@@ -1153,7 +1147,7 @@ struct IndexedDBManager {
     port: GenericReceiver<IndexedDBThreadMsg>,
     manager_sender: GenericSender<IndexedDBThreadMsg>,
     databases: HashMap<IndexedDBDescription, IndexedDBEnvironment<Box<dyn KvsEngine>>>,
-    engine_factory: Arc<dyn IndexedDbEngineFactory>,
+    engine_factory: SqliteIndexedDbEngineFactory,
 
     /// A global counter to produce unique transaction ids.
     /// TODO: remove once db connections lifecyle is managed.
@@ -1198,7 +1192,6 @@ impl IndexedDBManager {
     fn new(
         port: GenericReceiver<IndexedDBThreadMsg>,
         manager_sender: GenericSender<IndexedDBThreadMsg>,
-        engine_factory: Option<Arc<dyn IndexedDbEngineFactory>>,
     ) -> IndexedDBManager {
         debug!("New indexedDBManager");
 
@@ -1206,8 +1199,7 @@ impl IndexedDBManager {
             port,
             manager_sender,
             databases: HashMap::new(),
-            engine_factory: engine_factory
-                .unwrap_or_else(|| Arc::new(SqliteIndexedDbEngineFactory)),
+            engine_factory: SqliteIndexedDbEngineFactory,
             serial_number_counter: 0,
             connection_queues: Default::default(),
             connections: Default::default(),

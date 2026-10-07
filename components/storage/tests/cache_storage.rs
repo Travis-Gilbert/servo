@@ -8,7 +8,7 @@ use storage_traits::cache_storage::{CacheStorageThreadHandle, CacheStorageThread
 
 #[test]
 fn test_exit() {
-    let handle: CacheStorageThreadHandle = CacheStorageThreadFactory::new(None, false, None);
+    let handle: CacheStorageThreadHandle = CacheStorageThreadFactory::new(None, false);
 
     let (sender, receiver) = generic_channel::channel().unwrap();
     handle

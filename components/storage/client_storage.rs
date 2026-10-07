@@ -4,7 +4,6 @@
 use std::fmt::Debug;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::{fs, thread};
 
 use log::warn;
@@ -759,19 +758,11 @@ impl RegistryEngineFactory for SqliteRegistryEngineFactory {
 }
 
 pub trait ClientStorageThreadFactory {
-    fn new(
-        config_dir: Option<PathBuf>,
-        temporary_storage: bool,
-        factory: Option<Arc<dyn RegistryEngineFactory>>,
-    ) -> Self;
+    fn new(config_dir: Option<PathBuf>, temporary_storage: bool) -> Self;
 }
 
 impl ClientStorageThreadFactory for ClientStorageThreadHandle {
-    fn new(
-        config_dir: Option<PathBuf>,
-        temporary_storage: bool,
-        factory: Option<Arc<dyn RegistryEngineFactory>>,
-    ) -> ClientStorageThreadHandle {
+    fn new(config_dir: Option<PathBuf>, temporary_storage: bool) -> ClientStorageThreadHandle {
         let (generic_sender, generic_receiver) = generic_channel::channel().unwrap();
         let mut temp_dir: Option<tempfile::TempDir> = None;
         let base_dir = config_dir
@@ -796,7 +787,7 @@ impl ClientStorageThreadFactory for ClientStorageThreadHandle {
             .spawn(move || {
                 // Keep temp_dir alive while the thread runs.
                 let _ = temp_dir;
-                let factory = factory.unwrap_or_else(|| Arc::new(SqliteRegistryEngineFactory));
+                let factory = SqliteRegistryEngineFactory;
                 let Ok(engine) = factory.open(storage_dir) else {
                     warn!("Failed to initialize ClientStorage engine");
                     return;
