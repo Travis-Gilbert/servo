@@ -355,6 +355,129 @@ fn get_web_storage(
 }
 
 #[test]
+fn test_default_storage_preserves_profile_and_session_boundaries() {
+    let profile = tempfile::tempdir().unwrap();
+    let config_dir = Some(profile.path().to_path_buf());
+    let (private, public) = storage::new_storage_threads(
+        profile_mem::Profiler::create(),
+        config_dir.clone(),
+        false,
+        StorageEngines::default(),
+    );
+    let origin = ServoUrl::parse("https://example.com").unwrap().origin();
+    let foreign = ServoUrl::parse("https://other.example").unwrap().origin();
+    let other_webview = WebViewId::mock_for_testing(BrowsingContextId {
+        namespace_id: PipelineNamespaceId(999),
+        index: Index::new(2).unwrap(),
+    });
+    set_web_storage(
+        &public,
+        WebStorageType::Local,
+        TEST_WEBVIEW_ID,
+        &origin,
+        "durable",
+    );
+    assert_eq!(
+        get_web_storage(&public, WebStorageType::Local, other_webview, &origin),
+        Some("durable".into())
+    );
+    assert_eq!(
+        get_web_storage(&public, WebStorageType::Local, TEST_WEBVIEW_ID, &foreign),
+        None
+    );
+    set_web_storage(
+        &public,
+        WebStorageType::Session,
+        TEST_WEBVIEW_ID,
+        &origin,
+        "session-one",
+    );
+    set_web_storage(
+        &public,
+        WebStorageType::Session,
+        other_webview,
+        &origin,
+        "session-two",
+    );
+    assert_eq!(
+        get_web_storage(&public, WebStorageType::Session, TEST_WEBVIEW_ID, &origin),
+        Some("session-one".into())
+    );
+    assert_eq!(
+        get_web_storage(&public, WebStorageType::Session, other_webview, &origin),
+        Some("session-two".into())
+    );
+    assert_eq!(
+        get_web_storage(&public, WebStorageType::Session, TEST_WEBVIEW_ID, &foreign),
+        None
+    );
+    shutdown_storage_group(&private);
+    shutdown_storage_group(&public);
+
+    // Independent disk readback catches a volatile substitute even if a manager
+    // cache answers every same-process read correctly.
+    let namespace = Uuid::from_bytes([
+        0x37, 0x9e, 0x56, 0xb0, 0x1a, 0x76, 0x44, 0xc5, 0xa4, 0xdb, 0xe2, 0x18, 0xc5, 0xc8, 0xa3,
+        0x5d,
+    ]);
+    let local_dir = profile
+        .path()
+        .join("webstorage")
+        .join(Uuid::new_v5(&namespace, b"https://example.com").to_string());
+    let connection = rusqlite::Connection::open(local_dir.join("webstorage.sqlite")).unwrap();
+    let value: String = connection
+        .query_row("SELECT value FROM data WHERE key = ?", ["context"], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(value, "durable");
+    assert!(!profile.path().join("webstorage/session").exists());
+    drop(connection);
+
+    let (private, public) = storage::new_storage_threads(
+        profile_mem::Profiler::create(),
+        config_dir,
+        false,
+        StorageEngines::default(),
+    );
+    assert_eq!(
+        get_web_storage(&public, WebStorageType::Local, TEST_WEBVIEW_ID, &origin),
+        Some("durable".into())
+    );
+    assert_eq!(
+        get_web_storage(&public, WebStorageType::Session, TEST_WEBVIEW_ID, &origin),
+        None
+    );
+    assert_eq!(
+        get_web_storage(&public, WebStorageType::Session, other_webview, &origin),
+        None
+    );
+    set_web_storage(
+        &public,
+        WebStorageType::Local,
+        TEST_WEBVIEW_ID,
+        &foreign,
+        "foreign-durable",
+    );
+    public.clear_webstorage_for_sites(WebStorageType::Local, &["example.com"]);
+    // Reads already registered the foreign origin. Clearing one site must
+    // remove only its descriptor and preserve the unrelated site's data.
+    let descriptors = public.webstorage_origins(WebStorageType::Local);
+    assert_eq!(descriptors.len(), 1);
+    assert_eq!(descriptors[0].name, foreign.ascii_serialization());
+    assert_eq!(
+        get_web_storage(&public, WebStorageType::Local, TEST_WEBVIEW_ID, &foreign),
+        Some("foreign-durable".into())
+    );
+    assert_eq!(
+        get_web_storage(&public, WebStorageType::Local, TEST_WEBVIEW_ID, &origin),
+        None
+    );
+    shutdown_storage_group(&private);
+    shutdown_storage_group(&public);
+}
+
+#[test]
 fn test_storage_engine_factory_is_selected_end_to_end() {
     let mem_profiler_chan = profile_mem::Profiler::create();
     let config_dir = tempfile::tempdir().unwrap();
