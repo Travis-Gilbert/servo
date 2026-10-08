@@ -38,7 +38,9 @@ impl ClientStorageThreadHandle {
             origin,
             sender,
         };
-        self.sender.send(message).unwrap();
+        // On registry shutdown, dropping the reply sender disconnects the receiver
+        // so the caller can report its existing storage communication error.
+        self.sender.send_or_ignore(message);
         receiver
     }
 
@@ -53,7 +55,9 @@ impl ClientStorageThreadHandle {
             name,
             sender,
         };
-        self.sender.send(message).unwrap();
+        // On registry shutdown, dropping the reply sender disconnects the receiver
+        // so the caller can report its existing storage communication error.
+        self.sender.send_or_ignore(message);
         receiver
     }
 
@@ -68,7 +72,9 @@ impl ClientStorageThreadHandle {
             name,
             sender,
         };
-        self.sender.send(message).unwrap();
+        // On registry shutdown, dropping the reply sender disconnects the receiver
+        // so the caller can report its existing storage communication error.
+        self.sender.send_or_ignore(message);
         receiver
     }
 

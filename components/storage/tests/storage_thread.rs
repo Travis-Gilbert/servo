@@ -9,7 +9,6 @@ use std::sync::{Arc, Mutex};
 
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use profile_traits::generic_callback::GenericCallback as ProfiledCallback;
-use servo_base::generic_channel::{self, GenericCallback, GenericSend};
 use servo_base::id::{BrowsingContextId, Index, PipelineNamespaceId, TEST_WEBVIEW_ID, WebViewId};
 use servo_url::ServoUrl;
 use storage_traits::cache_storage::{
@@ -30,39 +29,7 @@ use storage_traits::{StorageEngines, StorageThreads};
 use uuid::Uuid;
 
 fn shutdown_storage_group(threads: &StorageThreads) {
-    let (client_sender, client_receiver) = generic_channel::channel().unwrap();
-    GenericSend::send(threads, ClientStorageThreadMessage::Exit(client_sender))
-        .expect("failed to send client storage exit");
-    client_receiver
-        .recv()
-        .expect("failed to receive client storage exit ack");
-
-    let (cache_sender, cache_receiver) = generic_channel::channel().unwrap();
-    GenericSend::send(
-        threads,
-        CacheStorageThreadMessage::Exit(cache_sender.into()),
-    )
-    .expect("failed to send cache storage exit");
-    cache_receiver
-        .recv()
-        .expect("failed to receive cache storage exit ack");
-
-    let (idb_sender, idb_receiver) = generic_channel::channel().unwrap();
-    GenericSend::send(
-        threads,
-        IndexedDBThreadMsg::Sync(SyncOperation::Exit(idb_sender)),
-    )
-    .expect("failed to send indexeddb exit");
-    idb_receiver
-        .recv()
-        .expect("failed to receive indexeddb exit ack");
-
-    let (web_storage_sender, web_storage_receiver) = generic_channel::channel().unwrap();
-    GenericSend::send(threads, WebStorageThreadMsg::Exit(web_storage_sender))
-        .expect("failed to send web storage exit");
-    web_storage_receiver
-        .recv()
-        .expect("failed to receive web storage exit ack");
+    threads.exit().expect("failed to shut down storage group");
 }
 
 #[test]
@@ -473,6 +440,30 @@ fn test_default_storage_preserves_profile_and_session_boundaries() {
     );
     shutdown_storage_group(&private);
     shutdown_storage_group(&public);
+}
+
+fn test_group_exit_still_stops_registry_when_indexeddb_has_exited() {
+    let (private, public) =
+        storage::new_storage_threads(profile_mem::Profiler::create(), None, false);
+    let (sender, receiver) = generic_channel::channel().unwrap();
+    GenericSend::send(
+        &public,
+        IndexedDBThreadMsg::Sync(SyncOperation::Exit(sender)),
+    )
+    .unwrap();
+    receiver.recv().unwrap();
+
+    // An already stopped consumer must not prevent the other threads or registry
+    // from exiting. This rejects returning early after the first failed stage.
+    assert!(public.exit().unwrap_err().contains("IndexedDB"));
+    assert!(matches!(
+        public
+            .client_storage_handle()
+            .create_database(1, "shutdown".into())
+            .recv(),
+        Err(ReceiveError::Disconnected)
+    ));
+    private.exit().unwrap();
 }
 
 #[test]
