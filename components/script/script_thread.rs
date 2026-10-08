@@ -1964,8 +1964,16 @@ impl ScriptThread {
                 pipeline_id,
                 evaluation_id,
                 script,
+                expected,
             ) => {
-                self.handle_evaluate_javascript(webview_id, pipeline_id, evaluation_id, script, cx);
+                self.handle_evaluate_javascript(
+                    webview_id,
+                    pipeline_id,
+                    evaluation_id,
+                    script,
+                    expected,
+                    cx,
+                );
             },
             ScriptThreadMessage::NativeAccessibility(pipeline_id, request, callback) => {
                 let Some(window) = self.documents.borrow().find_window(pipeline_id) else {
@@ -4417,6 +4425,7 @@ impl ScriptThread {
         pipeline_id: PipelineId,
         evaluation_id: JavaScriptEvaluationId,
         script: String,
+        expected: Option<servo_base::native_accessibility::NativeDocumentIdentity>,
         cx: &mut js::context::JSContext,
     ) {
         let Some(window) = self.documents.borrow().find_window(pipeline_id) else {
@@ -4431,6 +4440,22 @@ impl ScriptThread {
             return;
         };
 
+        // This check and evaluation execute in one script task. A queued
+        // navigation/document.open cannot retarget an admitted fixed operation.
+        if expected.as_ref().is_some_and(|expected| {
+            !window.Document().is_fully_active()
+                || crate::native_accessibility::document_identity(&window) != *expected
+        }) {
+            let _ = self.senders.pipeline_to_constellation_sender.send((
+                webview_id,
+                pipeline_id,
+                ScriptToConstellationMessage::FinishJavaScriptEvaluation(
+                    evaluation_id,
+                    Err(JavaScriptEvaluationError::WebViewNotReady),
+                ),
+            ));
+            return;
+        }
         let global_scope = window.as_global_scope();
         let mut realm = enter_auto_realm(cx, global_scope);
         let cx = &mut realm.current_realm();

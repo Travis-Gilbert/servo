@@ -786,6 +786,47 @@ impl WebView {
         );
     }
 
+    /// Invoke only the immutable World surface controller in an exact native
+    /// document. The script owner revalidates the identity immediately before
+    /// evaluation; callers cannot provide script or a function selector.
+    pub fn evaluate_world_surface(
+        &self,
+        expected: servo_base::native_accessibility::NativeDocumentIdentity,
+        command: Option<(String, String)>,
+        callback: impl FnOnce(Result<JSValue, JavaScriptEvaluationError>) + 'static,
+    ) {
+        let script = if let Some((op, body)) = command {
+            if !matches!(
+                op.as_str(),
+                "bind"
+                    | "activate"
+                    | "blur"
+                    | "retire"
+                    | "caret"
+                    | "accessibility"
+                    | "attention"
+                    | "participant"
+                    | "participant_frame"
+            ) || body.len() > 16384
+                || serde_json::from_str::<serde_json::Value>(&body).is_err()
+            {
+                callback(Err(JavaScriptEvaluationError::InternalError));
+                return;
+            }
+            format!(
+                "(() => {{ const d=Object.getOwnPropertyDescriptor(globalThis,'__theoremWorldSurfaceControlV1'); if(!d || d.writable!==false || d.configurable!==false || typeof d.value!=='function')throw new Error('World controller unavailable'); return JSON.stringify(d.value({},{})); }})()",
+                serde_json::to_string(&op).expect("operation serializes"),
+                body
+            )
+        } else {
+            "(() => { const d=Object.getOwnPropertyDescriptor(globalThis,'__theoremWorldSurfacePollV1'); if(!d || d.writable!==false || d.configurable!==false || typeof d.value!=='function')throw new Error('World controller unavailable'); return JSON.stringify(d.value()); })()".into()
+        };
+        self.inner()
+            .servo
+            .javascript_evaluator_mut()
+            .evaluate_in_document(self.id(), script, Some(expected), Box::new(callback));
+    }
+
     /// Observe and act on current-document native semantics; no script selectors.
     pub fn native_accessibility(
         &self,

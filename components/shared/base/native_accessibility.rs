@@ -38,11 +38,38 @@ pub enum NativeAccessibilityActionKind {
     SetValue,
     SelectText,
 }
+/// Exact native owner of a document and its current root. Root replacement
+/// through document.open/write retires this identity without requiring navigation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeDocumentIdentity {
+    pub webview: WebViewId,
+    pub pipeline: PipelineId,
+    pub node: String,
+    pub root: Option<String>,
+}
+/// Bounded traversal continuation tied to the actual document and anchor topology.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeAccessibilityCursor {
+    pub owner: NativeDocumentIdentity,
+    pub node: String,
+    pub topology: String,
+}
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeAccessibilityPage {
+    pub start: Option<NativeAccessibilityCursor>,
+    pub next: Option<NativeAccessibilityCursor>,
+}
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeAccessibilitySnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<NativeDocumentIdentity>,
     pub webview: WebViewId,
     pub document: PipelineId,
+    pub page: Option<NativeAccessibilityPage>,
     pub viewport: [f64; 2],
     pub nodes: Vec<NativeAccessibilityNode>,
     pub truncated: bool,
@@ -74,10 +101,16 @@ pub enum NativeAccessibilityRequest {
     /// Actual current document identity without walking its DOM.
     Identity,
     Snapshot,
+    /// Continue after an actual current-document anchor, without selectors.
+    Page {
+        cursor: NativeAccessibilityCursor,
+    },
     Action {
         webview: WebViewId,
         document: PipelineId,
         expected: NativeAccessibilityNode,
+        #[serde(default)]
+        page: Option<NativeAccessibilityCursor>,
         action: NativeAccessibilityAction,
     },
 }

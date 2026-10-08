@@ -104,7 +104,12 @@ pub enum EmbedderToConstellationMessage {
     PaintMetric(PipelineId, PaintMetricEvent),
     /// Evaluate a JavaScript string in the context of a `WebView`. When execution is complete or an
     /// error is encountered, a correpsonding message will be sent to the embedding layer.
-    EvaluateJavaScript(WebViewId, JavaScriptEvaluationId, String),
+    EvaluateJavaScript(
+        WebViewId,
+        JavaScriptEvaluationId,
+        String,
+        Option<servo_base::native_accessibility::NativeDocumentIdentity>,
+    ),
     /// Observe or act on actual current-document native semantics.
     NativeAccessibility(
         WebViewId,

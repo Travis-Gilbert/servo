@@ -1522,8 +1522,9 @@ where
                 webview_id,
                 evaluation_id,
                 script,
+                expected,
             ) => {
-                self.handle_evaluate_javascript(webview_id, evaluation_id, script);
+                self.handle_evaluate_javascript(webview_id, evaluation_id, script, expected);
             },
             EmbedderToConstellationMessage::NativeAccessibility(webview, request, callback) => {
                 use servo_base::native_accessibility::NativeAccessibilityRequest;
@@ -1850,6 +1851,7 @@ where
         webview_id: WebViewId,
         evaluation_id: JavaScriptEvaluationId,
         script: String,
+        expected: Option<servo_base::native_accessibility::NativeDocumentIdentity>,
     ) {
         let browsing_context_id = BrowsingContextId::from(webview_id);
         let Some(pipeline) = self
@@ -1864,6 +1866,15 @@ where
             return;
         };
 
+        if expected.as_ref().is_some_and(|expected| {
+            expected.webview != webview_id || expected.pipeline != pipeline.id
+        }) {
+            self.handle_finish_javascript_evaluation(
+                evaluation_id,
+                Err(JavaScriptEvaluationError::WebViewNotReady),
+            );
+            return;
+        }
         if pipeline
             .event_loop
             .send(ScriptThreadMessage::EvaluateJavaScript(
@@ -1871,6 +1882,7 @@ where
                 pipeline.id,
                 evaluation_id,
                 script,
+                expected,
             ))
             .is_err()
         {

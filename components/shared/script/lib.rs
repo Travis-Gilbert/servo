@@ -294,7 +294,13 @@ pub enum ScriptThreadMessage {
     SetScrollStates(PipelineId, ScrollStateUpdate),
     /// Evaluate the given JavaScript and return a result via a corresponding message
     /// to the Constellation.
-    EvaluateJavaScript(WebViewId, PipelineId, JavaScriptEvaluationId, String),
+    EvaluateJavaScript(
+        WebViewId,
+        PipelineId,
+        JavaScriptEvaluationId,
+        String,
+        Option<servo_base::native_accessibility::NativeDocumentIdentity>,
+    ),
     /// Observe or act on actual current-document native semantics.
     NativeAccessibility(
         PipelineId,

@@ -12,6 +12,7 @@ use crate::dom::types::{
 };
 use js::context::JSContext;
 use script_bindings::codegen::GenericBindings::{
+    DocumentBinding::DocumentMethods,
     ElementBinding::{ElementMethods, ScrollIntoViewOptions, ScrollLogicalPosition},
     HTMLInputElementBinding::HTMLInputElementMethods,
     HTMLSelectElementBinding::HTMLSelectElementMethods,
@@ -245,20 +246,92 @@ fn observe(
         actions,
     })
 }
-fn snapshot(window: &Window, cx: &JSContext) -> NativeAccessibilityResult {
+pub(crate) fn document_identity(window: &Window) -> NativeDocumentIdentity {
+    let document = window.Document();
+    NativeDocumentIdentity {
+        webview: window.webview_id(),
+        pipeline: window.pipeline_id(),
+        node: document.upcast::<Node>().unique_id(window.pipeline_id()),
+        root: document
+            .GetDocumentElement()
+            .map(|element| element.upcast::<Node>().unique_id(window.pipeline_id())),
+    }
+}
+fn cursor(window: &Window, node: &Node) -> NativeAccessibilityCursor {
+    // Only actual ancestor/sibling identities qualify an anchor. Text/status
+    // mutations do not change the digest; moving/replacing/detaching it does.
+    let mut topology = String::new();
+    for ancestor in node.ancestors() {
+        topology.push_str(&ancestor.unique_id(window.pipeline_id()));
+        topology.push('/');
+    }
+    topology.push('|');
+    if let Some(previous) = node.GetPreviousSibling() {
+        topology.push_str(&previous.unique_id(window.pipeline_id()));
+    }
+    NativeAccessibilityCursor {
+        owner: document_identity(window),
+        node: node.unique_id(window.pipeline_id()),
+        topology: digest(&topology),
+    }
+}
+fn snapshot(
+    window: &Window,
+    cx: &JSContext,
+    start: Option<NativeAccessibilityCursor>,
+) -> NativeAccessibilityResult {
     let document = window.Document();
     if !document.is_fully_active() {
         return Err(NativeTextError::DocumentUnavailable);
+    }
+    if let Some(start) = &start {
+        if start.owner != document_identity(window)
+            || start.node.len() != 32
+            || start.topology.len() != 64
+        {
+            return Err(NativeTextError::StaleContext);
+        }
+        let anchor = document
+            .upcast::<Node>()
+            .traverse_preorder(ShadowIncluding::No)
+            .find(|node| {
+                node.unique_id_if_already_present().as_deref() == Some(start.node.as_str())
+            })
+            .ok_or(NativeTextError::StaleContext)?;
+        if cursor(window, &anchor) != *start {
+            return Err(NativeTextError::StaleContext);
+        }
     }
     let mut nodes = Vec::new();
     let mut known = HashSet::new();
     let mut truncated = false;
     let mut total = 0;
+    let mut started = start.is_none();
+    let mut scanned = 0;
+    let mut last = None;
+    let mut next = None;
     for node in document
         .upcast::<Node>()
         .traverse_preorder(ShadowIncluding::No)
     {
+        if !started {
+            if node.unique_id_if_already_present().as_deref()
+                == start.as_ref().map(|cursor| cursor.node.as_str())
+            {
+                started = true;
+            }
+            continue;
+        }
+        if nodes.len() >= MAX_NODES || scanned >= 16384 {
+            truncated = true;
+            next = last
+                .as_ref()
+                .map(|node: &crate::dom::bindings::root::DomRoot<Node>| cursor(window, node));
+            break;
+        }
+        scanned += 1;
         let Some(element) = node.downcast::<Element>() else {
+            last = Some(node.clone());
             continue;
         };
         let parent = node.ancestors().find_map(|parent| {
@@ -267,16 +340,22 @@ fn snapshot(window: &Window, cx: &JSContext) -> NativeAccessibilityResult {
         });
         if let Some(observation) = observe(window, element, parent, &mut truncated, cx) {
             total += observation.label.len() + observation.value.as_ref().map_or(0, String::len);
-            if nodes.len() >= MAX_NODES || total > 262144 {
+            if total > 262144 {
                 truncated = true;
+                next = last
+                    .as_ref()
+                    .map(|node: &crate::dom::bindings::root::DomRoot<Node>| cursor(window, node));
                 break;
             }
             known.insert(observation.id.clone());
             nodes.push(observation);
         }
+        last = Some(node.clone());
     }
     let viewport = window.viewport_details().size;
     Ok(NativeAccessibilitySnapshot {
+        owner: None,
+        page: Some(NativeAccessibilityPage { start, next }),
         webview: window.webview_id(),
         document: window.pipeline_id(),
         viewport: [viewport.width as f64, viewport.height as f64],
@@ -296,6 +375,8 @@ pub(crate) fn dispatch(
         }
         let viewport = window.viewport_details().size;
         return Ok(NativeAccessibilitySnapshot {
+            owner: Some(document_identity(window)),
+            page: None,
             webview: window.webview_id(),
             document: window.pipeline_id(),
             viewport: [viewport.width as f64, viewport.height as f64],
@@ -304,12 +385,18 @@ pub(crate) fn dispatch(
             text: None,
         });
     }
-    let current = snapshot(window, cx)?;
+    let page = match &request {
+        NativeAccessibilityRequest::Page { cursor } => Some(cursor.clone()),
+        NativeAccessibilityRequest::Action { page, .. } => page.clone(),
+        _ => None,
+    };
+    let current = snapshot(window, cx, page)?;
     let NativeAccessibilityRequest::Action {
         webview,
         document,
         expected,
         action,
+        ..
     } = request
     else {
         return Ok(current);
@@ -422,8 +509,8 @@ pub(crate) fn dispatch(
                 return Err(NativeTextError::DocumentUnavailable);
             }
             if !matches!(action, NativeAccessibilityAction::Focus) {
-                let context = crate::native_text::snapshot(window)?
-                    .ok_or(NativeTextError::EditRefused)?;
+                let context =
+                    crate::native_text::snapshot(window)?.ok_or(NativeTextError::EditRefused)?;
                 if context.element != expected.id
                     || expected.text_digest.as_deref() != Some(digest(&context.text).as_str())
                 {
@@ -450,7 +537,11 @@ pub(crate) fn dispatch(
             }
         },
     }
-    snapshot(window, cx)
+    snapshot(
+        window,
+        cx,
+        current.page.as_ref().and_then(|page| page.start.clone()),
+    )
 }
 
 fn reveal(element: &Element, cx: &mut JSContext) {
