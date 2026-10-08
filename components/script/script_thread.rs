@@ -1967,6 +1967,21 @@ impl ScriptThread {
             ) => {
                 self.handle_evaluate_javascript(webview_id, pipeline_id, evaluation_id, script, cx);
             },
+            ScriptThreadMessage::NativeAccessibility(pipeline_id, request, callback) => {
+                let Some(window) = self.documents.borrow().find_window(pipeline_id) else {
+                    let _ = callback.send(Err(
+                        servo_base::native_text::NativeTextError::DocumentUnavailable,
+                    ));
+                    return;
+                };
+                let mut realm = enter_auto_realm(cx, window.as_global_scope());
+                let result = crate::native_accessibility::dispatch(
+                    &window,
+                    request,
+                    &mut realm.current_realm(),
+                );
+                let _ = callback.send(result);
+            },
             ScriptThreadMessage::NativeText(pipeline_id, request, callback) => {
                 let Some(window) = self.documents.borrow().find_window(pipeline_id) else {
                     let _ = callback.send(Err(

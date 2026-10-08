@@ -73,6 +73,8 @@ mod from_embedder {
                 Self::SetScrollStates(..) => target!("SetScrollStates"),
                 Self::PaintMetric(..) => target!("PaintMetric"),
                 Self::EvaluateJavaScript(..) => target!("EvaluateJavaScript"),
+                Self::NativeText(..) => target!("NativeText"),
+                Self::NativeAccessibility(..) => target!("NativeAccessibility"),
                 Self::TheoremWorldTexture(..) => target!("TheoremWorldTexture"),
                 Self::DocumentLayoutSnapshot(..) => target!("DocumentLayoutSnapshot"),
                 Self::HitTest(..) => target!("HitTest"),

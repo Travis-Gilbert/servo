@@ -1525,6 +1525,35 @@ where
             ) => {
                 self.handle_evaluate_javascript(webview_id, evaluation_id, script);
             },
+            EmbedderToConstellationMessage::NativeAccessibility(webview, request, callback) => {
+                use servo_base::native_accessibility::NativeAccessibilityRequest;
+                use servo_base::native_text::NativeTextError;
+                let pipeline = self
+                    .browsing_contexts
+                    .get(&BrowsingContextId::from(webview))
+                    .and_then(|context| self.pipelines.get(&context.pipeline_id));
+                if let Some(pipeline) = pipeline {
+                    if matches!(&request,NativeAccessibilityRequest::Action{webview: expected_webview, document: expected_document,..} if *expected_webview!=webview || *expected_document!=pipeline.id)
+                    {
+                        let _ = callback.send(Err(NativeTextError::StaleContext));
+                    } else {
+                        let failure = callback.clone();
+                        if pipeline
+                            .event_loop
+                            .send(ScriptThreadMessage::NativeAccessibility(
+                                pipeline.id,
+                                request,
+                                callback,
+                            ))
+                            .is_err()
+                        {
+                            let _ = failure.send(Err(NativeTextError::DocumentUnavailable));
+                        }
+                    }
+                } else {
+                    let _ = callback.send(Err(NativeTextError::DocumentUnavailable));
+                }
+            },
             EmbedderToConstellationMessage::NativeText(webview, request, callback) => {
                 use servo_base::native_text::{NativeTextError, NativeTextRequest};
                 let pipeline = self

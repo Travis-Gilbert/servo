@@ -106,6 +106,11 @@ pub enum EmbedderToConstellationMessage {
     /// error is encountered, a correpsonding message will be sent to the embedding layer.
     EvaluateJavaScript(WebViewId, JavaScriptEvaluationId, String),
     /// Resolve or import a native World texture in the active document.
+    NativeAccessibility(
+        WebViewId,
+        servo_base::native_accessibility::NativeAccessibilityRequest,
+        GenericCallback<servo_base::native_accessibility::NativeAccessibilityResult>,
+    ),
     NativeText(
         WebViewId,
         servo_base::native_text::NativeTextRequest,

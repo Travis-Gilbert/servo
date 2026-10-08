@@ -296,6 +296,11 @@ pub enum ScriptThreadMessage {
     /// to the Constellation.
     EvaluateJavaScript(WebViewId, PipelineId, JavaScriptEvaluationId, String),
     /// Resolve or import a native World texture in the active document.
+    NativeAccessibility(
+        PipelineId,
+        servo_base::native_accessibility::NativeAccessibilityRequest,
+        GenericCallback<servo_base::native_accessibility::NativeAccessibilityResult>,
+    ),
     NativeText(
         PipelineId,
         servo_base::native_text::NativeTextRequest,
