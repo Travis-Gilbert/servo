@@ -58,7 +58,9 @@ use crate::dom::html::form_controls::input_type::radio_input_type::{
 };
 use crate::dom::html::form_controls::input_type::{InputActivationType, InputType};
 use crate::dom::html::form_controls::text_control::TextControlElement;
-use crate::dom::html::form_controls::text_input::{KeyReaction, Lines, TextInput};
+use crate::dom::html::form_controls::text_input::{
+    InputEventType, IsComposing, KeyReaction, Lines, SelectionDirection, TextInput,
+};
 use crate::dom::html::htmldatalistelement::HTMLDataListElement;
 use crate::dom::html::htmlelement::HTMLElement;
 use crate::dom::html::htmlfieldsetelement::HTMLFieldSetElement;
@@ -837,6 +839,48 @@ impl HTMLInputElement {
     fn may_have_embedder_control(&self) -> bool {
         let el = self.upcast::<Element>();
         matches!(*self.input_type(), InputType::Color(_)) && !el.disabled_state()
+    }
+
+    // Native-only text service uses the same editable buffer as keyboard/IME default actions.
+    // Unlike WebIDL selection getters this also supports textual number controls.
+    pub(crate) fn native_text_snapshot(&self) -> Option<(String, (u32, u32))> {
+        if !self.is_textual_or_password() ||
+            self.ReadOnly() ||
+            self.upcast::<Element>().disabled_state()
+        {
+            return None;
+        }
+        let input = self.text_input.borrow();
+        Some((
+            input.get_content().to_string(),
+            (input.selection_start_utf16().0, input.selection_end_utf16().0),
+        ))
+    }
+
+    pub(crate) fn native_text_select(&self, range: (u32, u32)) {
+        self.text_input.borrow_mut().set_selection_range_utf16(
+            range.0.into(),
+            range.1.into(),
+            SelectionDirection::Forward,
+        );
+        self.maybe_update_shared_selection();
+    }
+
+    pub(crate) fn native_text_delete_selection(&self, cx: &mut JSContext, composing: bool) {
+        self.text_input.borrow_mut().insert("");
+        self.queue_input_event(
+            Some(String::new()),
+            if composing {
+                IsComposing::Composing
+            } else {
+                IsComposing::NotComposing
+            },
+            InputEventType::InsertCompositionText,
+        );
+        self.value_dirty.set(true);
+        self.value_changed(cx);
+        self.update_placeholder_shown_state();
+        self.upcast::<Node>().dirty(cx.no_gc(), NodeDamage::Other);
     }
 
     /// Return a string that represents the contents of the element in its displayed shadow DOM.

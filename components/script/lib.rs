@@ -36,6 +36,7 @@ pub(crate) use dom::canvas_context;
 mod drag;
 mod engine;
 mod event_loop;
+mod native_text;
 mod runtime;
 mod theorem_world_gpu;
 mod url;

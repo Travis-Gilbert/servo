@@ -1652,7 +1652,7 @@ impl DocumentEventHandler {
         self.run_default_keydown_handler(cx, target, &keyboard_event, flags.into())
     }
 
-    fn handle_ime_event(&self, cx: &mut JSContext, event: ImeEvent) -> InputEventResult {
+    pub(crate) fn handle_ime_event(&self, cx: &mut JSContext, event: ImeEvent) -> InputEventResult {
         let document = self.window.Document();
         let composition_event = match event {
             ImeEvent::Dismissed => {

@@ -37,7 +37,9 @@ use crate::dom::eventtarget::EventTarget;
 use crate::dom::html::form_controls::htmlinputelement::HTMLInputElement;
 use crate::dom::html::form_controls::input_type::text_input_widget::TextInputWidget;
 use crate::dom::html::form_controls::text_control::TextControlElement;
-use crate::dom::html::form_controls::text_input::{KeyReaction, Lines, TextInput};
+use crate::dom::html::form_controls::text_input::{
+    InputEventType, IsComposing, KeyReaction, Lines, SelectionDirection, TextInput,
+};
 use crate::dom::html::htmlelement::HTMLElement;
 use crate::dom::html::htmlfieldsetelement::HTMLFieldSetElement;
 use crate::dom::html::htmlformelement::{FormControl, HTMLFormElement};
@@ -595,6 +597,42 @@ impl HTMLTextAreaElement {
         self.text_input
             .borrow_mut()
             .set_content(self.DefaultValue());
+        self.handle_text_content_changed(cx);
+    }
+
+    // Native-only text service uses the same editable buffer as keyboard/IME default actions.
+    pub(crate) fn native_text_snapshot(&self) -> Option<(String, (u32, u32))> {
+        if self.ReadOnly() || self.upcast::<Element>().disabled_state() {
+            return None;
+        }
+        let input = self.text_input.borrow();
+        Some((
+            input.get_content().to_string(),
+            (input.selection_start_utf16().0, input.selection_end_utf16().0),
+        ))
+    }
+
+    pub(crate) fn native_text_select(&self, range: (u32, u32)) {
+        self.text_input.borrow_mut().set_selection_range_utf16(
+            range.0.into(),
+            range.1.into(),
+            SelectionDirection::Forward,
+        );
+        self.maybe_update_shared_selection();
+    }
+
+    pub(crate) fn native_text_delete_selection(&self, cx: &mut JSContext, composing: bool) {
+        self.text_input.borrow_mut().insert("");
+        self.queue_input_event(
+            Some(String::new()),
+            if composing {
+                IsComposing::Composing
+            } else {
+                IsComposing::NotComposing
+            },
+            InputEventType::InsertCompositionText,
+        );
+        self.value_dirty.set(true);
         self.handle_text_content_changed(cx);
     }
 }
