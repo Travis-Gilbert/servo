@@ -9,6 +9,7 @@ use crate::dom::types::{HTMLInputElement, HTMLTextAreaElement, Window};
 use embedder_traits::{ImeEvent, InputEventResult};
 use js::context::JSContext;
 use keyboard_types::{CompositionEvent, CompositionState};
+use script_bindings::codegen::GenericBindings::WindowBinding::WindowMethods;
 use servo_base::native_text::*;
 use std::cell::RefCell;
 
@@ -89,7 +90,8 @@ fn valid_range(text: &str, range: (u32, u32)) -> bool {
     start && end
 }
 fn select(window: &Window, range: (u32, u32)) -> Result<(), NativeTextError> {
-    let area = window.Document().focus_handler().focused_area();
+    let document = window.Document();
+    let area = document.focus_handler().focused_area();
     let element = area.element().ok_or(NativeTextError::StaleContext)?;
     if let Some(input) = element.downcast::<HTMLInputElement>() {
         input.native_text_select(range);
@@ -167,9 +169,14 @@ pub(crate) fn dispatch(
                     return Err(NativeTextError::StaleContext);
                 }
             }
+            let mut expected_text: Vec<u16> = expected.text.encode_utf16().collect();
+            expected_text.splice(range.0 as usize..range.1 as usize, text.encode_utf16());
+            let expected_text =
+                String::from_utf16(&expected_text).map_err(|_| NativeTextError::InvalidRange)?;
             select(window, range)?;
             if text.is_empty() && range.0 != range.1 {
-                let area = window.Document().focus_handler().focused_area();
+                let document = window.Document();
+                let area = document.focus_handler().focused_area();
                 let element = area.element().ok_or(NativeTextError::StaleContext)?;
                 if let Some(input) = element.downcast::<HTMLInputElement>() {
                     input.native_text_delete_selection(cx, preedit);
@@ -201,7 +208,10 @@ pub(crate) fn dispatch(
                 {
                     return Err(NativeTextError::StaleContext);
                 }
-                if !valid_range(&after.text, marked) || !valid_range(&after.text, selected) {
+                if after.text != expected_text
+                    || !valid_range(&after.text, marked)
+                    || !valid_range(&after.text, selected)
+                {
                     return Err(NativeTextError::EditRefused);
                 }
                 select(window, selected)?;

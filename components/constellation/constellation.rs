@@ -6123,6 +6123,15 @@ where
             return;
         };
 
+        // A control receipt belongs to its actual current document, including iframe
+        // browsing contexts. A retained/BFCache pipeline must not consume it.
+        if pipeline.webview_id != id.webview_id
+            || !self.browsing_contexts.get(&pipeline.browsing_context_id)
+                .is_some_and(|context| context.pipeline_id == pipeline_id)
+        {
+            return;
+        }
+
         if let Err(error) = pipeline
             .event_loop
             .send(ScriptThreadMessage::EmbedderControlResponse(id, response))
