@@ -2,7 +2,7 @@
   "schema_version": 1,
   "upstream_repository": "https://github.com/servo/servo",
   "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
-  "coverage_revision": "6dd8897f0379218f3dcb0181dd84e30117a9917e",
+  "coverage_revision": "86e6da7e5db02b7bcce2e4e61e53a099bafcdeaf",
   "toolchain": "1.95.0",
   "dependency_policy": "Conservative cumulative application order; not a claim that every predecessor is a semantic dependency.",
   "historical_archive": {
@@ -223,6 +223,20 @@
         "tests/wpt/tests/WebCryptoAPI/sign_verify/ecdsa.https.any.js",
         "tests/wpt/tests/WebCryptoAPI/derive_bits_keys/ecdh_bits.https.any.js",
         "tests/wpt/tests/WebCryptoAPI/derive_bits_keys/ecdh_keys.https.any.js"
+      ],
+      "evidence_status": "pending"
+    },
+    {
+      "id": "storage-shutdown",
+      "kind": "behavioral",
+      "command": "cargo +1.95.0 nextest run --locked -p servo-storage --lib --test main",
+      "paths": [
+        "components/storage/indexeddb/mod.rs",
+        "components/storage/tests/client_storage.rs",
+        "components/storage/tests/storage_thread.rs",
+        "components/shared/storage/lib.rs",
+        "components/shared/storage/client_storage.rs",
+        "components/constellation/constellation.rs"
       ],
       "evidence_status": "pending"
     }
@@ -1662,6 +1676,50 @@
       ],
       "oracle_status": "behavioral_pending",
       "oracle_note": "Original eight tidy failures reproduce before the repair and pass after; semantic source comparison preserves nonmessage tokens. WPT maps exception names/order, not exact wording or every storage reply-loss failure path.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p070",
+      "commits": [
+        "2481f296f5339dc81f445162b052a3d2cbfb16da"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "Cover repaired candidate and exact generated crypto WPT groups",
+      "classification": "maintenance",
+      "depends_on": [
+        "p069"
+      ],
+      "retention_reason": "Retain exact downstream coverage and generated-URL membership checks for selected crypto groups.",
+      "regression_ids": [
+        "queue-component",
+        "artifact-wpt-component"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Component checks establish metadata/runner behavior; actual WPT results are separately recorded on this exact delivery.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p071",
+      "commits": [
+        "86e6da7e5db02b7bcce2e4e61e53a099bafcdeaf"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "Keep registry alive through IndexedDB shutdown",
+      "classification": "engine",
+      "depends_on": [
+        "p070"
+      ],
+      "retention_reason": "Prevent queued synchronous IndexedDB deletes from losing their registry and let failed registry sends reach caller error paths without panic.",
+      "regression_ids": [
+        "storage-shutdown",
+        "storage",
+        "tidy",
+        "clippy"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Regression covers queued ready delete, durable row/directory removal, disconnected helper/manager behavior and remaining-stage shutdown. It does not drain blocked requests, asynchronous SQLite batches or complete worker teardown; fresh browser/native execution remains separate.",
       "upstream_equivalence_status": "pending",
       "evidence_status": "pending"
     }
