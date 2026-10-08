@@ -27,6 +27,14 @@ use style::computed_values::visibility::T as Visibility;
 use web_atoms::{LocalName, local_name};
 const MAX_NODES: usize = 1024;
 const MAX_TEXT: usize = 8192;
+fn digest(value: &str) -> String {
+    use std::fmt::Write;
+    let mut result = String::with_capacity(64);
+    for byte in Sha256::digest(value.as_bytes()).iter() {
+        write!(result, "{byte:02x}").expect("writing digest into String");
+    }
+    result
+}
 fn attr(element: &Element, name: &str) -> Option<String> {
     element.get_attribute_string_value(&LocalName::from(name))
 }
@@ -92,6 +100,7 @@ fn observe(
     element: &Element,
     parent: Option<String>,
     truncated: &mut bool,
+    cx: &JSContext,
 ) -> Option<NativeAccessibilityNode> {
     let role = role(element)?;
     let node = element.upcast::<Node>();
@@ -100,7 +109,7 @@ fn observe(
         .any(|ancestor| {
             ancestor.downcast::<Element>().is_some_and(|e| {
                 e.has_attribute(&local_name!("hidden"))
-                    || e.has_attribute(&local_name!("inert"))
+                    || e.has_attribute(&LocalName::from("inert"))
                     || attr(e, "aria-hidden").as_deref() == Some("true")
             })
         })
@@ -162,7 +171,7 @@ fn observe(
         }
         Some(area.Value().to_string())
     } else if let Some(select) = element.downcast::<HTMLSelectElement>() {
-        Some(select.Value().to_string())
+        Some(select.Value(cx).to_string())
     } else if role == "text" {
         Some(text(node))
     } else {
@@ -172,9 +181,7 @@ fn observe(
         .as_ref()
         .map(|value| value.encode_utf16().count())
         .and_then(|len| u32::try_from(len).ok());
-    let text_digest = value
-        .as_ref()
-        .map(|value| format!("{:x}", Sha256::digest(value.as_bytes())));
+    let text_digest = value.as_ref().map(|value| digest(value));
     let mut actions = Vec::new();
     if offscreen {
         actions.push(NativeAccessibilityActionKind::Reveal);
@@ -238,7 +245,7 @@ fn observe(
         actions,
     })
 }
-fn snapshot(window: &Window) -> NativeAccessibilityResult {
+fn snapshot(window: &Window, cx: &JSContext) -> NativeAccessibilityResult {
     let document = window.Document();
     if !document.is_fully_active() {
         return Err(NativeTextError::DocumentUnavailable);
@@ -258,7 +265,7 @@ fn snapshot(window: &Window) -> NativeAccessibilityResult {
             let id = parent.unique_id(window.pipeline_id());
             known.contains(&id).then_some(id)
         });
-        if let Some(observation) = observe(window, element, parent, &mut truncated) {
+        if let Some(observation) = observe(window, element, parent, &mut truncated, cx) {
             total += observation.label.len() + observation.value.as_ref().map_or(0, String::len);
             if nodes.len() >= MAX_NODES || total > 262144 {
                 truncated = true;
@@ -297,7 +304,7 @@ pub(crate) fn dispatch(
             text: None,
         });
     }
-    let current = snapshot(window)?;
+    let current = snapshot(window, cx)?;
     let NativeAccessibilityRequest::Action {
         webview,
         document,
@@ -337,7 +344,7 @@ pub(crate) fn dispatch(
             } else if let Some(area) = node.downcast::<HTMLTextAreaElement>() {
                 area.Value().to_string()
             } else if let Some(select) = node.downcast::<HTMLSelectElement>() {
-                select.Value().to_string()
+                select.Value(cx).to_string()
             } else {
                 text(&node)
             };
@@ -415,11 +422,10 @@ pub(crate) fn dispatch(
                 return Err(NativeTextError::DocumentUnavailable);
             }
             if !matches!(action, NativeAccessibilityAction::Focus) {
-                let context =
-                    crate::native_text::snapshot(window)?.ok_or(NativeTextError::EditRefused)?;
+                let context = crate::native_text::snapshot(window)?
+                    .ok_or(NativeTextError::EditRefused)?;
                 if context.element != expected.id
-                    || expected.text_digest.as_deref()
-                        != Some(format!("{:x}", Sha256::digest(context.text.as_bytes())).as_str())
+                    || expected.text_digest.as_deref() != Some(digest(&context.text).as_str())
                 {
                     return Err(NativeTextError::StaleContext);
                 }
@@ -444,7 +450,7 @@ pub(crate) fn dispatch(
             }
         },
     }
-    snapshot(window)
+    snapshot(window, cx)
 }
 
 fn reveal(element: &Element, cx: &mut JSContext) {

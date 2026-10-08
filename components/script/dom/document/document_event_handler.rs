@@ -899,7 +899,7 @@ impl DocumentEventHandler {
         let down = MouseButtonEvent::new(
             MouseButtonAction::Down,
             MouseButton::Left,
-            point.cast_unit(),
+            point.into(),
         );
         self.handle_mouse_button_at_hit(cx, down, &native_event(down, 1), &hit);
         // Down can replace/remove/cover the target. Do not deliver Up or
@@ -917,7 +917,7 @@ impl DocumentEventHandler {
             self.implicit_release_pointer_capture(cx, PointerId::Mouse as i32, "mouse", true);
             return Err(NativeTextError::StaleContext);
         }
-        let up = MouseButtonEvent::new(MouseButtonAction::Up, MouseButton::Left, point.cast_unit());
+        let up = MouseButtonEvent::new(MouseButtonAction::Up, MouseButton::Left, point.into());
         self.handle_mouse_button_at_hit(cx, up, &native_event(up, 0), &current_hit.unwrap());
         Ok(())
     }

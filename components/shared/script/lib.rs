@@ -295,17 +295,19 @@ pub enum ScriptThreadMessage {
     /// Evaluate the given JavaScript and return a result via a corresponding message
     /// to the Constellation.
     EvaluateJavaScript(WebViewId, PipelineId, JavaScriptEvaluationId, String),
-    /// Resolve or import a native World texture in the active document.
+    /// Observe or act on actual current-document native semantics.
     NativeAccessibility(
         PipelineId,
         servo_base::native_accessibility::NativeAccessibilityRequest,
         GenericCallback<servo_base::native_accessibility::NativeAccessibilityResult>,
     ),
+    /// Query or edit the actual focused current-document text buffer.
     NativeText(
         PipelineId,
         servo_base::native_text::NativeTextRequest,
         GenericCallback<servo_base::native_text::NativeTextResult>,
     ),
+    /// Resolve or import a native World texture in the active document.
     TheoremWorldTexture(
         PipelineId,
         TheoremWorldTextureRequest,

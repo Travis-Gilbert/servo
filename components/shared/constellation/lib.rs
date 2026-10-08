@@ -105,17 +105,19 @@ pub enum EmbedderToConstellationMessage {
     /// Evaluate a JavaScript string in the context of a `WebView`. When execution is complete or an
     /// error is encountered, a correpsonding message will be sent to the embedding layer.
     EvaluateJavaScript(WebViewId, JavaScriptEvaluationId, String),
-    /// Resolve or import a native World texture in the active document.
+    /// Observe or act on actual current-document native semantics.
     NativeAccessibility(
         WebViewId,
         servo_base::native_accessibility::NativeAccessibilityRequest,
         GenericCallback<servo_base::native_accessibility::NativeAccessibilityResult>,
     ),
+    /// Query or edit the actual focused current-document text buffer.
     NativeText(
         WebViewId,
         servo_base::native_text::NativeTextRequest,
         GenericCallback<servo_base::native_text::NativeTextResult>,
     ),
+    /// Resolve or import a native World texture in the active document.
     TheoremWorldTexture(
         WebViewId,
         TheoremWorldTextureRequest,
