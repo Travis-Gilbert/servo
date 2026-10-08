@@ -57,6 +57,10 @@ pub enum TheoremWorldTextureRequest {
         binding: TheoremWorldTextureBinding,
         frame: TheoremWorldFrame,
     },
+    /// Check exact active document/context/texture and completed frame without GPU work.
+    Validate {
+        binding: TheoremWorldTextureBinding,
+    },
     Revoke {
         binding: TheoremWorldTextureBinding,
     },
