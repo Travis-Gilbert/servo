@@ -223,6 +223,11 @@ pub(crate) fn dispatch(
                 completed_frame: None,
             }
         }),
+        TheoremWorldTextureRequest::Validate { binding } => validate_destination(window, &binding)
+            .map(|completed_frame| TheoremWorldTextureReceipt {
+                binding,
+                completed_frame,
+            }),
         TheoremWorldTextureRequest::Revoke { binding } => {
             let mut destinations = window.theorem_world_gpu().textures.borrow_mut();
             let count = destinations.len();
@@ -388,6 +393,25 @@ fn register(
         .borrow_mut()
         .take()
         .unwrap_or(Err(TheoremWorldTextureError::InvalidBootstrap))
+}
+
+fn validate_destination(
+    window: &Window,
+    binding: &TheoremWorldTextureBinding,
+) -> Result<Option<u64>, TheoremWorldTextureError> {
+    if binding.document != window.pipeline_id() || binding.webview != window.webview_id() {
+        return Err(TheoremWorldTextureError::StaleBinding);
+    }
+    let destinations = window.theorem_world_gpu().textures.borrow();
+    let destination = destinations
+        .iter()
+        .find(|destination| &destination.binding == binding)
+        .ok_or(TheoremWorldTextureError::StaleBinding)?;
+    if !texture_valid(&destination.context, &destination.texture, binding.source) {
+        return Err(TheoremWorldTextureError::InvalidTexture);
+    }
+    let completed = destination.last_frame.get();
+    Ok((completed != 0).then_some(completed))
 }
 
 fn import(

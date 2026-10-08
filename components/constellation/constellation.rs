@@ -1684,7 +1684,7 @@ where
             TheoremWorldTextureError as Error, TheoremWorldTextureRequest as Request,
         };
         // Cleanup may target an inactive document still retained in session history.
-        // Registration and imports always target the current top-level pipeline.
+        // Registration, validation and imports target the current top-level pipeline.
         let pipeline = if let Request::Revoke { binding } = &request {
             self.pipelines.get(&binding.document).filter(|pipeline| {
                 binding.webview == webview && pipeline.webview_id == webview
@@ -1698,7 +1698,7 @@ where
             let _ = callback.send(Err(Error::DocumentUnavailable));
             return;
         };
-        if let Request::Import { binding, .. } = &request {
+        if let Request::Import { binding, .. } | Request::Validate { binding } = &request {
             if binding.webview != webview || binding.document != pipeline.id {
                 let _ = callback.send(Err(Error::StaleBinding));
                 return;

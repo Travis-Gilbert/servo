@@ -786,7 +786,7 @@ impl WebView {
         );
     }
 
-    /// Register, import, or revoke a native World texture in this view's current document.
+    /// Register, validate, import, or revoke a native World texture in this view's current document.
     ///
     /// # Safety
     /// Import accepts an IOSurface address borrowed from an admitted native producer lease.
