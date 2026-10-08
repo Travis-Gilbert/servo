@@ -19,7 +19,7 @@ pub(crate) struct State {
     #[ignore_malloc_size_of = "bounded native text context; no DOM refs"]
     marked: RefCell<Option<NativeTextContext>>,
 }
-fn snapshot(window: &Window) -> NativeTextResult {
+pub(crate) fn snapshot(window: &Window) -> NativeTextResult {
     let document = window.Document();
     if !document.is_fully_active() {
         return Err(NativeTextError::DocumentUnavailable);
