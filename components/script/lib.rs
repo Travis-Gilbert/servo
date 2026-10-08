@@ -37,6 +37,7 @@ mod drag;
 mod engine;
 mod event_loop;
 mod runtime;
+mod theorem_world_gpu;
 mod url;
 
 pub mod layout_dom;

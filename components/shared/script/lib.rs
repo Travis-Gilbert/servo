@@ -42,6 +42,9 @@ use servo_base::id::{
     BrowsingContextId, HistoryStateId, LCPCandidateID, PipelineId, PipelineNamespaceId,
     PipelineNamespaceRequest, ScriptEventLoopId, WebViewId,
 };
+use servo_base::theorem_world_gpu::{
+    TheoremWorldTextureError, TheoremWorldTextureReceipt, TheoremWorldTextureRequest,
+};
 #[cfg(feature = "bluetooth")]
 use servo_bluetooth_traits::BluetoothRequest;
 #[cfg(feature = "webgl")]
@@ -307,6 +310,12 @@ pub enum ScriptThreadMessage {
     /// Evaluate the given JavaScript and return a result via a corresponding message
     /// to the Constellation.
     EvaluateJavaScript(WebViewId, PipelineId, JavaScriptEvaluationId, String),
+    /// Resolve or import a native World texture in the active document.
+    TheoremWorldTexture(
+        PipelineId,
+        TheoremWorldTextureRequest,
+        GenericCallback<Result<TheoremWorldTextureReceipt, TheoremWorldTextureError>>,
+    ),
     /// Capture the active pipeline document through its live layout state.
     DocumentLayoutSnapshot(
         PipelineId,

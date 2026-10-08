@@ -6,6 +6,8 @@
 
 pub use webgl_mode::WebGLComm;
 
+#[cfg(target_os = "macos")]
+mod theorem_world_iosurface;
 mod webgl_limits;
 mod webgl_mode;
 pub mod webgl_thread;

@@ -389,6 +389,8 @@ pub(crate) struct Window {
     #[no_trace]
     #[cfg(feature = "webgl")]
     webgl_chan: Option<WebGLChan>,
+    /// Strong, traced native texture grants scoped to this document.
+    theorem_world_gpu: crate::theorem_world_gpu::State,
 
     #[ignore_malloc_size_of = "defined in webxr"]
     #[no_trace]
@@ -505,6 +507,10 @@ pub(crate) struct Window {
 }
 
 impl Window {
+    pub(crate) fn theorem_world_gpu(&self) -> &crate::theorem_world_gpu::State {
+        &self.theorem_world_gpu
+    }
+
     pub(crate) fn script_thread(&self) -> Rc<ScriptThread> {
         Weak::upgrade(&self.weak_script_thread)
             .expect("Weak reference should always be upgradable when a ScriptThread is running")
@@ -4015,6 +4021,7 @@ impl Window {
             test_runner: Default::default(),
             #[cfg(feature = "webgl")]
             webgl_chan,
+            theorem_world_gpu: Default::default(),
             #[cfg(feature = "webxr")]
             webxr_registry,
             pending_image_callbacks: Default::default(),
