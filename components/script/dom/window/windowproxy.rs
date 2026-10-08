@@ -1413,7 +1413,13 @@ impl Drop for WindowProxyHandler {
 fn throw_security_error(realm: &mut CurrentRealm) -> bool {
     if !unsafe { JS_IsExceptionPending(realm) } {
         let global = GlobalScope::from_current_realm(realm);
-        throw_dom_exception(realm, &global, Error::Security(None));
+        throw_dom_exception(
+            realm,
+            &global,
+            Error::Security(Some(
+                "Access to the cross-origin window is denied".to_owned(),
+            )),
+        );
     }
     false
 }

@@ -176,7 +176,10 @@ impl IDBIndex {
     fn check_transaction_active(&self) -> Fallible<()> {
         let transaction = self.object_store.transaction();
         if !transaction.is_active() || !transaction.is_usable() {
-            return Err(Error::TransactionInactive(None));
+            return Err(Error::TransactionInactive(Some(
+                "The index request cannot run because its transaction is not active or usable"
+                    .to_owned(),
+            )));
         }
         Ok(())
     }

@@ -74,7 +74,7 @@
 ./components/script/dom/indexeddb/idbdatabase.rs 13
 ./components/script/dom/indexeddb/idbfactory.rs 9
 ./components/script/dom/indexeddb/idbkeyrange.rs 1
-./components/script/dom/indexeddb/idbobjectstore.rs 26
+./components/script/dom/indexeddb/idbobjectstore.rs 23
 ./components/script/dom/indexeddb/idbopendbrequest.rs 1
 ./components/script/dom/indexeddb/idbrequest.rs 7
 ./components/script/dom/indexeddb/idbtransaction.rs 7

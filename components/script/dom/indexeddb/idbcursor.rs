@@ -228,7 +228,10 @@ impl IDBCursor {
         // If this's transaction's state is not active, throw a "TransactionInactiveError"
         // DOMException.
         if !self.transaction.is_active() || !self.transaction.is_usable() {
-            return Err(Error::TransactionInactive(None));
+            return Err(Error::TransactionInactive(Some(
+                "The cursor cannot iterate because its transaction is not active or usable"
+                    .to_owned(),
+            )));
         }
 
         // If this's source or effective object store has been deleted, throw an
@@ -259,13 +262,18 @@ impl IDBCursor {
         // Step 2. If transaction's state is not active, throw a "TransactionInactiveError"
         // DOMException.
         if !self.transaction.is_active() || !self.transaction.is_usable() {
-            return Err(Error::TransactionInactive(None));
+            return Err(Error::TransactionInactive(Some(
+                "The cursor cannot modify records because its transaction is not active or usable"
+                    .to_owned(),
+            )));
         }
 
         // Step 3. If transaction is a read-only transaction, throw a "ReadOnlyError"
         // DOMException.
         if let IDBTransactionMode::Readonly = self.transaction.get_mode() {
-            return Err(Error::ReadOnly(None));
+            return Err(Error::ReadOnly(Some(
+                "The cursor cannot modify records in a read-only transaction".to_owned(),
+            )));
         }
 
         // Step 4. If this's source or effective object store has been deleted, throw an
@@ -701,7 +709,10 @@ pub(crate) fn iterate_cursor(
                     "iterate_cursor was given a primary key for a cursor that is not an index \
                      cursor in direction next or prev."
                 );
-                return Err(Error::InvalidAccess(None));
+                return Err(Error::InvalidAccess(Some(
+                    "Cursor iteration with a primary key requires an index cursor in direction next or prev"
+                        .to_owned(),
+                )));
             },
         }
     }
@@ -947,7 +958,9 @@ pub(crate) fn iterate_cursor(
     // record. A cursor that somehow did not is a request that failed, not a crash.
     let Some(found_record) = found_record else {
         warn!("iterate_cursor reached step 10 without a found record.");
-        return Err(Error::Operation(None));
+        return Err(Error::Operation(Some(
+            "Cursor iteration completed without a selected record".to_owned(),
+        )));
     };
 
     // Step 10. Set cursor’s position to position.
