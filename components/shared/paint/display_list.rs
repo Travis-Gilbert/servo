@@ -858,6 +858,10 @@ pub struct PaintDisplayListInfo {
     /// If this display list contains a blinking caret, this value will be filled with its animation
     /// key and original color value so that the painter can animate the caret.
     pub caret_property_binding: Option<(PropertyBindingKey<ColorF>, ColorF)>,
+
+    /// Actual glyph-selection/caret rectangles from the current display-list traversal.
+    /// Native text candidates use these with the same scroll-tree transforms as paint.
+    pub native_text_rects: Vec<(LayoutRect, ScrollTreeNodeId)>,
 }
 
 impl PaintDisplayListInfo {
@@ -909,6 +913,7 @@ impl PaintDisplayListInfo {
             is_contentful: false,
             first_reflow,
             caret_property_binding: Default::default(),
+            native_text_rects: Vec::new(),
         }
     }
 

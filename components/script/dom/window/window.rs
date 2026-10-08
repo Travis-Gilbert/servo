@@ -3090,6 +3090,11 @@ impl Window {
             .query_text_index(node.to_trusted_node_address(), point_in_viewport)
     }
 
+    pub(crate) fn native_text_rect_query(&self) -> Option<Rect<Au, CSSPixel>> {
+        self.layout_reflow(QueryMsg::NativeTextGeometry);
+        self.layout().query_native_text_rect()
+    }
+
     pub(crate) fn elements_from_point_query(
         &self,
         point: LayoutPoint,

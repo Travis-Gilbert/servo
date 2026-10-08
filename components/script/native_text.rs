@@ -53,6 +53,14 @@ fn snapshot(window: &Window) -> NativeTextResult {
         text,
         selection,
         marked: None,
+        selection_rect: window.native_text_rect_query().map(|rect| {
+            [
+                rect.origin.x.to_f64_px(),
+                rect.origin.y.to_f64_px(),
+                rect.size.width.to_f64_px(),
+                rect.size.height.to_f64_px(),
+            ]
+        }),
         rect: [
             rect.origin.x.to_f64_px(),
             rect.origin.y.to_f64_px(),
@@ -122,7 +130,10 @@ pub(crate) fn dispatch(
     let NativeTextRequest::Edit { expected, action } = request else {
         return Ok(current);
     };
-    if current.as_ref() != Some(&expected) {
+    if !current
+        .as_ref()
+        .is_some_and(|current| current.same_editor_state(&expected))
+    {
         return Err(NativeTextError::StaleContext);
     }
     match action {
@@ -165,7 +176,10 @@ pub(crate) fn dispatch(
                     return Err(NativeTextError::EditRefused);
                 }
                 // Native callbacks can run author handlers; never apply to their replacement focus/value.
-                if snapshot(window)?.as_ref() != Some(&expected) {
+                if !snapshot(window)?
+                    .as_ref()
+                    .is_some_and(|current| current.same_editor_state(&expected))
+                {
                     return Err(NativeTextError::StaleContext);
                 }
             }
