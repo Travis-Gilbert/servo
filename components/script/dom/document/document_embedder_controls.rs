@@ -212,7 +212,7 @@ impl DocumentEmbedderControls {
         };
 
         // Never process embedder responses on inactive `Document`s.
-        if !element.node().owner_doc().is_active() {
+        if !element.node().owner_doc().is_fully_active() {
             return;
         }
 
