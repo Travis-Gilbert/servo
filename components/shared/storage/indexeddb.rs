@@ -174,8 +174,7 @@ pub trait KvsEngine: MallocSizeOf + Send {
         on_complete: Box<dyn FnOnce() + Send + 'static>,
     );
 
-    fn key_generator_current_number(&self, store_name: &str)
-    -> BackendResult<Option<i64>>;
+    fn key_generator_current_number(&self, store_name: &str) -> BackendResult<Option<i64>>;
     fn set_key_generator_current_number(
         &self,
         store_name: &str,
@@ -201,12 +200,8 @@ pub trait KvsEngine: MallocSizeOf + Send {
     fn rename_store(&self, store_name: &str, new_name: &str) -> BackendResult<()>;
 
     /// Rename an index without touching its records, for the same reason.
-    fn rename_index(
-        &self,
-        store_name: &str,
-        index_name: &str,
-        new_name: &str,
-    ) -> BackendResult<()>;
+    fn rename_index(&self, store_name: &str, index_name: &str, new_name: &str)
+    -> BackendResult<()>;
 
     fn version(&self) -> BackendResult<u64>;
     fn set_version(&self, version: u64) -> BackendResult<()>;
@@ -259,8 +254,7 @@ where
         (**self).process_transaction(transaction, on_complete)
     }
 
-    fn key_generator_current_number(&self, store_name: &str)
-    -> BackendResult<Option<i64>> {
+    fn key_generator_current_number(&self, store_name: &str) -> BackendResult<Option<i64>> {
         (**self).key_generator_current_number(store_name)
     }
 

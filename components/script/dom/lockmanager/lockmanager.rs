@@ -117,7 +117,8 @@ impl LockManager {
     }
 
     pub(crate) fn new(cx: &mut JSContext, global: &GlobalScope) -> DomRoot<LockManager> {
-        let manager = reflect_dom_object_with_cx(Box::new(LockManager::new_inherited()), global, cx);
+        let manager =
+            reflect_dom_object_with_cx(Box::new(LockManager::new_inherited()), global, cx);
         global.register_web_lock_client(manager.client_id.clone());
         manager
     }
@@ -252,8 +253,7 @@ impl LockManager {
             promise.reject_error(
                 realm,
                 Error::NotSupported(Some(
-                    "The 'signal' option cannot be used with 'steal' or 'ifAvailable'."
-                        .to_string(),
+                    "The 'signal' option cannot be used with 'steal' or 'ifAvailable'.".to_string(),
                 )),
             );
             return promise;
@@ -292,7 +292,10 @@ impl LockManager {
             mode: to_web_lock_mode(mode),
             if_available: options.ifAvailable,
             steal: options.steal,
-            pipeline_bound: self.global().downcast::<SharedWorkerGlobalScope>().is_none(),
+            pipeline_bound: self
+                .global()
+                .downcast::<SharedWorkerGlobalScope>()
+                .is_none(),
             result_handler,
         });
         if !sent {
@@ -483,7 +486,13 @@ impl LockManager {
 
     /// <https://w3c.github.io/web-locks/#release-the-lock>, followed by
     /// settling the lock's released promise.
-    fn waiting_promise_settled(&self, cx: &mut CurrentRealm, request_id: u64, fulfilled: bool, value: HandleValue) {
+    fn waiting_promise_settled(
+        &self,
+        cx: &mut CurrentRealm,
+        request_id: u64,
+        fulfilled: bool,
+        value: HandleValue,
+    ) {
         // A stolen lock was already released and its promise rejected.
         let Some(held) = self.held.borrow_mut().remove(&request_id) else {
             return;
@@ -549,7 +558,9 @@ impl LockManagerMethods<crate::DomTypeHolder> for LockManager {
         // resolve promise with it.
         let request_id = self.allocate_request_id();
         let result_handler = self.get_or_setup_result_handler();
-        self.queries.borrow_mut().insert(request_id, promise.clone());
+        self.queries
+            .borrow_mut()
+            .insert(request_id, promise.clone());
         let sent = self.send(WebLockMessage::Query {
             origin,
             request_id,

@@ -8,8 +8,6 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
-use profile::mem as profile_mem;
-use profile::time as profile_time;
 use profile_traits::generic_callback::GenericCallback as ProfiledCallback;
 use servo_base::generic_channel::{self, GenericCallback, GenericSend};
 use servo_base::id::{BrowsingContextId, Index, PipelineNamespaceId, TEST_WEBVIEW_ID, WebViewId};

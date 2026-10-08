@@ -708,9 +708,7 @@ fn map_registry_error<E: Debug>(error: ClientStorageErrorr<E>) -> ClientStorageE
         ClientStorageErrorr::SessionStorageRequiresWindow => {
             ClientStorageErrorr::SessionStorageRequiresWindow
         },
-        ClientStorageErrorr::Internal(error) => {
-            ClientStorageErrorr::Internal(format!("{error:?}"))
-        },
+        ClientStorageErrorr::Internal(error) => ClientStorageErrorr::Internal(format!("{error:?}")),
     }
 }
 struct RegistryBackendAdapter<E>(E);
@@ -748,13 +746,7 @@ where
         sender: &GenericSender<ClientStorageThreadMessage>,
     ) -> Result<StorageProxyMap, ClientStorageErrorr<String>> {
         self.0
-            .obtain_a_storage_bottle_map(
-                storage_type,
-                webview,
-                storage_identifier,
-                origin,
-                sender,
-            )
+            .obtain_a_storage_bottle_map(storage_type, webview, storage_identifier, origin, sender)
             .map_err(map_registry_error)
     }
 

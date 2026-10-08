@@ -28,10 +28,10 @@ use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::element::Element;
+use crate::dom::html::form_controls::htmlinputelement::HTMLInputElement;
 use crate::dom::html::htmlcanvaselement::HTMLCanvasElement;
 use crate::dom::html::htmlselectelement::HTMLSelectElement;
 use crate::dom::html::htmltextareaelement::HTMLTextAreaElement;
-use crate::dom::html::form_controls::htmlinputelement::HTMLInputElement;
 use crate::dom::node::Node;
 use crate::dom::node::iterators::ShadowIncluding;
 use crate::dom::window::Window;
@@ -201,8 +201,8 @@ fn build_node(
             .map(|canvas| canvas.visible)
             .or_else(|| layout.map(|layout| layout.visible))
             .unwrap_or(false),
-        enabled: !element.is_actually_disabled()
-            && !attribute_value(element, &local_name!("aria-disabled"))
+        enabled: !element.is_actually_disabled() &&
+            !attribute_value(element, &local_name!("aria-disabled"))
                 .is_some_and(|value| value.eq_ignore_ascii_case("true")),
         editable: element.read_write_state(),
         scrollable: layout.is_some_and(|layout| layout.scrollable),

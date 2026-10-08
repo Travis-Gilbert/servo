@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use rusqlite::{Connection, OptionalExtension};
 use servo_base::threadpool::ThreadPool;
+use storage_traits::webstorage_thread::WebStorageEngine;
 
 use crate::shared::{DB_IN_MEMORY_INIT_PRAGMAS, DB_IN_MEMORY_PRAGMAS, DB_INIT_PRAGMAS, DB_PRAGMAS};
-use storage_traits::webstorage_thread::WebStorageEngine;
 
 pub struct SqliteEngine {
     connection: Connection,
@@ -144,8 +144,9 @@ impl WebStorageEngine for SqliteEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::SqliteEngine;
     use storage_traits::webstorage_thread::WebStorageEngine;
+
+    use super::SqliteEngine;
 
     #[test]
     fn default_emptiness_tracks_rows_and_preserves_database_errors() {

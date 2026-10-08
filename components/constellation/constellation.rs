@@ -161,13 +161,14 @@ use servo_config::{opts, pref};
 use servo_constellation_traits::{
     AuxiliaryWebViewCreationRequest, AuxiliaryWebViewCreationResponse, ConstellationInterest,
     EmbedderToConstellationMessage, HistoryTraversalSource, IFrameLoadInfo, IFrameLoadInfoWithData,
-    ScreenshotReadinessResponse, ScriptToConstellationMessage, ScrollStateUpdate,
-    ServiceWorkerAlgorithm, ServiceWorkerManagerFactory, ServiceWorkerMsg,
     SessionHistoryTraversalRequest, StructuredSerializedData, TargetSnapshotParams,
     TraversalDirection, UserContentManagerAction, WindowSizeType, WorkerAnimationFrameTick,
     NavigationHistoryBehavior, PaintMetricEvent, PortMessageTask, PortTransferInfo,
     IFrameSizeMsg, LoadData, LoadOrigin, LogEntry, MessagePortMsg, NamedBrowsingContextInfo,
-    RemoteFocusOperation, SWManagerSenders,
+    RemoteFocusOperation, SWManagerSenders, ScreenshotReadinessResponse,
+    ServiceWorkerManagerFactory, ServiceWorkerMsg, StructuredSerializedData, TargetSnapshotParams,
+    TraversalDirection, UserContentManagerAction, WindowSizeType,
+    ScriptToConstellationMessage, ScrollStateUpdate, ServiceWorkerAlgorithm,
 };
 use servo_url::{Host, ImmutableOrigin, ServoUrl};
 use storage_traits::StorageThreads;
@@ -1991,12 +1992,12 @@ where
                 load_data,
                 history_handling,
             ) => {
-                let Some((webview_id, pipeline_id)) =
-                    self.browsing_contexts
-                        .get(&browsing_context_id)
-                        .map(|browsing_context| {
-                            (browsing_context.webview_id, browsing_context.pipeline_id)
-                        })
+                let Some((webview_id, pipeline_id)) = self
+                    .browsing_contexts
+                    .get(&browsing_context_id)
+                    .map(|browsing_context| {
+                        (browsing_context.webview_id, browsing_context.pipeline_id)
+                    })
                 else {
                     return warn!("{browsing_context_id}: Load in unknown browsing context");
                 };
@@ -6283,8 +6284,8 @@ where
         // In order to get repeatability, we sort the pipeline ids.
         let mut pipeline_ids: Vec<&PipelineId> = self.pipelines.keys().collect();
         pipeline_ids.sort_unstable();
-        if let Some((ref mut rng, probability)) = self.random_pipeline_closure
-            && let Some(pipeline_id) = pipeline_ids.choose(rng)
+        if let Some((ref mut rng, probability)) = self.random_pipeline_closure &&
+            let Some(pipeline_id) = pipeline_ids.choose(rng)
         {
             let pipeline_id = **pipeline_id;
             let pending_pipeline = self.pipelines.get(&pipeline_id).is_some_and(|pipeline| {

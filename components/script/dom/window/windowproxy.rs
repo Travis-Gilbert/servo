@@ -172,9 +172,7 @@ impl WindowProxy {
         creator: CreatorBrowsingContextInfo,
         name: DOMString,
     ) -> WindowProxy {
-        let name = frame_element.map_or(name, |e| {
-            e.get_string_attribute(&local_name!("name"))
-        });
+        let name = frame_element.map_or(name, |e| e.get_string_attribute(&local_name!("name")));
         WindowProxy {
             reflector: Reflector::new(),
             browsing_context_id,
@@ -1069,7 +1067,11 @@ impl WindowProxy {
 
     pub(crate) fn set_name(&self, name: DOMString) {
         *self.name.borrow_mut() = name;
-        if let Some(document) = self.currently_active.get().and_then(ScriptThread::find_document) {
+        if let Some(document) = self
+            .currently_active
+            .get()
+            .and_then(ScriptThread::find_document)
+        {
             self.notify_constellation_of_name(document.window());
         }
     }

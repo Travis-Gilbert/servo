@@ -364,7 +364,9 @@ impl IDBFactory {
                     // is waiting at step 10.3 and only moves on once it is told the event phase
                     // is over, so the message below is still sent.
                     None => {
-                        warn!("ConnectionMsg::VersionChange arrived for a request with no connection.")
+                        warn!(
+                            "ConnectionMsg::VersionChange arrived for a request with no connection."
+                        )
                     },
                 }
 

@@ -48,10 +48,8 @@ pub(crate) fn query(window: &Window, point: WebViewPoint, cx: &mut JSContext) ->
     let point: Point2D<f32, CSSPixel> =
         point.as_device_point(viewport.hidpi_scale_factor) / viewport.hidpi_scale_factor;
 
-    let paint_tree = document.ElementsFromPoint(
-        Finite::wrap(point.x as f64),
-        Finite::wrap(point.y as f64),
-    );
+    let paint_tree =
+        document.ElementsFromPoint(Finite::wrap(point.x as f64), Finite::wrap(point.y as f64));
 
     // An empty paint tree covers both out-of-viewport points and points with no painted
     // element, mirroring `DocumentOrShadowRoot::elements_from_point` returning an empty
