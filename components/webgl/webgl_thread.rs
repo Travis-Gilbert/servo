@@ -82,6 +82,7 @@ pub(crate) struct GLContextData {
     /// The context should be removed, but the [`WebGLThread`] is currently waiting on
     /// WebRender to finish rendering to the context in order to delete it.
     marked_for_deletion: bool,
+    painter_id: PainterId,
 }
 
 #[derive(Debug)]
@@ -369,6 +370,32 @@ impl WebGLThread {
                         }
                     }))
                     .unwrap();
+            },
+            WebGLMsg::TheoremWorldImport(binding, frame, sender, completion_guard) => {
+                use servo_base::theorem_world_gpu::TheoremWorldTextureError as Error;
+                let result = self
+                    .make_current_if_needed(WebGLContextId(binding.context))
+                    .ok_or(Error::StaleBinding)
+                    .and_then(|data| {
+                        if data.marked_for_deletion
+                            || data.painter_id != binding.webview.into()
+                            || data.state._webgl_version != WebGLVersion::WebGL2
+                        {
+                            return Err(Error::StaleBinding);
+                        }
+                        #[cfg(target_os = "macos")]
+                        {
+                            crate::theorem_world_iosurface::import(&data.gl, &binding, &frame)
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            Err(Error::Unsupported)
+                        }
+                    });
+                let _ = sender.send(result);
+                // The callback owns the native producer lease. Script may have
+                // disappeared, so the GPU message keeps its own copy until now.
+                drop(completion_guard);
             },
             WebGLMsg::SetImageKey(ctx_id, image_key) => {
                 self.handle_set_image_key(ctx_id, image_key);
@@ -682,6 +709,7 @@ impl WebGLThread {
                 state,
                 attributes,
                 marked_for_deletion: false,
+                painter_id,
             },
         );
 

@@ -776,6 +776,42 @@ impl WebView {
         );
     }
 
+    /// Register, import, or revoke a native World texture in this view's current document.
+    ///
+    /// # Safety
+    /// Import accepts an IOSurface address borrowed from an admitted native producer lease.
+    /// The caller must retain that lease without modifying or reusing its allocation until
+    /// the callback completes, including error completion. Never accept addresses from JS,
+    /// network requests, or a different process. This API refuses multiprocess mode.
+    pub unsafe fn theorem_world_texture(
+        &self,
+        request: embedder_traits::TheoremWorldTextureRequest,
+        callback: impl FnOnce(
+            Result<
+                embedder_traits::TheoremWorldTextureReceipt,
+                embedder_traits::TheoremWorldTextureError,
+            >,
+        ) + Send
+        + 'static,
+    ) {
+        if servo_config::opts::get().multiprocess || !cfg!(target_os = "macos") {
+            callback(Err(embedder_traits::TheoremWorldTextureError::Unsupported));
+            return;
+        }
+        let mut callback = Some(callback);
+        let callback = GenericCallback::new(move |result| {
+            if let Some(callback) = callback.take() {
+                callback(result.unwrap_or(Err(
+                    embedder_traits::TheoremWorldTextureError::DocumentUnavailable,
+                )));
+            }
+        })
+        .expect("Failed to create native World texture callback");
+        self.inner().servo.constellation_proxy().send(
+            EmbedderToConstellationMessage::TheoremWorldTexture(self.id(), request, callback),
+        );
+    }
+
     /// Capture an owned DOM/layout/paint projection for the active document.
     ///
     /// Layout geometry comes from the live FragmentTree and paint ordering comes from the live

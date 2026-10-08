@@ -11,6 +11,9 @@
 mod from_script_message;
 mod structured_data;
 
+use servo_base::theorem_world_gpu::{
+    TheoremWorldTextureError, TheoremWorldTextureReceipt, TheoremWorldTextureRequest,
+};
 use std::collections::VecDeque;
 use std::fmt;
 use std::time::Duration;
@@ -100,6 +103,12 @@ pub enum EmbedderToConstellationMessage {
     /// Evaluate a JavaScript string in the context of a `WebView`. When execution is complete or an
     /// error is encountered, a correpsonding message will be sent to the embedding layer.
     EvaluateJavaScript(WebViewId, JavaScriptEvaluationId, String),
+    /// Resolve or import a native World texture in the active document.
+    TheoremWorldTexture(
+        WebViewId,
+        TheoremWorldTextureRequest,
+        GenericCallback<Result<TheoremWorldTextureReceipt, TheoremWorldTextureError>>,
+    ),
     /// Capture an owned document layout snapshot and invoke the callback asynchronously.
     DocumentLayoutSnapshot(
         WebViewId,

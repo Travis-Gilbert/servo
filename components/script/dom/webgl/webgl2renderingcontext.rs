@@ -478,6 +478,9 @@ impl WebGL2RenderingContext {
         dst: &mut ArrayBufferView,
         dst_elem_offset: u32,
     ) {
+        if self.base.deny_native_readback() {
+            return;
+        }
         handle_potential_webgl_error!(self.base, self.base.validate_framebuffer(), return);
 
         if self.bound_pixel_pack_buffer.get().is_some() {
@@ -984,6 +987,10 @@ impl CanvasContext for WebGL2RenderingContext {
         self.base.context_id()
     }
 
+    fn origin_is_clean(&self) -> bool {
+        !self.base.native_surface_is_protected()
+    }
+
     fn canvas(&self) -> Option<RootedHTMLCanvasElementOrOffscreenCanvas> {
         self.base.canvas()
     }
@@ -1284,6 +1291,11 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         pname: u32,
         mut rval: MutableHandleValue,
     ) {
+        if self.base.native_surface_is_protected()
+            && pname == constants::FRAMEBUFFER_ATTACHMENT_OBJECT_NAME
+        {
+            return rval.set(NullValue());
+        }
         let fb_slot = match target {
             constants::FRAMEBUFFER | constants::DRAW_FRAMEBUFFER => {
                 self.base.get_draw_framebuffer_slot()
@@ -1654,6 +1666,10 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             handle_potential_webgl_error!(self.base, self.bound_buffer(cx, target), return);
         let bound_buffer =
             handle_potential_webgl_error!(self.base, bound_buffer.ok_or(InvalidOperation), return);
+
+        if self.base.deny_native_readback() {
+            return;
+        }
 
         let dst_elem_size = dst_buffer.get_array_type().byte_size().unwrap();
         let dst_elem_count = dst_buffer.len() / dst_elem_size;
@@ -2251,6 +2267,9 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         pixel_type: u32,
         dst_byte_offset: i64,
     ) {
+        if self.base.deny_native_readback() {
+            return;
+        }
         handle_potential_webgl_error!(self.base, self.base.validate_framebuffer(), return);
 
         let dst = match self.bound_pixel_pack_buffer.get() {

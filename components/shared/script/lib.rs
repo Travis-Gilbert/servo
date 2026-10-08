@@ -9,6 +9,9 @@
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
 
+use servo_base::theorem_world_gpu::{
+    TheoremWorldTextureError, TheoremWorldTextureReceipt, TheoremWorldTextureRequest,
+};
 use std::fmt;
 
 use crossbeam_channel::RecvTimeoutError;
@@ -292,6 +295,12 @@ pub enum ScriptThreadMessage {
     /// Evaluate the given JavaScript and return a result via a corresponding message
     /// to the Constellation.
     EvaluateJavaScript(WebViewId, PipelineId, JavaScriptEvaluationId, String),
+    /// Resolve or import a native World texture in the active document.
+    TheoremWorldTexture(
+        PipelineId,
+        TheoremWorldTextureRequest,
+        GenericCallback<Result<TheoremWorldTextureReceipt, TheoremWorldTextureError>>,
+    ),
     /// Capture the active pipeline document through its live layout state.
     DocumentLayoutSnapshot(
         PipelineId,

@@ -1505,6 +1505,9 @@ where
             ) => {
                 self.handle_evaluate_javascript(webview_id, evaluation_id, script);
             },
+            EmbedderToConstellationMessage::TheoremWorldTexture(webview_id, request, callback) => {
+                self.handle_theorem_world_texture(webview_id, request, callback);
+            },
             EmbedderToConstellationMessage::DocumentLayoutSnapshot(webview_id, callback) => {
                 self.handle_document_layout_snapshot(webview_id, callback);
             },
@@ -1646,6 +1649,55 @@ where
     }
 
     #[servo_tracing::instrument(skip_all)]
+    fn handle_theorem_world_texture(
+        &mut self,
+        webview: WebViewId,
+        request: servo_base::theorem_world_gpu::TheoremWorldTextureRequest,
+        callback: GenericCallback<
+            Result<
+                servo_base::theorem_world_gpu::TheoremWorldTextureReceipt,
+                servo_base::theorem_world_gpu::TheoremWorldTextureError,
+            >,
+        >,
+    ) {
+        use servo_base::theorem_world_gpu::{
+            TheoremWorldTextureError as Error, TheoremWorldTextureRequest as Request,
+        };
+        // Cleanup may target an inactive document still retained in session history.
+        // Registration and imports always target the current top-level pipeline.
+        let pipeline = if let Request::Revoke { binding } = &request {
+            self.pipelines.get(&binding.document).filter(|pipeline| {
+                binding.webview == webview && pipeline.webview_id == webview
+            })
+        } else {
+            self.browsing_contexts
+                .get(&BrowsingContextId::from(webview))
+                .and_then(|context| self.pipelines.get(&context.pipeline_id))
+        };
+        let Some(pipeline) = pipeline else {
+            let _ = callback.send(Err(Error::DocumentUnavailable));
+            return;
+        };
+        if let Request::Import { binding, .. } = &request {
+            if binding.webview != webview || binding.document != pipeline.id {
+                let _ = callback.send(Err(Error::StaleBinding));
+                return;
+            }
+        }
+        let failure = callback.clone();
+        if pipeline
+            .event_loop
+            .send(ScriptThreadMessage::TheoremWorldTexture(
+                pipeline.id,
+                request,
+                callback,
+            ))
+            .is_err()
+        {
+            let _ = failure.send(Err(Error::DocumentUnavailable));
+        }
+    }
+
     fn handle_document_layout_snapshot(
         &mut self,
         webview_id: WebViewId,

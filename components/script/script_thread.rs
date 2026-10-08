@@ -1967,6 +1967,19 @@ impl ScriptThread {
             ) => {
                 self.handle_evaluate_javascript(webview_id, pipeline_id, evaluation_id, script, cx);
             },
+            ScriptThreadMessage::TheoremWorldTexture(pipeline_id, request, callback) => {
+                let Some(window) = self.documents.borrow().find_window(pipeline_id) else {
+                    let _ = callback.send(Err(servo_base::theorem_world_gpu::TheoremWorldTextureError::DocumentUnavailable));
+                    return;
+                };
+                let mut realm = enter_auto_realm(cx, window.as_global_scope());
+                crate::theorem_world_gpu::dispatch(
+                    &window,
+                    request,
+                    callback,
+                    &mut realm.current_realm(),
+                );
+            },
             ScriptThreadMessage::DocumentLayoutSnapshot(pipeline_id, callback) => {
                 self.handle_document_layout_snapshot(pipeline_id, callback, cx);
             },
