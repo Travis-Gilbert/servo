@@ -616,7 +616,7 @@ impl Layout for LayoutThread {
         for (rect, spatial_id) in &info.native_text_rects {
             let transform = info.scroll_tree.cumulative_node_to_root_transform(*spatial_id);
             let rect = crate::query::transform_au_rectangle(
-                rect.map(Au::from_f32_px).cast_unit(), transform)?;
+                rect.to_rect().map(Au::from_f32_px).cast_unit(), transform)?;
             union = Some(union.map_or(rect, |previous: Rect<Au, CSSPixel>| previous.union(&rect)));
         }
         union
