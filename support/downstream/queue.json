@@ -1,0 +1,1495 @@
+{
+  "schema_version": 1,
+  "upstream_repository": "https://github.com/servo/servo",
+  "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+  "coverage_revision": "0b322b0234a1f00f1173b63c299b815d924f3711",
+  "toolchain": "1.95.0",
+  "dependency_policy": "Conservative cumulative application order; not a claim that every predecessor is a semantic dependency.",
+  "historical_archive": {
+    "repository": "https://github.com/Travis-Gilbert/Turvo",
+    "directory": "patches/servo",
+    "artifacts": 9,
+    "covered_baseline_commits": 43,
+    "omitted_baseline_commits": [
+      "5cd7e545ab2172f1d14bb948ea5271ecdb7b4057",
+      "5585210c17cbb9bcd7c85eda26ab9ea795118d0c",
+      "4a965593cb758843ad924065c5063d1708498f19",
+      "b491fb1e61aec9056c17096ccb1744a432d6915a",
+      "a8854be8df043c07df60a999e0b2efd8b0e8f126",
+      "047688d947d926ede74cd8a1adea7c25123e670c",
+      "65d71b0bfef113488135b317de0c82b4442b806e",
+      "4182b516810473ae86a1dd5e949817c9cbb91e41",
+      "d105d7baa54a531d77909a9c3e863ff5c4989568",
+      "665b25ab48456151ade64a92f5079e2161c4c36e",
+      "85ebead725da908085ee5c57fce61f984ee9e43d",
+      "3205000746594e2aaf00fb204d7b96da1d450acb",
+      "b70d4e64c0005d5dc2d5257c09f997dba235410a"
+    ],
+    "meaning": "Historical partial archive only; full public lineage is recorded in entries.",
+    "engine_revision": "e92cdaa790797479c1821c33470c64e0d166feb2"
+  },
+  "post_coverage_classifications": [
+    {
+      "classification": "documentation",
+      "paths": [
+        "support/downstream/README.md",
+        "support/downstream/queue.json",
+        "support/storage-defaults.md"
+      ],
+      "reason": "Explicit metadata/rationale-only follow-up; reported separately from engine coverage."
+    },
+    {
+      "classification": "queue_tooling",
+      "paths": [
+        "support/downstream/check_queue.py",
+        "support/downstream/test_queue.py"
+      ],
+      "reason": "Queue checker/tests maintenance is reported explicitly and is not engine behavior."
+    },
+    {
+      "classification": "ci",
+      "paths": [
+        ".github/workflows/**",
+        "support/downstream/run_wpt.py",
+        "support/downstream/run_wpt_tests.py"
+      ],
+      "reason": "Workflow and named WPT runner/test-only commits are reported explicitly; they establish no passed gate or engine change."
+    }
+  ],
+  "regressions": [
+    {
+      "id": "crown-build",
+      "kind": "build",
+      "command": "RUSTFLAGS='-D warnings' ./mach build --use-crown --locked --profile checked-release",
+      "paths": [
+        "mach",
+        "support/crown/Cargo.toml",
+        "components/script/Cargo.toml"
+      ],
+      "evidence_status": "pending"
+    },
+    {
+      "id": "clippy",
+      "kind": "lint",
+      "command": "./mach clippy --locked --github-annotations -- -- --deny warnings",
+      "paths": [
+        "mach",
+        "python/servo/testing_commands.py"
+      ],
+      "evidence_status": "pending"
+    },
+    {
+      "id": "tidy",
+      "kind": "format",
+      "command": "./mach test-tidy --no-progress --all --github-annotations",
+      "paths": [
+        "mach",
+        "python/tidy/tidy.py"
+      ],
+      "evidence_status": "pending"
+    },
+    {
+      "id": "network",
+      "kind": "behavioral",
+      "command": "cargo +1.95.0 test --locked -p servo-net --test main",
+      "paths": [
+        "components/net/tests/interception.rs",
+        "components/net/tests/main.rs"
+      ],
+      "evidence_status": "pending"
+    },
+    {
+      "id": "file-manager",
+      "kind": "behavioral",
+      "command": "cargo +1.95.0 test --locked -p servo-net --test main filemanager_thread::test_filemanager -- --exact",
+      "paths": [
+        "components/net/tests/filemanager_thread.rs"
+      ],
+      "evidence_status": "pending"
+    },
+    {
+      "id": "request-client",
+      "kind": "behavioral",
+      "command": "cargo +1.95.0 test --locked -p servo-net-traits --test request_client",
+      "paths": [
+        "components/shared/net/tests/request_client.rs"
+      ],
+      "evidence_status": "pending"
+    },
+    {
+      "id": "storage",
+      "kind": "behavioral",
+      "command": "cargo +1.95.0 nextest run --locked -p servo-storage --lib --test main",
+      "paths": [
+        "components/storage/tests/storage_thread.rs",
+        "components/storage/tests/webstorage.rs",
+        "components/storage/indexeddb/engines/sqlite.rs"
+      ],
+      "evidence_status": "pending"
+    },
+    {
+      "id": "indexeddb-wpt",
+      "kind": "behavioral",
+      "command": "./mach test-wpt IndexedDB/",
+      "paths": [
+        "tests/wpt/tests/IndexedDB/idbobjectstore-request-source.any.js",
+        "tests/wpt/tests/IndexedDB/idbcursor-request-source.any.js",
+        "tests/wpt/tests/IndexedDB/idbindex-request-source.any.js",
+        "tests/wpt/tests/IndexedDB/idbindex_getAllRecords.any.js",
+        "tests/wpt/tests/IndexedDB/keygenerator.any.js",
+        "tests/wpt/tests/IndexedDB/clone-before-keypath-eval.any.js",
+        "tests/wpt/tests/IndexedDB/transaction-abort-generator-revert.any.js",
+        "tests/wpt/tests/IndexedDB/idbindex-multientry.any.js",
+        "tests/wpt/tests/IndexedDB/idbcursor-update-exception-order.any.js",
+        "tests/wpt/tests/IndexedDB/idbcursor-delete-exception-order.any.js"
+      ],
+      "evidence_status": "pending"
+    },
+    {
+      "id": "locks-wpt",
+      "kind": "behavioral",
+      "command": "./mach test-wpt web-locks/",
+      "paths": [
+        "tests/wpt/tests/web-locks/acquire.https.any.js",
+        "tests/wpt/tests/web-locks/query.https.any.js",
+        "tests/wpt/tests/web-locks/held.https.any.js",
+        "tests/wpt/tests/web-locks/signal.https.any.js",
+        "tests/wpt/tests/web-locks/steal.https.any.js"
+      ],
+      "evidence_status": "pending"
+    },
+    {
+      "id": "named-windows-wpt",
+      "kind": "behavioral",
+      "command": "./mach test-wpt html/browsers/windows/",
+      "paths": [
+        "tests/wpt/tests/html/browsers/windows/auxiliary-browsing-contexts/named-lookup-noopener.html",
+        "tests/wpt/tests/html/browsers/windows/auxiliary-browsing-contexts/named-lookup-scoped-to-browsing-context-group.html",
+        "tests/wpt/tests/html/browsers/windows/browsing-context-names/duplicate-name-order.html",
+        "tests/wpt/tests/html/browsers/windows/targeting-cross-origin-nested-browsing-contexts.html"
+      ],
+      "evidence_status": "pending"
+    },
+    {
+      "id": "unit-and-doc",
+      "kind": "behavioral",
+      "command": "./mach test-unit --profile checked-release --nextest-profile ci && ./mach test-unit --profile checked-release --doc",
+      "paths": [
+        "components/servo/tests/webview.rs",
+        "ports/servoshell/test.rs",
+        "python/servo/testing_commands.py"
+      ],
+      "evidence_status": "pending"
+    }
+  ],
+  "entries": [
+    {
+      "id": "p001",
+      "commits": [
+        "5cd7e545ab2172f1d14bb948ea5271ecdb7b4057"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "apply series 0001-0004 (carried)",
+      "classification": "engine",
+      "depends_on": [],
+      "retention_reason": "Keep the document layout snapshot and hit-test read seam used by downstream embedders until equivalent upstream behavior is verified.",
+      "regression_ids": [
+        "crown-build"
+      ],
+      "oracle_status": "behavioral_pending",
+      "oracle_note": "No mapped behavioral oracle yet for snapshot/hit-test content, coordinate accuracy and lifecycle; Crown only checks compilation/rooting.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p002",
+      "commits": [
+        "5585210c17cbb9bcd7c85eda26ab9ea795118d0c"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "preserve parent profiler identity",
+      "classification": "engine",
+      "depends_on": [
+        "p001"
+      ],
+      "retention_reason": "Preserve the named sandbox/profiler/diagnostic behavior until its consumer need and an upstream equivalent are checked.",
+      "regression_ids": [
+        "crown-build"
+      ],
+      "oracle_status": "behavioral_pending",
+      "oracle_note": "No mapped multiprocess behavioral oracle for profiler identity, diagnostic forwarding, pipeline closure or supported-target recovery; build is insufficient.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p003",
+      "commits": [
+        "4a965593cb758843ad924065c5063d1708498f19"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "trace content startup",
+      "classification": "engine",
+      "depends_on": [
+        "p002"
+      ],
+      "retention_reason": "Preserve the named sandbox/profiler/diagnostic behavior until its consumer need and an upstream equivalent are checked.",
+      "regression_ids": [
+        "crown-build"
+      ],
+      "oracle_status": "behavioral_pending",
+      "oracle_note": "No mapped multiprocess behavioral oracle for profiler identity, diagnostic forwarding, pipeline closure or supported-target recovery; build is insufficient.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p004",
+      "commits": [
+        "b491fb1e61aec9056c17096ccb1744a432d6915a"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "forward content diagnostic gate",
+      "classification": "engine",
+      "depends_on": [
+        "p003"
+      ],
+      "retention_reason": "Preserve the named sandbox/profiler/diagnostic behavior until its consumer need and an upstream equivalent are checked.",
+      "regression_ids": [
+        "crown-build"
+      ],
+      "oracle_status": "behavioral_pending",
+      "oracle_note": "No mapped multiprocess behavioral oracle for profiler identity, diagnostic forwarding, pipeline closure or supported-target recovery; build is insufficient.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p005",
+      "commits": [
+        "a8854be8df043c07df60a999e0b2efd8b0e8f126"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "signal random pipeline closures",
+      "classification": "engine",
+      "depends_on": [
+        "p004"
+      ],
+      "retention_reason": "Preserve the named sandbox/profiler/diagnostic behavior until its consumer need and an upstream equivalent are checked.",
+      "regression_ids": [
+        "crown-build"
+      ],
+      "oracle_status": "behavioral_pending",
+      "oracle_note": "No mapped multiprocess behavioral oracle for profiler identity, diagnostic forwarding, pipeline closure or supported-target recovery; build is insufficient.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p006",
+      "commits": [
+        "047688d947d926ede74cd8a1adea7c25123e670c"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "own selected pipeline identifier",
+      "classification": "engine",
+      "depends_on": [
+        "p005"
+      ],
+      "retention_reason": "Preserve the named sandbox/profiler/diagnostic behavior until its consumer need and an upstream equivalent are checked.",
+      "regression_ids": [
+        "crown-build"
+      ],
+      "oracle_status": "behavioral_pending",
+      "oracle_note": "No mapped multiprocess behavioral oracle for profiler identity, diagnostic forwarding, pipeline closure or supported-target recovery; build is insufficient.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p007",
+      "commits": [
+        "42ce5917ce566a09059d7275617cb44bcc095e31"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "preserve Fetch policy for intercepted HTTP responses",
+      "classification": "engine",
+      "depends_on": [
+        "p006"
+      ],
+      "retention_reason": "Keep policy-preserving HTTP interception, failure ordering and cancellation semantics required by embedders.",
+      "regression_ids": [
+        "network"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Existing transport/policy/cancellation regressions are mapped; full execution and upstream equivalence are pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p008",
+      "commits": [
+        "6832eaa774a3b3a8ae0cd9cc0c2b87544746685e"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "lock the cancellation token feature dependency",
+      "classification": "build",
+      "depends_on": [
+        "p007"
+      ],
+      "retention_reason": "Keep the feature lock that makes the interception/cancellation graph resolve reproducibly.",
+      "regression_ids": [
+        "network"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "The locked networking regression target also compiles the cancellation-feature dependency graph; execution pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p009",
+      "commits": [
+        "25eceaf39abe4692fcae1f127654325550e25338"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "reuse the shared asynchronous runtime",
+      "classification": "test",
+      "depends_on": [
+        "p008"
+      ],
+      "retention_reason": "Preserve isolation from process-wide asynchronous-runtime initialization/shutdown interference in networking tests.",
+      "regression_ids": [
+        "file-manager",
+        "network"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Run the exact file-manager case alone and the complete network suite to detect process-runtime lifecycle interference.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p010",
+      "commits": [
+        "38a205376b1d697bc61360a21bf732911eb8789b"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "identify window-backed requests",
+      "classification": "engine",
+      "depends_on": [
+        "p009"
+      ],
+      "retention_reason": "Workers must not inherit a document-backed protected request identity.",
+      "regression_ids": [
+        "request-client",
+        "network"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Caller-kind serialization/propagation and fail-closed network regressions are mapped; execution pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p011",
+      "commits": [
+        "8ae21c0bbc5f02ad7853a81eb38113fbd7ef4bb0"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "add embeddable storage engine factories",
+      "classification": "engine",
+      "depends_on": [
+        "p010"
+      ],
+      "retention_reason": "Preserve operation contracts, built-in behavior and compatibility defaults; retain injection history while removing that obsolete API in the forward cleanup.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "behavioral_pending",
+      "oracle_note": "Injection is superseded by a6537f17c1f; storage/default-selection tests map surviving contracts. Compatibility preference defaults still require a specific behavioral oracle.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p012",
+      "commits": [
+        "a9204f35350aea492aba8c31f28cf903c2ec3b76"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "align external engine allocator graph",
+      "classification": "build",
+      "depends_on": [
+        "p011"
+      ],
+      "retention_reason": "Avoid two native jemalloc link owners in the public engine/storage dependency family.",
+      "regression_ids": [
+        "storage",
+        "crown-build"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Build/storage targets resolve the allocator graph; independent consumers must also verify their own lock/link graph.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p013",
+      "commits": [
+        "e2a2d5e575c03c784cf002db450db953b1e94489"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "make web resource responders sendable",
+      "classification": "engine",
+      "depends_on": [
+        "p012"
+      ],
+      "retention_reason": "Retain safe cross-thread response completion without unsafe embedder wrappers.",
+      "regression_ids": [
+        "network",
+        "crown-build"
+      ],
+      "oracle_status": "behavioral_pending",
+      "oracle_note": "Network suite is partial coverage; a direct Send contract and cross-thread responder lifecycle oracle remains unmapped.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p014",
+      "commits": [
+        "65d71b0bfef113488135b317de0c82b4442b806e"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "escape promise wrapper method names",
+      "classification": "build",
+      "depends_on": [
+        "p013"
+      ],
+      "retention_reason": "Keep the generator correction needed for the retained WebIDL/API surface to compile.",
+      "regression_ids": [
+        "crown-build"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Bindings compilation exercises keyword-named generated Promise wrapper methods; no execution receipt is claimed.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p015",
+      "commits": [
+        "4182b516810473ae86a1dd5e949817c9cbb91e41"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "align embedder imports with Servo 0.5",
+      "classification": "build",
+      "depends_on": [
+        "p014"
+      ],
+      "retention_reason": "Retain the public fork adaptation until the same source/API contract is supported on the selected upstream base.",
+      "regression_ids": [
+        "crown-build"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Compilation mapping only for this source/API repair; execution and equivalence remain pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p016",
+      "commits": [
+        "d105d7baa54a531d77909a9c3e863ff5c4989568"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "restore rebased snapshot derives",
+      "classification": "build",
+      "depends_on": [
+        "p015"
+      ],
+      "retention_reason": "Retain the public fork adaptation until the same source/API contract is supported on the selected upstream base.",
+      "regression_ids": [
+        "crown-build"
+      ],
+      "oracle_status": "behavioral_pending",
+      "oracle_note": "Build maps the v0.5 adaptation; snapshot content and embedder lifecycle behavior still lack a complete native oracle.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p017",
+      "commits": [
+        "665b25ab48456151ade64a92f5079e2161c4c36e"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "complete Servo 0.5 snapshot migration",
+      "classification": "build",
+      "depends_on": [
+        "p016"
+      ],
+      "retention_reason": "Retain the public fork adaptation until the same source/API contract is supported on the selected upstream base.",
+      "regression_ids": [
+        "crown-build"
+      ],
+      "oracle_status": "behavioral_pending",
+      "oracle_note": "Build maps the v0.5 adaptation; snapshot content and embedder lifecycle behavior still lack a complete native oracle.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p018",
+      "commits": [
+        "85ebead725da908085ee5c57fce61f984ee9e43d"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "restore Servo 0.5 lifecycle APIs",
+      "classification": "build",
+      "depends_on": [
+        "p017"
+      ],
+      "retention_reason": "Retain the public fork adaptation until the same source/API contract is supported on the selected upstream base.",
+      "regression_ids": [
+        "crown-build"
+      ],
+      "oracle_status": "behavioral_pending",
+      "oracle_note": "Build maps the v0.5 adaptation; snapshot content and embedder lifecycle behavior still lack a complete native oracle.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p019",
+      "commits": [
+        "3205000746594e2aaf00fb204d7b96da1d450acb"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "restore supported target activation",
+      "classification": "engine",
+      "depends_on": [
+        "p018"
+      ],
+      "retention_reason": "Preserve the named sandbox/profiler/diagnostic behavior until its consumer need and an upstream equivalent are checked.",
+      "regression_ids": [
+        "crown-build"
+      ],
+      "oracle_status": "behavioral_pending",
+      "oracle_note": "No mapped multiprocess behavioral oracle for profiler identity, diagnostic forwarding, pipeline closure or supported-target recovery; build is insufficient.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p020",
+      "commits": [
+        "b70d4e64c0005d5dc2d5257c09f997dba235410a"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "remove stale channel import",
+      "classification": "build",
+      "depends_on": [
+        "p019"
+      ],
+      "retention_reason": "Retain the public fork adaptation until the same source/API contract is supported on the selected upstream base.",
+      "regression_ids": [
+        "crown-build"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Compilation mapping only for this source/API repair; execution and equivalence remain pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p021",
+      "commits": [
+        "b5fead2675e7f26fed0a45c81892e328d99fae67"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "restore the bluetooth-only channel import b70d4e64c0 dropped",
+      "classification": "build",
+      "depends_on": [
+        "p020"
+      ],
+      "retention_reason": "Retain the public fork adaptation until the same source/API contract is supported on the selected upstream base.",
+      "regression_ids": [
+        "crown-build"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Compilation mapping only for this source/API repair; execution and equivalence remain pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p022",
+      "commits": [
+        "61dfb2e49420909017688d3ed4139af94605bf27"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "implement the IDBIndex surface, cursor iteration and index records",
+      "classification": "engine",
+      "depends_on": [
+        "p021"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Existing storage targets and the IndexedDB WPT suite map this retained conformance change; selected-case execution, baseline comparison and equivalence are pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p023",
+      "commits": [
+        "c1fbab2736060ccb61acc55020b6b3e771f54ce8"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "remove backend panics and make upgrade cleanup idempotent",
+      "classification": "engine",
+      "depends_on": [
+        "p022"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "behavioral_pending",
+      "oracle_note": "Storage/WPT cover ordinary API behavior, but deterministic backend reply-loss/structural failure injection for this hardening path remains unmapped.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p024",
+      "commits": [
+        "d21ed144daa41c6c2fb4e9c4354e72ce90357ce6"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "implement IDBCursor update and delete, and stop key conversion from aborting",
+      "classification": "engine",
+      "depends_on": [
+        "p023"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Existing storage targets and the IndexedDB WPT suite map this retained conformance change; selected-case execution, baseline comparison and equivalence are pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p025",
+      "commits": [
+        "f695d426dc00a817ceb83f907bce4a28224d856a"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "widen IDBRequest.source to the index and cursor surfaces",
+      "classification": "engine",
+      "depends_on": [
+        "p024"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Existing storage targets and the IndexedDB WPT suite map this retained conformance change; selected-case execution, baseline comparison and equivalence are pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p026",
+      "commits": [
+        "3ca48373fd9bf697d460a0cc99354c20ec0e23a5"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "implement IDBRecord and the getAllRecords surface",
+      "classification": "engine",
+      "depends_on": [
+        "p025"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Existing storage targets and the IndexedDB WPT suite map this retained conformance change; selected-case execution, baseline comparison and equivalence are pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p027",
+      "commits": [
+        "997c5151a34610f834465a715607bc784b2015fc"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "accept IDBGetAllOptions and read the getAll family through one operation",
+      "classification": "engine",
+      "depends_on": [
+        "p026"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Existing storage targets and the IndexedDB WPT suite map this retained conformance change; selected-case execution, baseline comparison and equivalence are pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p028",
+      "commits": [
+        "36ca1f5f98252f77d8244a0cabddf5223caab2fc"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "wait for connections to close before deleting a database",
+      "classification": "engine",
+      "depends_on": [
+        "p027"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Existing storage targets and the IndexedDB WPT suite map this retained conformance change; selected-case execution, baseline comparison and equivalence are pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p029",
+      "commits": [
+        "21af22ab855da39b0121fd920ad302b44bcd16ab"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "build sequence key paths as arrays, rename stores in the backend, cap the key generator in integer space",
+      "classification": "engine",
+      "depends_on": [
+        "p028"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Existing storage targets and the IndexedDB WPT suite map this retained conformance change; selected-case execution, baseline comparison and equivalence are pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p030",
+      "commits": [
+        "af207c383e2fbd5aa921c474bf2b5841fac23c7c"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "revert upgrade renames before comparing schema, restore index handles on abort, and keep the key generator in integer space",
+      "classification": "engine",
+      "depends_on": [
+        "p029"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Existing storage targets and the IndexedDB WPT suite map this retained conformance change; selected-case execution, baseline comparison and equivalence are pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p031",
+      "commits": [
+        "254b2b9fab9185e273b9345f4fd04972a33cddf7"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "populate a new index from the records the store already holds",
+      "classification": "engine",
+      "depends_on": [
+        "p030"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Existing storage targets and the IndexedDB WPT suite map this retained conformance change; selected-case execution, baseline comparison and equivalence are pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p032",
+      "commits": [
+        "a6c3d4e8e4a7a0f8c79852c90d2e4f324cd03b05"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "keep index creation out of the request surface and stop the key generator repeating itself",
+      "classification": "engine",
+      "depends_on": [
+        "p031"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Existing storage targets and the IndexedDB WPT suite map this retained conformance change; selected-case execution, baseline comparison and equivalence are pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p033",
+      "commits": [
+        "117da183aff80ecfb03aa7df3b65fd2dd1403a1b"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "let an aborting transaction answer the requests it takes down",
+      "classification": "engine",
+      "depends_on": [
+        "p032"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Existing storage targets and the IndexedDB WPT suite map this retained conformance change; selected-case execution, baseline comparison and equivalence are pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p034",
+      "commits": [
+        "f8721d7529e8921d2a046d88fadca519e564792c"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "roll back the writes of an aborted readwrite transaction",
+      "classification": "engine",
+      "depends_on": [
+        "p033"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Existing storage targets and the IndexedDB WPT suite map this retained conformance change; selected-case execution, baseline comparison and equivalence are pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p035",
+      "commits": [
+        "ee7e89d3fcba9a8f0341f3ea1ad1bb13a8b9055d"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "fail the request instead of the process when a backend reply is lost",
+      "classification": "engine",
+      "depends_on": [
+        "p034"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "behavioral_pending",
+      "oracle_note": "Storage/WPT cover ordinary API behavior, but deterministic backend reply-loss/structural failure injection for this hardening path remains unmapped.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p036",
+      "commits": [
+        "f66edded39b9c9f1c21a81ec586a89931ccec7a8"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "return the same object every time keyPath is read",
+      "classification": "engine",
+      "depends_on": [
+        "p035"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Existing storage targets and the IndexedDB WPT suite map this retained conformance change; selected-case execution, baseline comparison and equivalence are pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p037",
+      "commits": [
+        "c266652e7941ea6c2ede75825bcc9e542b1f74d1"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "look up key path identifiers as UTF-16, not Latin-1 bytes",
+      "classification": "engine",
+      "depends_on": [
+        "p036"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Existing storage targets and the IndexedDB WPT suite map this retained conformance change; selected-case execution, baseline comparison and equivalence are pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p038",
+      "commits": [
+        "931dd04b193102db4991af420610a38ce3d4c50d"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "scope an index name to its object store, not to the database",
+      "classification": "engine",
+      "depends_on": [
+        "p037"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Existing storage targets and the IndexedDB WPT suite map this retained conformance change; selected-case execution, baseline comparison and equivalence are pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p039",
+      "commits": [
+        "f9b2853e9c2f93661826b1ab2a552acd23c9d29c"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "list a reused request once, and count its executions separately",
+      "classification": "engine",
+      "depends_on": [
+        "p038"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Existing storage targets and the IndexedDB WPT suite map this retained conformance change; selected-case execution, baseline comparison and equivalence are pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p040",
+      "commits": [
+        "f586fb6f3627c1ff18427c53ea7337da67d7a160"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "sort objectStoreNames on every path that reads it",
+      "classification": "engine",
+      "depends_on": [
+        "p039"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Existing storage targets and the IndexedDB WPT suite map this retained conformance change; selected-case execution, baseline comparison and equivalence are pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p041",
+      "commits": [
+        "ffb4bd4a6ee35b119dc421c536bda7a5ce72a778"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "report the committed version from databases(), not one in flight",
+      "classification": "engine",
+      "depends_on": [
+        "p040"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Existing storage targets and the IndexedDB WPT suite map this retained conformance change; selected-case execution, baseline comparison and equivalence are pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p042",
+      "commits": [
+        "038baac1a4eeb187c55fdea5212dbc351fd09197"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "answer a violated invariant in the manager instead of asserting on it",
+      "classification": "engine",
+      "depends_on": [
+        "p041"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "behavioral_pending",
+      "oracle_note": "Storage/WPT cover ordinary API behavior, but deterministic backend reply-loss/structural failure injection for this hardening path remains unmapped.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p043",
+      "commits": [
+        "b9d4e3298c87e08dd582a7d325abfd725830d6e2"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "report reply-channel failures instead of panicking",
+      "classification": "engine",
+      "depends_on": [
+        "p042"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "behavioral_pending",
+      "oracle_note": "Storage/WPT cover ordinary API behavior, but deterministic backend reply-loss/structural failure injection for this hardening path remains unmapped.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p044",
+      "commits": [
+        "358c0ab112bc2a819b2707077cc2b9239e23dc6d"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "log the debug-only assertions instead of compiling them away",
+      "classification": "engine",
+      "depends_on": [
+        "p043"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "behavioral_pending",
+      "oracle_note": "Storage/WPT cover ordinary API behavior, but deterministic backend reply-loss/structural failure injection for this hardening path remains unmapped.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p045",
+      "commits": [
+        "9ce367638ce819f859e2d905dd7980d2509a64df"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "handle the structural invariants instead of asserting them",
+      "classification": "engine",
+      "depends_on": [
+        "p044"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "behavioral_pending",
+      "oracle_note": "Storage/WPT cover ordinary API behavior, but deterministic backend reply-loss/structural failure injection for this hardening path remains unmapped.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p046",
+      "commits": [
+        "d96d5fe0fcc729c685c53b102cefc99727d3b64c"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "turn the shape assertions into branches that report",
+      "classification": "engine",
+      "depends_on": [
+        "p045"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "behavioral_pending",
+      "oracle_note": "Storage/WPT cover ordinary API behavior, but deterministic backend reply-loss/structural failure injection for this hardening path remains unmapped.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p047",
+      "commits": [
+        "71db1f6b806bf7caed8ab061d1abaa61274ad1cc"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "correct two signatures the earlier three commits got wrong",
+      "classification": "engine",
+      "depends_on": [
+        "p046"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "behavioral_pending",
+      "oracle_note": "Storage/WPT cover ordinary API behavior, but deterministic backend reply-loss/structural failure injection for this hardening path remains unmapped.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p048",
+      "commits": [
+        "c8e1d0553a9b5ed844acbc1ad7c25fb34734a05e"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "generate keys where the operation runs, not where it is queued",
+      "classification": "engine",
+      "depends_on": [
+        "p047"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Existing storage targets and the IndexedDB WPT suite map this retained conformance change; selected-case execution, baseline comparison and equivalence are pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p049",
+      "commits": [
+        "b1a900eaa96b02f4508c87cd30987e5de65937f9"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "let the generated key fill one position of a sequence index key",
+      "classification": "engine",
+      "depends_on": [
+        "p048"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Existing storage targets and the IndexedDB WPT suite map this retained conformance change; selected-case execution, baseline comparison and equivalence are pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p050",
+      "commits": [
+        "e4a7ab3021a1bd4c02a3861817e04bb1089410f9"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "prove an embedder's engine is the one the manager opens",
+      "classification": "test",
+      "depends_on": [
+        "p049"
+      ],
+      "retention_reason": "Preserve historical proof intent (manager selects the intended backend) through the forward built-in-selection regression.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Historical injected-factory test was superseded by built-in manager/open/reopen regressions in a6537f17c1f; preserve both commits, not the removed injection assertion.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p051",
+      "commits": [
+        "7a728af94c9cbe310fbfe373b77257a8b36d261b"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "preserve failure semantics across hardening",
+      "classification": "engine",
+      "depends_on": [
+        "p050"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "behavioral_pending",
+      "oracle_note": "Storage/WPT cover ordinary API behavior, but deterministic backend reply-loss/structural failure injection for this hardening path remains unmapped.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p052",
+      "commits": [
+        "d78c4c3599d178f0a6d0233aa606b5d5cb1e66ba"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "update the sqlite engine assertions to the record return type",
+      "classification": "test",
+      "depends_on": [
+        "p051"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Existing storage targets and the IndexedDB WPT suite map this retained conformance change; selected-case execution, baseline comparison and equivalence are pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p053",
+      "commits": [
+        "6ed6091e4efc5b0871625c9e723fefec5029a448"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "rename the index update field in the traits test module",
+      "classification": "test",
+      "depends_on": [
+        "p052"
+      ],
+      "retention_reason": "Retain the named IndexedDB surface/failure/conformance repair until the same behavior is verified upstream.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Existing storage targets and the IndexedDB WPT suite map this retained conformance change; selected-case execution, baseline comparison and equivalence are pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p054",
+      "commits": [
+        "fec9c84f8f702dee239563ac99d2a0f0fdb4d36f"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "end shared workers when their owner set empties",
+      "classification": "engine",
+      "depends_on": [
+        "p053"
+      ],
+      "retention_reason": "End shared workers when their owner set empties instead of leaking ownerless execution.",
+      "regression_ids": [
+        "crown-build"
+      ],
+      "oracle_status": "behavioral_pending",
+      "oracle_note": "Shared-worker teardown when the last owner disappears needs a dedicated lifetime/recovery oracle; Web Locks/window tests do not prove it.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p055",
+      "commits": [
+        "b3f6ddc61c02eb2d53bc8ebb00c3c5131df8c1f5"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "implement the Web Locks API",
+      "classification": "engine",
+      "depends_on": [
+        "p054"
+      ],
+      "retention_reason": "Retain Web Locks scheduling, cancellation and traced promise/callback behavior until upstream equivalence is verified.",
+      "regression_ids": [
+        "locks-wpt",
+        "crown-build"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Acquire/query/held/signal/steal paths and Crown tracing are mapped; execution, supported variants and equivalence pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p056",
+      "commits": [
+        "e92cdaa790797479c1821c33470c64e0d166feb2"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "find named browsing contexts through the constellation",
+      "classification": "engine",
+      "depends_on": [
+        "p055"
+      ],
+      "retention_reason": "Preserve named browsing-context lookup with correct isolation through the constellation.",
+      "regression_ids": [
+        "named-windows-wpt"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Named lookup, duplicate ordering, noopener and browsing-context group/cross-origin boundaries are mapped; execution pending.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p057",
+      "commits": [
+        "a6537f17c1f8d8cb98e030559b24208077453957"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "select built-in engines without embedder injection",
+      "classification": "engine",
+      "depends_on": [
+        "p056"
+      ],
+      "retention_reason": "Remove unused embedder injection while retaining built-in schemas, ephemeral session storage and IndexedDB conformance; do not claim a functional cache backend.",
+      "regression_ids": [
+        "storage",
+        "indexeddb-wpt"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Built-in SQLite readback/reopen, view/origin isolation and dummy-cache baseline are mapped. Functional CacheStorage and external API release compatibility remain obligations.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p058",
+      "commits": [
+        "9f7137440f0c0b541261db4c043eb49a7ce6f57d"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "assert site-scoped clearing preserves other origins",
+      "classification": "test",
+      "depends_on": [
+        "p057"
+      ],
+      "retention_reason": "Prevent site-clearing regressions that delete storage for unrelated origins.",
+      "regression_ids": [
+        "storage"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Site-scoped clearing test must retain unrelated origins; execution pending in this ledger.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p059",
+      "commits": [
+        "5920dcccede120f5570496cbc4f25114a9993177"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "root retained IndexedDB sources and preserve lock tracing",
+      "classification": "engine",
+      "depends_on": [
+        "p058"
+      ],
+      "retention_reason": "Preserve rooted request sources, traced lock values and fallible WebStorage emptiness while satisfying the pinned compiler/linter.",
+      "regression_ids": [
+        "crown-build",
+        "storage",
+        "indexeddb-wpt",
+        "locks-wpt",
+        "clippy"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Crown is required for rooted IDB edges; storage covers fallible emptiness; IDB/locks map retained behavior. Each gate remains pending here.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p060",
+      "commits": [
+        "ab88d40e8efd51e3a3fd9e141e20014cda44a7f6"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "pass copyable pipeline IDs directly",
+      "classification": "maintenance",
+      "depends_on": [
+        "p059"
+      ],
+      "retention_reason": "Keep random-pipeline stress behavior while removing a redundant Copy clone rejected by the pinned lint gate.",
+      "regression_ids": [
+        "clippy",
+        "crown-build"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Lint/build map the redundant Copy clone removal; they do not prove multiprocess stress recovery.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p061",
+      "commits": [
+        "444c171ebc133308ab2d782207b9409382153d27"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "reconcile retained fork tests and lint gates",
+      "classification": "maintenance",
+      "depends_on": [
+        "p060"
+      ],
+      "retention_reason": "Make retained tests state their fixture preferences explicitly and preserve storage short-circuit/error behavior under lint cleanup.",
+      "regression_ids": [
+        "unit-and-doc",
+        "storage",
+        "clippy"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Preference-transition and explicit/default URL assertions remain intact; rerun all exact hosted gates for the combined candidate.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p062",
+      "commits": [
+        "9dc122d0bb5ef6bdf4203d367290d0461a98c041"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "format retained downstream patches",
+      "classification": "maintenance",
+      "depends_on": [
+        "p061"
+      ],
+      "retention_reason": "Keep retained downstream source compatible with upstream-required rustfmt options without a whole-repository rewrite.",
+      "regression_ids": [
+        "tidy"
+      ],
+      "oracle_status": "mapped_pending",
+      "oracle_note": "Formatting gate maps this mechanical change; it proves no engine behavior.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    },
+    {
+      "id": "p063",
+      "commits": [
+        "0b322b0234a1f00f1173b63c299b815d924f3711"
+      ],
+      "upstream_revision": "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019",
+      "purpose": "Repair retained cursor/request/transaction script lints and group private WindowProxy IDs without changing public constructors",
+      "classification": "maintenance",
+      "depends_on": [
+        "p062"
+      ],
+      "retention_reason": "Keep the pinned lint gates compatible while preserving transaction identity, multi-entry deduplication, held-message order/lifetimes and WindowProxy origin/name behavior.",
+      "regression_ids": [
+        "clippy",
+        "crown-build",
+        "storage",
+        "indexeddb-wpt",
+        "named-windows-wpt"
+      ],
+      "oracle_status": "behavioral_pending",
+      "oracle_note": "IDB/window WPT and Crown are mapped but unexecuted here. Deterministic held-message FIFO/barrier/failure/abort-lifetime coverage remains a behavioral gap; source review alone does not discharge it.",
+      "upstream_equivalence_status": "pending",
+      "evidence_status": "pending"
+    }
+  ]
+}
