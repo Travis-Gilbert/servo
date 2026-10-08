@@ -1466,6 +1466,26 @@ where
             EmbedderToConstellationMessage::WebDriverCommand(command) => {
                 self.handle_webdriver_msg(command);
             },
+            EmbedderToConstellationMessage::StopLoading(webview_id) => {
+                let context = BrowsingContextId::from(webview_id);
+                // An initial view has no committed active context to preserve.
+                // Do not strand that construction by aborting its only pipeline.
+                if self.browsing_contexts.contains_key(&context) {
+                    let pending: Vec<_> = self
+                        .pending_changes
+                        .iter()
+                        .filter(|change| {
+                            change.webview_id == webview_id
+                                && change.browsing_context_id == context
+                                && change.new_browsing_context_info.is_none()
+                        })
+                        .map(|change| change.new_pipeline_id)
+                        .collect();
+                    for pipeline in pending {
+                        self.handle_abort_load_url_msg(pipeline);
+                    }
+                }
+            },
             EmbedderToConstellationMessage::Reload(webview_id) => {
                 self.handle_reload_msg(webview_id);
             },

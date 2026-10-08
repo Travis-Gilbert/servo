@@ -53,6 +53,8 @@ pub enum EmbedderToConstellationMessage {
     AllowNavigationResponse(PipelineId, bool),
     /// Request to load a page, with optionally additional data in [`URLRequest`].
     LoadUrl(WebViewId, UrlRequest),
+    /// Retire a pending top-level navigation without discarding the active document.
+    StopLoading(WebViewId),
     /// Request to traverse the joint session history of the provided browsing context.
     TraverseHistory(WebViewId, TraversalDirection, TraversalId),
     /// Inform the Constellation that a `WebView`'s [`ViewportDetails`] have changed.

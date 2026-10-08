@@ -542,6 +542,16 @@ impl WebView {
             ))
     }
 
+    /// Stop this view's pending top-level navigation, preserving its active
+    /// document and session history. Initial construction is not interrupted.
+    /// Requests are ordered with subsequent [`Self::load`] calls on this view.
+    pub fn stop_loading(&self) {
+        self.inner()
+            .servo
+            .constellation_proxy()
+            .send(EmbedderToConstellationMessage::StopLoading(self.id()));
+    }
+
     /// Reload the currently loaded page in this [`WebView`].
     pub fn reload(&self) {
         self.inner_mut().load_status = LoadStatus::Started;
