@@ -39,12 +39,23 @@ impl JavaScriptEvaluator {
         script: String,
         callback: Box<dyn FnOnce(Result<JSValue, JavaScriptEvaluationError>)>,
     ) {
+        self.evaluate_in_document(webview_id, script, None, callback);
+    }
+
+    pub(crate) fn evaluate_in_document(
+        &mut self,
+        webview_id: WebViewId,
+        script: String,
+        expected: Option<servo_base::native_accessibility::NativeDocumentIdentity>,
+        callback: Box<dyn FnOnce(Result<JSValue, JavaScriptEvaluationError>)>,
+    ) {
         let evaluation_id = self.generate_id();
         self.constellation_proxy
             .send(EmbedderToConstellationMessage::EvaluateJavaScript(
                 webview_id,
                 evaluation_id,
                 script,
+                expected,
             ));
         self.pending_evaluations
             .insert(evaluation_id, PendingEvaluation { callback });

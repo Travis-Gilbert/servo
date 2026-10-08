@@ -46,6 +46,7 @@ pub(crate) struct State {
 }
 
 pub(crate) struct Pending {
+    owner: servo_base::native_accessibility::NativeDocumentIdentity,
     challenge: String,
     epoch: u64,
     source: TheoremWorldSource,
@@ -58,6 +59,9 @@ pub(crate) struct Destination {
     #[no_trace]
     #[ignore_malloc_size_of = "small native grant"]
     binding: TheoremWorldTextureBinding,
+    #[no_trace]
+    #[ignore_malloc_size_of = "small native document owner"]
+    owner: servo_base::native_accessibility::NativeDocumentIdentity,
     last_frame: Cell<u64>,
 }
 
@@ -98,7 +102,8 @@ fn attest_destination(cx: &mut JSContext, args: CallArgs) -> bool {
         let Some(pending) = pending.as_ref() else {
             return false;
         };
-        matches_stamp(cx, &args, 1, pending)
+        pending.owner == crate::native_accessibility::document_identity(window)
+            && matches_stamp(cx, &args, 1, pending)
     })();
     unsafe {
         args.rval().set(BooleanValue(valid));
@@ -149,6 +154,9 @@ fn receive_destination(cx: &mut JSContext, args: CallArgs) -> bool {
         if !window.Document().is_fully_active() {
             return Err(TheoremWorldTextureError::DocumentUnavailable);
         }
+        if pending.owner != crate::native_accessibility::document_identity(window) {
+            return Err(TheoremWorldTextureError::StaleBinding);
+        }
         if args.argc_ != 6 {
             return Err(TheoremWorldTextureError::InvalidBootstrap);
         }
@@ -188,6 +196,7 @@ fn receive_destination(cx: &mut JSContext, args: CallArgs) -> bool {
                 context: Dom::from_ref(&context),
                 texture: Dom::from_ref(&texture),
                 binding: binding.clone(),
+                owner: pending.owner.clone(),
                 last_frame: Cell::new(0),
             });
         Ok(binding)
@@ -356,6 +365,7 @@ fn register(
         .set(native_callback.get());
     *window.theorem_world_gpu().registration.borrow_mut() = None;
     *window.theorem_world_gpu().pending.borrow_mut() = Some(Pending {
+        owner: crate::native_accessibility::document_identity(window),
         challenge,
         epoch,
         source,
@@ -407,6 +417,9 @@ fn validate_destination(
         .iter()
         .find(|destination| &destination.binding == binding)
         .ok_or(TheoremWorldTextureError::StaleBinding)?;
+    if destination.owner != crate::native_accessibility::document_identity(window) {
+        return Err(TheoremWorldTextureError::StaleBinding);
+    }
     if !texture_valid(&destination.context, &destination.texture, binding.source) {
         return Err(TheoremWorldTextureError::InvalidTexture);
     }
@@ -428,6 +441,9 @@ fn import(
         .iter()
         .find(|destination| &destination.binding == binding)
         .ok_or(TheoremWorldTextureError::StaleBinding)?;
+    if destination.owner != crate::native_accessibility::document_identity(window) {
+        return Err(TheoremWorldTextureError::StaleBinding);
+    }
     validate_frame(binding, frame, destination.last_frame.get())?;
     if !texture_valid(&destination.context, &destination.texture, binding.source) {
         return Err(TheoremWorldTextureError::InvalidTexture);
