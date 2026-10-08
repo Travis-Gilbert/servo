@@ -1,5 +1,8 @@
 [configs]
 skip-check-licenses = false
+# Downstream-only frozen history boundary; see support/downstream/README.md.
+# Unset upstream policy continues to check the complete history.
+coauthors-history-base = "e92cdaa790797479c1821c33470c64e0d166feb2"
 disallowed-coauthors = [
     "copilot@github.com",
     "cursoragent@cursor.com",
