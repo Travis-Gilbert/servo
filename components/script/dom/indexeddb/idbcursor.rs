@@ -239,12 +239,12 @@ impl IDBCursor {
                 "The cursor's effective object store has been deleted".to_owned(),
             )));
         }
-        if let ObjectStoreOrIndex::Index(index) = &self.source {
-            if !store.has_index(&index.Name()) {
-                return Err(Error::InvalidState(Some(
-                    "The cursor's source index has been deleted".to_owned(),
-                )));
-            }
+        if let ObjectStoreOrIndex::Index(index) = &self.source &&
+            !store.has_index(&index.Name())
+        {
+            return Err(Error::InvalidState(Some(
+                "The cursor's source index has been deleted".to_owned(),
+            )));
         }
         Ok(())
     }

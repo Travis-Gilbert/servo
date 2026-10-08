@@ -455,11 +455,10 @@ pub fn convert_value_to_multientry_key(
                     // Step 1.5.2.2. If key is not invalid or an abrupt completion, and there is
                     // no item in keys equal to key, then append key to keys.
                     if let Ok(ConversionResult::Valid(key)) =
-                        convert_value_to_key(cx, entry.handle(), Some(seen.clone()))
+                        convert_value_to_key(cx, entry.handle(), Some(seen.clone())) &&
+                        !keys.contains(&key)
                     {
-                        if !keys.contains(&key) {
-                            keys.push(key);
-                        }
+                        keys.push(key);
                     }
                 }
                 // Step 1.5.3. Increase index by 1.

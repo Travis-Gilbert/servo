@@ -455,7 +455,7 @@ impl RequestListener {
         // retained transaction if that association was unexpectedly cleared or replaced, or the
         // pending count and RequestHandled frontier would never advance.
         match request.transaction.get() {
-            Some(request_transaction) if &*request_transaction == &*transaction => {},
+            Some(request_transaction) if *request_transaction == *transaction => {},
             Some(_) => warn!(
                 "An IndexedDB reply arrived for a request associated with a different transaction."
             ),

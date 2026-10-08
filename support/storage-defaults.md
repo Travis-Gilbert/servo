@@ -89,6 +89,41 @@ does not verify the rooted-parameter requirement. GC zeal additionally requires
 a `debugmozjs` build; setting zeal preferences on an ordinary build is a no-op.
 These are required checks, not a claim they passed for this forward repair.
 
+### Script-level lint repair after run 37716625601
+
+At head `9dc122d0bb5ef6bdf4203d367290d0461a98c041`, completed lint job
+`113114569500` exposed five more inherited script-level Clippy failures.
+All five failing constructs are present in frozen `e92cdaa790797479c1821c33470c64e0d166feb2`.
+The assumption that the inherited baseline was Clippy-clean was false: earlier
+compiler and lint failures had prevented this layer from being checked. No
+baseline CI pass or successful full candidate gate is established by these
+repairs.
+
+- Cursor source deletion and multi-entry key deduplication use let chains with
+  the same evaluation and exception ordering. Failed key conversions remain
+  ignored in the multi-entry algorithm; duplicate keys remain omitted.
+- Request transaction identity drops needless references around the same
+  dereferenced operands. Both `DomRoot` owners stay in scope throughout response
+  handling; completion remains attributed to the retained transaction.
+- `HeldOutbound::Message` boxes its existing IPC message, reducing the Linux
+  enum's inline payload from at least 296 bytes to a pointer. Only held messages
+  are boxed. Drain moves the message out before sending; FIFO, barriers, failure
+  handling, and abort queue clearing are unchanged. The queue gains no raw DOM
+  edges. `RequestListener` continues to retain request/transaction `Trusted`
+  handles through the in-process callback's `Arc` or the registered IPC router
+  callback. Their lifetime and the existing tracing policy are unchanged.
+- A private record groups WindowProxy's browsing-context and webview IDs in
+  `new_inherited`. It contains no DOM references. The two public constructor
+  signatures, same-origin name precedence, and dissimilar-origin empty name
+  remain unchanged; no lint suppression is added.
+
+Rerun the exact Clippy, checked-release/crown, and Tidy commands above on the
+resulting head. Existing `idbobjectstore_createIndex`, `idbindex-multientry`,
+request/source, abort-ordering, cursor exception-order, and WindowProxy origin
+regressions remain necessary behavioral coverage. Formatting and a source
+review do not establish those WPT results. CacheStorage's dummy baseline and
+the pending native/product acceptance requirements remain as documented above.
+
 Hosted lint run `37706099233` at `5920dcccede120f5570496cbc4f25114a9993177`
 then exposed an inherited `clone_on_copy` in constellation's random-pipeline
 stress path, unchanged at the same line in frozen `e92cdaa`. Passing the

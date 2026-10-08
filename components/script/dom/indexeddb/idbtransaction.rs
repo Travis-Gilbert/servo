@@ -106,7 +106,7 @@ pub struct IDBTransaction {
 /// One entry in a transaction's outbound hold.
 pub(crate) enum HeldOutbound {
     /// A message waiting for the hold to lift.
-    Message(IndexedDBThreadMsg),
+    Message(Box<IndexedDBThreadMsg>),
     /// The end of a `createIndex` backfill's read. Draining stops here: the read ahead of it
     /// has gone out, and everything behind it keeps waiting until that backfill's write is on
     /// its way, because the write has to be ordered ahead of them.
@@ -854,7 +854,7 @@ impl IDBTransaction {
         if self.outbound_held.get() {
             self.held_outbound
                 .borrow_mut()
-                .push_back(HeldOutbound::Message(message));
+                .push_back(HeldOutbound::Message(Box::new(message)));
             return Ok(());
         }
         self.get_idb_thread().send(message).map_err(|_| ())
@@ -883,7 +883,7 @@ impl IDBTransaction {
             let entry = self.held_outbound.borrow_mut().pop_front();
             match entry {
                 Some(HeldOutbound::Message(message)) => {
-                    if self.get_idb_thread().send(message).is_err() {
+                    if self.get_idb_thread().send(*message).is_err() {
                         warn!("Could not send a held IndexedDB message");
                     }
                 },
