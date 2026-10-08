@@ -171,3 +171,26 @@ Local component checks (no WPT execution or engine build):
 python3 -B -m unittest discover -s support/downstream -p 'run_wpt_tests.py'
 python3 -B support/downstream/run_wpt.py roster --output /ABSOLUTE/EVIDENCE_DIRECTORY
 ```
+
+## Downstream preserved-history coauthor boundary
+
+This maintained downstream fork preserves the original source, patch history,
+and attribution. Its frozen baseline is
+`e92cdaa790797479c1821c33470c64e0d166feb2`. The optional
+`configs.coauthors-history-base` in `servo-tidy.toml` restricts the coauthor
+history scan to `BASE..HEAD`. It requires an exact 40-character commit SHA that
+exists and is an ancestor of HEAD; malformed, missing, or unrelated boundaries
+fail the check. Existing trailers are neither removed nor rewritten. New
+commits, author/committer identities, and pull request bodies retain the existing
+disallowed-coauthor checks and list.
+
+The empty/unset option retains Servo upstream's complete-history behavior. This
+is an explicit downstream policy for preserved inherited history, authorized by
+the maintained-fork scope; it does not establish eligibility for upstream
+submission or change Servo's upstream contribution rules. Updating the frozen
+boundary requires a separate reviewed policy decision, not a routine CI repair.
+
+The regression tests use temporary Git repositories: the upstream default
+rejects historical disallowed attribution, the explicit baseline preserves it,
+new disallowed attribution and PR bodies still fail, and invalid or nonancestor
+boundaries fail closed. No project history is altered by those tests.

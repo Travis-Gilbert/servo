@@ -8,9 +8,14 @@
 # except according to those terms.
 
 import logging
+import contextlib
+import io
 import os
+import subprocess
+import tempfile
 from collections.abc import Iterable
 import unittest
+from unittest.mock import patch
 
 from . import tidy
 
@@ -27,6 +32,102 @@ def iterFile(name):
 
 
 class CheckTidiness(unittest.TestCase):
+    @contextlib.contextmanager
+    def coauthors_repository(self):
+        with tempfile.TemporaryDirectory(prefix="servo-coauthors-") as directory:
+            with (
+                contextlib.chdir(directory),
+                patch.dict(os.environ, {"GITHUB_EVENT_NAME": "", "CI_PULL_REQUEST_BODY": ""}),
+                patch.dict(tidy.config, {"coauthors-history-base": "", "disallowed-coauthors": ["llm@example.com"]}),
+            ):
+                self.coauthors_git("init", "--quiet")
+                self.coauthors_git("config", "user.name", "Contributor")
+                self.coauthors_git("config", "user.email", "contributor@example.net")
+                yield
+
+    def coauthors_git(self, *args):
+        return subprocess.check_output(["git", *args], text=True, stderr=subprocess.STDOUT).strip()
+
+    def coauthors_commit(self, message):
+        self.coauthors_git(
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            message,
+        )
+        return self.coauthors_git("rev-parse", "HEAD")
+
+    def coauthors_result(self):
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            result = tidy.run_coauthors_check()
+        return result, output.getvalue()
+
+    def test_coauthors_history_default_preserves_upstream_policy(self):
+        with self.coauthors_repository():
+            inherited = self.coauthors_commit("Historical change\n\nCo-authored-by: LLM <llm@example.com>")
+            self.coauthors_commit("New change")
+            result, output = self.coauthors_result()
+            self.assertEqual(result, 1)
+            self.assertIn(inherited, output)
+
+    def test_coauthors_history_base_preserves_inherited_commits(self):
+        with self.coauthors_repository():
+            inherited = self.coauthors_commit("Historical change\n\nCo-authored-by: LLM <llm@example.com>")
+            self.coauthors_commit("New change")
+            tidy.config["coauthors-history-base"] = inherited
+            self.assertEqual(self.coauthors_result()[0], 0)
+            self.assertIn(
+                "Co-authored-by: LLM <llm@example.com>", self.coauthors_git("show", "-s", "--format=%B", inherited)
+            )
+
+    def test_coauthors_history_base_rejects_new_disallowed_commit(self):
+        with self.coauthors_repository():
+            tidy.config["coauthors-history-base"] = self.coauthors_commit("Historical change")
+            new_commit = self.coauthors_commit("New change\n\nAssisted-by: LLM <llm@example.com>")
+            result, output = self.coauthors_result()
+            self.assertEqual(result, 1)
+            self.assertIn(new_commit, output)
+
+    def test_coauthors_history_base_rejects_disallowed_pr_body(self):
+        with self.coauthors_repository():
+            tidy.config["coauthors-history-base"] = self.coauthors_commit("Historical change")
+            with patch.dict(
+                os.environ,
+                {"GITHUB_EVENT_NAME": "pull_request", "CI_PULL_REQUEST_BODY": "Co-authored-by: LLM <llm@example.com>"},
+            ):
+                result, output = self.coauthors_result()
+            self.assertEqual(result, 1)
+            self.assertIn("Pull request body has", output)
+
+    def test_coauthors_history_base_refuses_bad_or_missing_sha(self):
+        with self.coauthors_repository():
+            self.coauthors_commit("Historical change")
+            for base in ("HEAD", "a" * 39, "a" * 41, "g" * 40, "0" * 40, None, 0):
+                with self.subTest(base=base):
+                    tidy.config["coauthors-history-base"] = base
+                    self.assertEqual(self.coauthors_result()[0], 1)
+
+    def test_coauthors_history_base_refuses_nonancestor(self):
+        with self.coauthors_repository():
+            base = self.coauthors_commit("Historical change")
+            sibling = self.coauthors_commit("Sibling change")
+            self.coauthors_git("checkout", "--quiet", "--detach", base)
+            self.coauthors_commit("Current change")
+            tidy.config["coauthors-history-base"] = sibling
+            self.assertEqual(self.coauthors_result()[0], 1)
+
+    def test_coauthors_history_base_refuses_annotated_tag_object(self):
+        with self.coauthors_repository():
+            self.coauthors_commit("Historical change")
+            self.coauthors_git("-c", "tag.gpgsign=false", "tag", "-a", "baseline", "-m", "Historical tag")
+            tidy.config["coauthors-history-base"] = self.coauthors_git("rev-parse", "refs/tags/baseline")
+            self.assertEqual(self.coauthors_result()[0], 1)
+
     def assertNoMoreErrors(self, errors):
         with self.assertRaises(StopIteration):
             next(errors)
