@@ -95,3 +95,64 @@ stress path, unchanged at the same line in frozen `e92cdaa`. Passing the
 already-`Copy` pipeline ID directly preserves the stress behavior and removes
 the redundant clone. This is a separate maintenance commit; the hosted gates
 must be rerun for its exact head before promotion.
+
+
+### Coherent inherited-baseline repair after run 37707697068
+
+At `ab88d40e8efd51e3a3fd9e141e20014cda44a7f6`, the Linux checked-release
+build with Crown and the smoke/script gates passed. The unit gate ran 1,037 tests:
+1,034 passed and three failed on all three attempts. Clippy reported four
+`collapsible_if` errors. Tidy and unit doc tests did not run past those failures;
+the missing merged timing artifact was secondary to the failed unit gate.
+
+The earlier working assumption that repairing the first reported compiler/lint
+errors would restore a validated inherited baseline was falsified. These later
+failures were hidden behind those gates. All four nested-if blocks and the full
+preference/test files involved are unchanged from frozen `e92cdaa`; this source
+comparison establishes inherited scope, not a successful baseline CI run.
+
+The repair preserves the fork's production defaults and the original assertions:
+
+- `test_preferences_change` assumed grid was initially disabled, while the fork's
+  `Preferences::const_default` enables it. Its first assertion expected empty
+  declarations but actually received `1` and `3`. Explicitly disable the
+  preference before opening the page, then retain the false-to-true transition,
+  reload, and both assertions. This tests runtime changes without relying on an
+  obsolete default. It is not evidence of a preference-propagation engine defect.
+- The generic URL helper assumed DuckDuckGo but constructed default shell
+  preferences, whose documented fork default is the RustyWeb search page. Supply
+  the helper's explicit DuckDuckGo fixture to both command-line parser calls;
+  keep every existing expected URL and input. A separate default-search regression
+  exercises both command-line fallback and location-bar parsing against the
+  fork's actual `http://theorem.local/search?q=%s` default. No parser or default
+  production behavior changes.
+- Collapse only the nested trigger-install, transaction commit/rollback, and
+  localStorage deletion conditions into let chains. Preserve short-circuit order,
+  errors, callbacks, and registry recovery; do not suppress the lints.
+
+Rerun the exact hosted build, Clippy, Tidy, and full unit/doc gates for the new
+head. The full unit and doc commands are:
+
+```sh
+./mach test-unit --profile checked-release --nextest-profile ci
+./mach test-unit --profile checked-release --doc
+```
+
+Fast source/format checks do not replace these hosted gates, WPTs, or native
+acceptance. CacheStorage remains the dummy baseline described above.
+
+
+The repository Tidy route requires whole-workspace formatting with Servo's extra
+rustfmt options (`binop_separator=Back`, `imports_granularity=Module`, and
+`group_imports=StdExternalCrate`). The five Rust files in this repair now match
+those options. Only the two already-affected IDB implementation files needed
+inherited formatting adjustments; their pre-repair formatting hunks are preserved
+separately in the execution evidence. Other repository files were not reformatted.
+
+Local real Tidy was attempted through a private path alias because Mach rejects
+spaces. It stopped at the missing `cargo-deny` executable before reaching its
+formatting stage. An independent exact workspace formatting check identified
+additional differences in 25 other files; full output and frozen-baseline
+comparison are recorded in Theorem's execution evidence. These remain integration
+obligations, not a successful full-Tidy result. No local engine build or test was
+run for this repair.

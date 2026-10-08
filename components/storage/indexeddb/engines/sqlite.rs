@@ -16,8 +16,7 @@ use storage_traits::indexeddb::{
     BackendError, BackendResult, BackfillIndexResult, CreateObjectResult, IndexBackfillEntry,
     IndexedDBDescription, IndexedDBIndex, IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord,
     IndexedDBTxnMode, KeyPath, KvsEngine, KvsIndexUpdate, KvsOperationTarget, KvsTransaction,
-    RecordKeyPlacement,
-    PutItemResult, RecordsShape,
+    PutItemResult, RecordKeyPlacement, RecordsShape,
 };
 
 use crate::shared::{DB_INIT_PRAGMAS, DB_PRAGMAS, is_sqlite_disk_full_error};
@@ -609,10 +608,9 @@ impl SqliteEngine {
             Value::Integer(store.id as i64),
         ];
         append_range_predicate(&mut sql, &mut values, "i.value", &key_range);
-        let count: i64 =
-            connection
-                .prepare(&sql)?
-                .query_row(params_from_iter(values), |row| row.get(0))?;
+        let count: i64 = connection
+            .prepare(&sql)?
+            .query_row(params_from_iter(values), |row| row.get(0))?;
         Ok(count as u64)
     }
 
@@ -1127,18 +1125,18 @@ impl KvsEngine for SqliteEngine {
             // recreates new identifiers, so rows carrying the old ones have nothing to go back
             // to; reverting the records an upgrade wrote is a separate piece of work. A
             // readonly transaction writes nothing to undo.
-            if undo_logged {
-                if let Err(error) = Self::install_undo_log_triggers(&connection, serial_number) {
-                    // Without the triggers the transaction would look like it could be aborted
-                    // and then silently keep its writes, so it is refused instead.
-                    for request in transaction.requests {
-                        request
-                            .operation
-                            .notify_error(BackendError::DbErr(format!("{error:?}")));
-                    }
-                    on_complete();
-                    return;
+            if undo_logged &&
+                let Err(error) = Self::install_undo_log_triggers(&connection, serial_number)
+            {
+                // Without the triggers the transaction would look like it could be aborted
+                // and then silently keep its writes, so it is refused instead.
+                for request in transaction.requests {
+                    request
+                        .operation
+                        .notify_error(BackendError::DbErr(format!("{error:?}")));
                 }
+                on_complete();
+                return;
             }
             for request in transaction.requests {
                 // The pinned SQLite implementation has schema support for indexes but no index
@@ -1148,11 +1146,15 @@ impl KvsEngine for SqliteEngine {
                 if let AsyncOperation::Schema(AsyncSchemaOperation::CreateObjectStore {
                     callback,
                     key_path,
-                    auto_increment
-                }) = &request.operation {
-                    if let Err(error) =
-                        Self::create_store(&connection, &request.store_name, key_path.clone(), *auto_increment)
-                    {
+                    auto_increment,
+                }) = &request.operation
+                {
+                    if let Err(error) = Self::create_store(
+                        &connection,
+                        &request.store_name,
+                        key_path.clone(),
+                        *auto_increment,
+                    ) {
                         let _ = callback.send(BackendError::DbErr(format!("{error:?}")));
                     }
                     continue;
@@ -1211,7 +1213,9 @@ impl KvsEngine for SqliteEngine {
                                     if let Err(error) = callback.send(Err(BackendError::DbErr(
                                         "Missing key for PutItem request".to_string(),
                                     ))) {
-                                        warn!("Failed to send PutItem missing key error: {error:?}");
+                                        warn!(
+                                            "Failed to send PutItem missing key error: {error:?}"
+                                        );
                                     }
                                     continue;
                                 }
@@ -1220,8 +1224,7 @@ impl KvsEngine for SqliteEngine {
                                 // generator one past that maximum, and this is what makes the
                                 // next generated key fail instead of repeating 2^53 forever.
                                 if object_store.auto_increment > 9_007_199_254_740_992 {
-                                    let _ =
-                                        callback.send(Ok(PutItemResult::KeyGeneratorExhausted));
+                                    let _ = callback.send(Ok(PutItemResult::KeyGeneratorExhausted));
                                     continue;
                                 }
                                 (
@@ -1428,7 +1431,7 @@ impl KvsEngine for SqliteEngine {
                         index_name,
                         key_path,
                         unique,
-                        multi_entry
+                        multi_entry,
                     }) => {
                         if let Err(error) = Self::create_index(
                             &connection,
@@ -1436,13 +1439,14 @@ impl KvsEngine for SqliteEngine {
                             index_name,
                             key_path,
                             unique,
-                            multi_entry
+                            multi_entry,
                         ) {
                             let _ = callback.send(BackendError::DbErr(format!("{error:?}")));
                         }
                     },
                     AsyncOperation::Schema(AsyncSchemaOperation::CreateObjectStore {
-                        callback, ..
+                        callback,
+                        ..
                     }) => {
                         // The pre-pass above handles this and continues, because the store
                         // does not exist yet and so cannot survive the lookup every other
@@ -1455,27 +1459,43 @@ impl KvsEngine for SqliteEngine {
                                 .to_owned(),
                         ));
                     },
-                    AsyncOperation::Schema(AsyncSchemaOperation::DeleteIndex { index_name, callback }) => {
-                        if let Err(error) = Self::delete_index(&connection, &request.store_name, index_name) {
+                    AsyncOperation::Schema(AsyncSchemaOperation::DeleteIndex {
+                        index_name,
+                        callback,
+                    }) => {
+                        if let Err(error) =
+                            Self::delete_index(&connection, &request.store_name, index_name)
+                        {
                             let _ = callback.send(BackendError::DbErr(format!("{error:?}")));
                         }
                     },
-                    AsyncOperation::Schema(AsyncSchemaOperation::DeleteObjectStore { callback }) => {
+                    AsyncOperation::Schema(AsyncSchemaOperation::DeleteObjectStore {
+                        callback,
+                    }) => {
                         if let Err(error) = Self::delete_store(&connection, &request.store_name) {
                             let _ = callback.send(BackendError::DbErr(format!("{error:?}")));
                         }
                     },
-                    AsyncOperation::Schema(AsyncSchemaOperation::RenameObjectStore { new_name, callback }) => {
-                        if let Err(error) = Self::rename_store(&connection, &request.store_name, &new_name) {
+                    AsyncOperation::Schema(AsyncSchemaOperation::RenameObjectStore {
+                        new_name,
+                        callback,
+                    }) => {
+                        if let Err(error) =
+                            Self::rename_store(&connection, &request.store_name, &new_name)
+                        {
                             let _ = callback.send(BackendError::DbErr(format!("{error:?}")));
                         }
                     },
-                    AsyncOperation::Schema(AsyncSchemaOperation::RenameIndex { index_name, new_name, callback }) =>  {
+                    AsyncOperation::Schema(AsyncSchemaOperation::RenameIndex {
+                        index_name,
+                        new_name,
+                        callback,
+                    }) => {
                         if let Err(error) = Self::rename_index(
                             &connection,
                             &request.store_name,
                             &index_name,
-                            &new_name
+                            &new_name,
                         ) {
                             let _ = callback.send(BackendError::DbErr(format!("{error:?}")));
                         }
@@ -1736,8 +1756,8 @@ mod tests {
     use url::Host;
 
     use crate::ClientStorageThreadFactory;
-    use crate::indexeddb::engines::sqlite::encoding;
     use crate::indexeddb::engines::SqliteEngine;
+    use crate::indexeddb::engines::sqlite::encoding;
 
     fn install_test_namespace() {
         PipelineNamespace::install(PipelineNamespaceId(1));

@@ -25,10 +25,10 @@ use servo_url::origin::ImmutableOrigin;
 use storage_traits::client_storage::StorageProxyMap;
 use storage_traits::indexeddb::{
     AsyncOperation, AsyncSchemaOperation, BackendError, BackendResult, ConnectionMsg,
-    CreateObjectResult, DatabaseInfo,
-    DbResult, DeleteDatabaseMsg, IndexedDBDescription, IndexedDBIndex, IndexedDBObjectStore,
-    IndexedDBThreadMsg, IndexedDBTxnMode, IndexedDbEngineFactory, KeyPath, KvsEngine, KvsOperation,
-    KvsOperationContext, KvsTransaction, SyncOperation, TxnCompleteMsg,
+    CreateObjectResult, DatabaseInfo, DbResult, DeleteDatabaseMsg, IndexedDBDescription,
+    IndexedDBIndex, IndexedDBObjectStore, IndexedDBThreadMsg, IndexedDBTxnMode,
+    IndexedDbEngineFactory, KeyPath, KvsEngine, KvsOperation, KvsOperationContext, KvsTransaction,
+    SyncOperation, TxnCompleteMsg,
 };
 use uuid::Uuid;
 
@@ -554,10 +554,10 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
         // The transaction's writes stand, so what would have undone them is no longer needed.
         // An aborted transaction reaches here too, after `abort_transaction` has already
         // replayed and discarded them, and this then has nothing left to discard.
-        if self.is_readwrite(txn) {
-            if let Err(error) = self.engine.commit_transaction(txn) {
-                error!("Failed to release the undo record of transaction {txn}: {error:?}");
-            }
+        if self.is_readwrite(txn) &&
+            let Err(error) = self.engine.commit_transaction(txn)
+        {
+            error!("Failed to release the undo record of transaction {txn}: {error:?}");
         }
 
         if let Some(info) = self.txn_info.get_mut(&txn) {
@@ -588,10 +588,10 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
         // runs. A failure here leaves writes standing that script has already been told were
         // taken back, which is worth saying out loud rather than asserting about in debug
         // builds alone.
-        if self.is_readwrite(txn) {
-            if let Err(error) = self.engine.rollback_transaction(txn) {
-                error!("Failed to roll back transaction {txn}: {error:?}");
-            }
+        if self.is_readwrite(txn) &&
+            let Err(error) = self.engine.rollback_transaction(txn)
+        {
+            error!("Failed to roll back transaction {txn}: {error:?}");
         }
 
         let key_generator_snapshots = self
@@ -613,8 +613,7 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
         // Likewise, if a transaction is aborted, the current number of the
         // key generator for each object store in the transaction’s scope is
         // reverted to the value it had before the transaction was started.
-        if let Err(error) = self.restore_key_generators_after_abort(&key_generator_snapshots)
-        {
+        if let Err(error) = self.restore_key_generators_after_abort(&key_generator_snapshots) {
             error!("Failed to restore key generators after a transaction abort: {error}");
         }
 
@@ -1569,11 +1568,9 @@ impl IndexedDBManager {
         transaction_serial_number: u64,
     ) {
         let rename = match operation {
-            AsyncSchemaOperation::RenameObjectStore { new_name, .. } => {
-                SchemaRename::ObjectStore {
-                    from: store_name.to_owned(),
-                    to: new_name.clone(),
-                }
+            AsyncSchemaOperation::RenameObjectStore { new_name, .. } => SchemaRename::ObjectStore {
+                from: store_name.to_owned(),
+                to: new_name.clone(),
             },
             AsyncSchemaOperation::RenameIndex {
                 index_name,
@@ -1716,7 +1713,10 @@ impl IndexedDBManager {
             // and checking afterwards discards another connection's open request in
             // release builds, where the failed assertion is not there to stop it.
             let Some(front) = queue.front() else {
-                warn!("No open request to abort for the upgrade of {:?}.", key.name);
+                warn!(
+                    "No open request to abort for the upgrade of {:?}.",
+                    key.name
+                );
                 return;
             };
             if front.get_id() != id {
@@ -1910,11 +1910,7 @@ impl IndexedDBManager {
 
             // Step 4: Set db’s upgrade transaction to transaction.
             // Backend tracks the active upgrade transaction in `pending_upgrade` below.
-            db.register_transaction(
-                transaction,
-                IndexedDBTxnMode::Versionchange,
-                scope.clone(),
-            )?;
+            db.register_transaction(transaction, IndexedDBTxnMode::Versionchange, scope.clone())?;
 
             // Step 5: Set transaction’s state to inactive.
             // Step 6: Start transaction.
@@ -2145,9 +2141,7 @@ impl IndexedDBManager {
             proxy_map,
         } = open_request
         else {
-            return warn!(
-                "The entry at the front of the connection queue is not an open request."
-            );
+            return warn!("The entry at the front of the connection queue is not an open request.");
         };
 
         let requested_version = *version;
@@ -2729,9 +2723,7 @@ impl IndexedDBManager {
                 // now reports a failed metadata read instead of returning a store whose
                 // key path and key generator are indistinguishable from absent ones.
                 let result = match self.get_database(origin, db_name) {
-                    Some(db) => db
-                        .object_store(&store_name)
-                        .map_err(BackendError::DbErr),
+                    Some(db) => db.object_store(&store_name).map_err(BackendError::DbErr),
                     None => Err(BackendError::DbNotFound),
                 };
                 let _ = sender.send(result);

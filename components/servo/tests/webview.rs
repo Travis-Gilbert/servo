@@ -1082,6 +1082,10 @@ fn test_console_log_and_error_ordering() {
 #[test]
 fn test_preferences_change() {
     let servo_test = ServoTest::new();
+    // Exercise the disabled-to-enabled transition independently of the fork's default.
+    servo_test
+        .servo()
+        .set_preference("layout_grid_enabled", PrefValue::Bool(false));
     let delegate = Rc::new(WebViewDelegateImpl::default());
 
     let test_page = Url::parse(
