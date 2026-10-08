@@ -141,3 +141,24 @@ impl WebStorageEngine for SqliteEngine {
             .map_err(|error| error.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::SqliteEngine;
+    use storage_traits::webstorage_thread::WebStorageEngine;
+
+    #[test]
+    fn default_emptiness_tracks_rows_and_preserves_database_errors() {
+        let mut engine = SqliteEngine {
+            connection: SqliteEngine::init_db(None).unwrap(),
+        };
+        assert!(engine.is_empty().unwrap());
+        engine.set("key", "value").unwrap();
+        assert!(!engine.is_empty().unwrap());
+        engine.clear().unwrap();
+        assert!(engine.is_empty().unwrap());
+
+        engine.connection.execute("DROP TABLE data", []).unwrap();
+        assert_eq!(engine.is_empty().unwrap_err(), engine.len().unwrap_err());
+    }
+}

@@ -53,6 +53,9 @@ impl OriginEntry {
 
 pub trait WebStorageEngine: Send {
     fn len(&self) -> Result<usize, String>;
+    fn is_empty(&self) -> Result<bool, String> {
+        self.len().map(|length| length == 0)
+    }
     fn key(&self, index: usize) -> Result<Option<String>, String>;
     fn keys(&self) -> Result<Vec<String>, String>;
     fn get(&self, key: &str) -> Result<Option<String>, String>;
