@@ -5,8 +5,8 @@ pins; this document does not promote a consumer pin or establish engine acceptan
 
 `queue.json` covers every public downstream commit after upstream Servo v0.5.0
 `1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019` through
-`0b322b0234a1f00f1173b63c299b815d924f3711`, in application order. Its 63 entries
-include the 56-commit frozen baseline and seven forward cleanup/maintenance commits.
+`6dd8897f0379218f3dcb0181dd84e30117a9917e`, in application order. Its 69 entries
+include the 56-commit frozen baseline and 13 forward cleanup/maintenance commits.
 Each entry names its purpose, exact upstream base, retention rationale, regression
 mapping, and pending evidence/equivalence status. The conservative dependency chain
 records cumulative replay order; it does not claim every predecessor is a semantic
@@ -60,7 +60,9 @@ Current gaps include snapshot/hit-test semantics; multiprocess profiler identity
 diagnostic forwarding and closure recovery; response-handle sendability/lifecycle;
 shared-worker owner teardown; compatibility defaults; and backend reply-loss and
 structural failure injection beyond existing happy-path/storage conformance tests;
-and held-message FIFO/barrier/failure/abort lifetime handling in the script lint repair.
+held-message FIFO/barrier/failure/abort lifetime handling in the script lint repair;
+and advisory-specific HTTP2/TLS attack handling and platform-specific crypto backend
+correctness after the dependency updates.
 The broad IndexedDB and Web Locks WPT mappings must be run with the actual selected
 tests, runner configuration and baseline before acceptance. Compiler-only fixes
 use compiler/Crown/lint oracles without claiming behavioral equivalence.
@@ -87,8 +89,10 @@ storage cleanup, and this fork's changes are not submitted upstream.
 engine component check. They neither build Servo nor repin a consumer. The corpus
 comes exclusively from the public candidate manifest: all IndexedDB (817 URLs),
 WebStorage (54), Web Locks (85), WindowProxy exotic-object tests (8), and four
-retained named-window regressions (4). Its 968 URLs have SHA-256
-`937349f689de86018bd32b2def9068ac6bdf4118115fec0555970a7306401752`.
+retained named-window regressions (4), plus ChaCha20-Poly1305 encryption and
+serialization, ECDSA, and ECDH bit/key derivation (10 window/worker URLs).
+Its 978 URLs have SHA-256
+`8356f9b33d9ecf9c12943e00faab873884bb8224e31144e33b5210288f479af8`.
 The cap is 1,000 URLs; a changed roster refuses execution pending review.
 This is separate from Theorem's frozen private Browser Oracle and its exact
 101-source compatibility cohort, which remain pending acceptance.
@@ -179,7 +183,7 @@ and attribution. Its frozen baseline is
 `e92cdaa790797479c1821c33470c64e0d166feb2`. The optional
 `configs.coauthors-history-base` in `servo-tidy.toml` restricts the coauthor
 history scan to `BASE..HEAD`. It requires an exact 40-character commit SHA that
-exists and is an ancestor of HEAD; malformed, missing, or unrelated boundaries
+identifies a commit object and is an ancestor of HEAD; malformed, missing, tag, or unrelated boundaries
 fail the check. Existing trailers are neither removed nor rewritten. New
 commits, author/committer identities, and pull request bodies retain the existing
 disallowed-coauthor checks and list.
