@@ -6072,7 +6072,7 @@ where
                 // Note that we deliberately do not do any of the tidying up
                 // associated with closing a pipeline. The constellation should cope!
                 warn!("{}: Randomly closing pipeline", pipeline_id);
-                self.random_pipeline_closures.insert(pipeline_id.clone());
+                self.random_pipeline_closures.insert(pipeline_id);
                 self.pipelines
                     .get(&pipeline_id)
                     .expect("selected pipeline should still be registered")

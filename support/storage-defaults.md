@@ -88,3 +88,10 @@ acquire/query/held/signal/steal coverage. Ordinary compilation without crown
 does not verify the rooted-parameter requirement. GC zeal additionally requires
 a `debugmozjs` build; setting zeal preferences on an ordinary build is a no-op.
 These are required checks, not a claim they passed for this forward repair.
+
+Hosted lint run `37706099233` at `5920dcccede120f5570496cbc4f25114a9993177`
+then exposed an inherited `clone_on_copy` in constellation's random-pipeline
+stress path, unchanged at the same line in frozen `e92cdaa`. Passing the
+already-`Copy` pipeline ID directly preserves the stress behavior and removes
+the redundant clone. This is a separate maintenance commit; the hosted gates
+must be rerun for its exact head before promotion.
