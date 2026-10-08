@@ -80,3 +80,92 @@ and rerun the associated regressions and required consumer/native journeys. Drop
 a patch only after equivalence is demonstrated. Preserve the previous queue and
 receipts as historical references. No Servo 0.7 upgrade is combined with this
 storage cleanup, and this fork's changes are not submitted upstream.
+
+## Selected WPTs with an existing checked-release artifact
+
+`run_wpt.py` and `.github/workflows/downstream-wpt.yml` provide a bounded public
+engine component check. They neither build Servo nor repin a consumer. The corpus
+comes exclusively from the public candidate manifest: all IndexedDB (817 URLs),
+WebStorage (54), Web Locks (85), WindowProxy exotic-object tests (8), and four
+retained named-window regressions (4). Its 968 URLs have SHA-256
+`937349f689de86018bd32b2def9068ac6bdf4118115fec0555970a7306401752`.
+The cap is 1,000 URLs; a changed roster refuses execution pending review.
+This is separate from Theorem's frozen private Browser Oracle and its exact
+101-source compatibility cohort, which remain pending acceptance.
+
+The verifier requires a completed successful same-repository `Main` run for the
+full engine SHA, one successful x86_64 Linux build job, its unexpired immutable
+`checked-release-binary-linux` artifact ID, and the exact reviewed API digest.
+It rejects artifacts from another run, repository, head, or build attempt.
+PR builds use synthetic merge commits: the build job's checkout log binds that
+commit, its complete Git tree must equal the requested head's tree, and a merge
+must have that head as a parent. Both identities are recorded; they are not
+silently equated. The binary's `--version` must contain the actual build commit's
+available short-SHA prefix. `ports/servoshell/build.rs` supplies `git rev-parse
+--short HEAD`; `lib.rs` and bpaf print `Version: Servo <version>-<short-SHA>`.
+Provenance separately records the orchestration run/revision/workflow reference
+and runner source SHA-256, rather than treating engine and runner revisions as one.
+
+The [download action's v8 inputs](https://raw.githubusercontent.com/actions/download-artifact/v8/action.yml)
+support immutable `artifact-ids`, cross-run `run-id`, and `digest-mismatch: error`.
+The verifier first compares the API ZIP digest with the reviewed input; the action
+then validates the downloaded ZIP against that API digest and fails on mismatch.
+The runner records separate inner tarball and binary SHA-256 values. It does not
+mislabel either inner hash as the outer artifact digest. Plainly copying an
+unverified tarball into its output directory is not a supported provenance route.
+
+Only the existing ephemeral `github.token` is used, with `contents: read` and
+`actions: read`; no new secret or private repository access is required. The
+verification token is confined to its step, redirect requests strip it, checkout
+credentials are not persisted, and child WPT processes exclude token/secret
+environment variables. Downloaded packages reject traversal, links, and devices.
+
+The workflow runs one Ubuntu 22.04 job with a 160-minute maximum, two WPT workers,
+and a 7,200-second runner deadline. Dependencies use the existing Linux WPT
+bootstrap route, bounded to 30 minutes. That installs pinned Python/uv, system
+packages, and the pinned Rust toolchain on the disposable hosted runner; it skips
+Cargo lint/test tool installation and compiles no engine. Network/package/service
+availability and sufficient runner disk remain prerequisites. No full-suite WPT,
+upstream sync, expectation update, intermittent-dashboard secret, or
+`--always-succeed` path is selected.
+
+Receipts retain every URL, actual harness/subtest status counts, skipped tests,
+missing completions, and unexpected results. Every selected URL must be accounted
+for, with non-skipped execution in each group. A successful exit means
+`expectation_match`, not that expected failures passed functionally. Actual
+failures and functional subtest passes remain explicit. Expectation/source drift,
+zero execution, missing results, and timeouts fail the gate. CacheStorage's dummy
+baseline, persistent profile/restart behavior, native embedding acceptance, and
+the private product Oracle remain separate obligations.
+
+Before dispatch, parent review must select a successful run and its immutable
+artifact/digest. A new directly dispatched workflow must first be registered on
+the default branch; this change does not merge it or relax Main. The already
+registered `Try` workflow (ID `340367112`) offers a branch-ref route: explicitly
+set `reuse-artifact: true` plus the four identities. Only that manual mode skips
+Try's decision/build/result jobs and calls the one-job reusable WPT workflow.
+Normal Try pushes and manual defaults preserve their build path. Invalid or
+missing identities fail verification rather than falling back to a build.
+
+Prepare a reviewed JSON input file with `reuse-artifact` set to `true`, and string
+values for `engine-sha`, `build-run-id`, `artifact-id`, and `artifact-digest`.
+Then, after the successful artifact exists and dispatch is authorized:
+
+```sh
+gh workflow run 340367112 --repo Travis-Gilbert/servo --ref REVIEWED_BRANCH --json < reuse-inputs.json
+```
+
+[GitHub's manual-run documentation](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)
+supports branch-ref dispatch and up to 25 inputs on GitHub.com; Try's 12 fit that
+limit. The reusable workflow resolves from the same reviewed caller revision.
+The direct Python `run` stage can also execute on provisioned Linux with the same
+verified provenance and action-validated package, but standalone authenticated
+artifact acquisition is not implemented here; an unverified local copy does not
+establish the required digest chain.
+
+Local component checks (no WPT execution or engine build):
+
+```sh
+python3 -B -m unittest discover -s support/downstream -p 'run_wpt_tests.py'
+python3 -B support/downstream/run_wpt.py roster --output /ABSOLUTE/EVIDENCE_DIRECTORY
+```

@@ -30,9 +30,31 @@ on:
       bencher:
         required: false
         type: boolean
+      reuse-artifact:
+        description: Run only the capped downstream WPT corpus against an existing successful Main artifact
+        required: false
+        default: false
+        type: boolean
+      engine-sha:
+        description: Reuse mode only - reviewed full engine SHA
+        required: false
+        type: string
+      build-run-id:
+        description: Reuse mode only - successful same-repository Main run ID
+        required: false
+        type: string
+      artifact-id:
+        description: Reuse mode only - immutable checked-release-binary-linux artifact ID
+        required: false
+        type: string
+      artifact-digest:
+        description: Reuse mode only - exact artifact API sha256 digest
+        required: false
+        type: string
 
 jobs:
   decision:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.reuse-artifact) }}
     name: Generate Try Configuration
     runs-on: ubuntu-22.04
     outputs:
@@ -101,6 +123,7 @@ jobs:
             return configuration;
 
   build:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.reuse-artifact) }}
     needs: ["decision"]
     name: ${{ matrix.name }}
     strategy:
@@ -127,7 +150,7 @@ jobs:
   build-result:
     name: Result
     runs-on: ubuntu-latest
-    if: always()
+    if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.reuse-artifact) }}
     # `needs: "build"` is necessary to detect cancellation.
     needs: [ "decision", "build" ]
     steps:
@@ -144,3 +167,15 @@ jobs:
       - name: Failure
         if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
         run: exit 1
+
+  reuse-artifact-wpt:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.reuse-artifact }}
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/downstream-wpt.yml
+    with:
+      engine-sha: ${{ inputs.engine-sha }}
+      build-run-id: ${{ inputs.build-run-id }}
+      artifact-id: ${{ inputs.artifact-id }}
+      artifact-digest: ${{ inputs.artifact-digest }}
