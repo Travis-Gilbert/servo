@@ -107,13 +107,13 @@ use devtools_traits::{
 use embedder_traits::resources::{self, Resource};
 use embedder_traits::user_contents::{UserContentManagerId, UserContents};
 use embedder_traits::{
+    AnimationState, DocumentLayoutSnapshot, DocumentLayoutSnapshotError, EmbedderControlId,
+    EmbedderControlResponse, EmbedderProxy, FocusSequenceNumber, GenericEmbedderProxy,
+    HitTestResult, InputEvent, InputEventAndId, InputEventOutcome, JSValue,
     JavaScriptEvaluationError, JavaScriptEvaluationId, KeyboardEvent, MediaSessionActionType,
     MediaSessionEvent, MediaSessionPlaybackState, MouseButton, MouseButtonAction, MouseButtonEvent,
     NewWebViewDetails, PaintHitTestResult, Theme, ViewportDetails, WakeLockDelegate, WakeLockType,
-    AnimationState, DocumentLayoutSnapshot, DocumentLayoutSnapshotError, EmbedderControlId,
     WebDriverCommandMsg, WebDriverLoadStatus, WebDriverScriptCommand, WebViewPoint,
-    HitTestResult, InputEvent, InputEventAndId, InputEventOutcome, JSValue,
-    EmbedderControlResponse, EmbedderProxy, FocusSequenceNumber, GenericEmbedderProxy,
 };
 use euclid::Size2D;
 use euclid::default::Size2D as UntypedSize2D;
@@ -164,11 +164,10 @@ use servo_constellation_traits::{
     DocumentState, EmbedderToConstellationMessage, IFrameLoadInfo, IFrameLoadInfoWithData,
     IFrameSizeMsg, LoadData, LoadOrigin, LogEntry, MessagePortMsg, NamedBrowsingContextInfo,
     NavigationHistoryBehavior, PaintMetricEvent, PortMessageTask, PortTransferInfo,
-    RemoteFocusOperation, SWManagerSenders,
-    ScreenshotReadinessResponse, ScriptToConstellationMessage, ScrollStateUpdate,
-    ServiceWorkerAlgorithm, ServiceWorkerManagerFactory, ServiceWorkerMsg,
-    StructuredSerializedData, TargetSnapshotParams, TraversalDirection, UserContentManagerAction,
-    WindowSizeType,
+    RemoteFocusOperation, SWManagerSenders, ScreenshotReadinessResponse,
+    ScriptToConstellationMessage, ScrollStateUpdate, ServiceWorkerAlgorithm,
+    ServiceWorkerManagerFactory, ServiceWorkerMsg, StructuredSerializedData, TargetSnapshotParams,
+    TraversalDirection, UserContentManagerAction, WindowSizeType,
 };
 use servo_url::{Host, ImmutableOrigin, ServoUrl};
 use storage_traits::StorageThreads;
@@ -2187,12 +2186,12 @@ where
                 load_data,
                 history_handling,
             ) => {
-                let Some((webview_id, pipeline_id)) =
-                    self.browsing_contexts
-                        .get(&browsing_context_id)
-                        .map(|browsing_context| {
-                            (browsing_context.webview_id, browsing_context.pipeline_id)
-                        })
+                let Some((webview_id, pipeline_id)) = self
+                    .browsing_contexts
+                    .get(&browsing_context_id)
+                    .map(|browsing_context| {
+                        (browsing_context.webview_id, browsing_context.pipeline_id)
+                    })
                 else {
                     return warn!("{browsing_context_id}: Load in unknown browsing context");
                 };
@@ -6053,8 +6052,8 @@ where
         // In order to get repeatability, we sort the pipeline ids.
         let mut pipeline_ids: Vec<&PipelineId> = self.pipelines.keys().collect();
         pipeline_ids.sort_unstable();
-        if let Some((ref mut rng, probability)) = self.random_pipeline_closure
-            && let Some(pipeline_id) = pipeline_ids.choose(rng)
+        if let Some((ref mut rng, probability)) = self.random_pipeline_closure &&
+            let Some(pipeline_id) = pipeline_ids.choose(rng)
         {
             let pipeline_id = **pipeline_id;
             let pending_pipeline = self.pipelines.get(&pipeline_id).is_some_and(|pipeline| {

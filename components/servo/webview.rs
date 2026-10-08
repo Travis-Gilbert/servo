@@ -821,9 +821,14 @@ impl WebView {
             }
         })
         .expect("Failed to create hit-test callback");
-        self.inner().servo.constellation_proxy().send(
-            EmbedderToConstellationMessage::HitTest(self.id(), point, callback),
-        );
+        self.inner()
+            .servo
+            .constellation_proxy()
+            .send(EmbedderToConstellationMessage::HitTest(
+                self.id(),
+                point,
+                callback,
+            ));
     }
 
     /// Asynchronously take a screenshot of the [`WebView`] contents, given a `rect` or the whole

@@ -18,10 +18,9 @@ use script_bindings::error::ErrorResult;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 use storage_traits::indexeddb::{
     self, AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, AsyncSchemaOperation,
-    BackfillIndexResult, IndexBackfillEntry, IndexedDBKeyRange, IndexedDBKeyType,
-    IndexedDBRecord, IndexedDBThreadMsg, KvsIndexUpdate, KvsOperationContext, KvsOperationTarget,
-    RecordKeyPlacement,
-    RecordsShape,
+    BackfillIndexResult, IndexBackfillEntry, IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord,
+    IndexedDBThreadMsg, KvsIndexUpdate, KvsOperationContext, KvsOperationTarget,
+    RecordKeyPlacement, RecordsShape,
 };
 
 use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::IDBCursorDirection;
@@ -334,9 +333,7 @@ impl IDBObjectStore {
         };
         let KeyPath::StringSequence(components) = index_key_path else {
             return Ok(match index_key_path {
-                KeyPath::String(index_path) if index_path == store_path => {
-                    RecordKeyReach::WholeKey
-                },
+                KeyPath::String(index_path) if index_path == store_path => RecordKeyReach::WholeKey,
                 _ => RecordKeyReach::Untouched,
             });
         };

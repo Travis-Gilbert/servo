@@ -87,8 +87,7 @@ pub fn key_type_to_jsval(
 
             // Step 3.4. Set the entries in buffer’s [[ArrayBufferData]] internal slot to the
             // entries in value.
-            let mut array_buffer =
-                ArrayBuffer::from(buffer.get()).map_err(|()| Error::JSFailed)?;
+            let mut array_buffer = ArrayBuffer::from(buffer.get()).map_err(|()| Error::JSFailed)?;
             array_buffer
                 .as_mut_slice_safe(cx.no_gc())
                 .ok_or(Error::JSFailed)?
@@ -710,8 +709,7 @@ pub(crate) fn evaluate_key_path_on_value(
                 // Step 1.3.4. Let p be ! ToString(i).
                 // Step 1.3.5. Let status be CreateDataProperty(result, p, key).
                 // Step 1.3.6. Assert: status is true.
-                let i_cstr =
-                    std::ffi::CString::new(i.to_string()).map_err(|_| Error::JSFailed)?;
+                let i_cstr = std::ffi::CString::new(i.to_string()).map_err(|_| Error::JSFailed)?;
                 define_dictionary_property(cx, result.handle(), i_cstr.as_c_str(), key.handle())
                     .map_err(|_| Error::JSFailed)?;
 

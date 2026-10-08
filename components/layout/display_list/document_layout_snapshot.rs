@@ -108,11 +108,11 @@ fn collect_fragment(
     }
 
     node.visible = node.bbox.is_some_and(|rect| {
-        rect.size.width > 0
-            && rect.size.height > 0
-            && node.computed.visibility.as_deref() != Some("hidden")
-            && node.computed.visibility.as_deref() != Some("collapse")
-            && node.computed.opacity.as_deref() != Some("0")
+        rect.size.width > 0 &&
+            rect.size.height > 0 &&
+            node.computed.visibility.as_deref() != Some("hidden") &&
+            node.computed.visibility.as_deref() != Some("collapse") &&
+            node.computed.opacity.as_deref() != Some("0")
     });
     node.scrollable = match (node.client_rect, node.scroll_rect) {
         (Some(client), Some(scroll)) => {

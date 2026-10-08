@@ -236,7 +236,13 @@ impl WebLockRegistry {
     }
 
     /// <https://w3c.github.io/web-locks/#request-a-lock>
-    fn request(&mut self, origin: ImmutableOrigin, entry: LockEntry, if_available: bool, steal: bool) {
+    fn request(
+        &mut self,
+        origin: ImmutableOrigin,
+        entry: LockEntry,
+        if_available: bool,
+        steal: bool,
+    ) {
         let locks = self.origins.entry(origin).or_default();
         if steal {
             // Step 5.1. For each lock of held with the same name: remove it and

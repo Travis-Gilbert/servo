@@ -11,10 +11,9 @@ use js::jsval::{JSVal, UndefinedValue};
 use js::rust::{HandleValue, MutableHandleValue};
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
-use storage_traits::indexeddb::{IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord};
-
 use storage_traits::indexeddb::{
-    AsyncOperation, AsyncReadOnlyOperation, KvsOperationContext, KvsOperationTarget, RecordsShape,
+    AsyncOperation, AsyncReadOnlyOperation, IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord,
+    KvsOperationContext, KvsOperationTarget, RecordsShape,
 };
 
 use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::{
@@ -406,11 +405,7 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbcursor-primarykey>
-    fn GetPrimaryKey(
-        &self,
-        cx: &mut JSContext,
-        mut value: MutableHandleValue,
-    ) -> Fallible<()> {
+    fn GetPrimaryKey(&self, cx: &mut JSContext, mut value: MutableHandleValue) -> Fallible<()> {
         // NOTE: If primaryKey returns an object (e.g. a Date or Array),
         // it returns the same object instance every time it is inspected,
         // until the cursor’s effective key is changed. This means that if the object is modified,

@@ -626,12 +626,13 @@ impl RequestListener {
                                 // A `getAllRecords` request always has a source, so a reply that
                                 // arrives without one cannot be projected into records.
                                 GetAllKind::Records => match &store {
-                                    Some(store) => IDBRecord::new(cx, &global, store, record)
-                                        .map(|idb_record| {
+                                    Some(store) => IDBRecord::new(cx, &global, store, record).map(
+                                        |idb_record| {
                                             array.handle_mut_at(i).set(ObjectValue(
                                                 *idb_record.reflector().get_jsobject(),
                                             ));
-                                        }),
+                                        },
+                                    ),
                                     None => Err(Error::InvalidState(None)),
                                 },
                             };
@@ -1275,12 +1276,12 @@ impl IDBRequest {
             AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate { .. })
         );
         match (iterates, records_param.is_some()) {
-            (true, false) => warn!(
-                "Iterate must carry the RecordsParam that names the algorithm reading it"
-            ),
-            (false, true) => warn!(
-                "records_param should not be provided for an operation that reads no records"
-            ),
+            (true, false) => {
+                warn!("Iterate must carry the RecordsParam that names the algorithm reading it")
+            },
+            (false, true) => {
+                warn!("records_param should not be provided for an operation that reads no records")
+            },
             _ => {},
         }
 

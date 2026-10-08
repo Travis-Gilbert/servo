@@ -156,3 +156,21 @@ additional differences in 25 other files; full output and frozen-baseline
 comparison are recorded in Theorem's execution evidence. These remain integration
 obligations, not a successful full-Tidy result. No local engine build or test was
 run for this repair.
+
+
+### Bounded retained-patch formatting pass
+
+The subsequent mechanical commit formats exactly the 25 outstanding files
+identified by the exact workspace check. All belong to the retained downstream
+patch range from upstream `1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019` to
+frozen `e92cdaa790797479c1821c33470c64e0d166feb2`; upstream copies have no
+formatter differences under these options. No whole-repository format rewrite
+was applied. Functional repair and mechanical formatting are separate commits.
+
+The exact workspace format check now passes. Fresh storage tests passed all 37
+cases across `--lib --test main`, with no skipped tests. The working source diff
+was unchanged before and after the test run. Provenance, bounded preview and
+full logs are preserved in Theorem's migration execution evidence. This does
+not establish a full Tidy pass: local `cargo-deny` remains unavailable. Hosted
+Crown, Clippy, Tidy, unit/doc and required native/WPT gates must pass for the
+new head before promotion; consumer pins remain unchanged.
