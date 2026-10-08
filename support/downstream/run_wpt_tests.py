@@ -196,13 +196,35 @@ class RosterAndExecutionTests(unittest.TestCase):
 
     def test_public_candidate_roster_has_exact_count_and_hash(self) -> None:
         root = Path(__file__).resolve().parents[2]
-        urls, counts = runner.select_roster(root)
-        self.assertEqual(len(urls), 968)
-        self.assertEqual(list(counts.values()), [817, 54, 85, 8, 1, 1, 1, 1])
+        urls, groups = runner.select_roster(root)
+        self.assertEqual(len(urls), 978)
+        self.assertEqual([len(members) for members in groups.values()], [817, 54, 85, 8, 1, 1, 1, 1, 2, 2, 2, 2, 2])
+        for selector in runner.GROUPS[-5:]:
+            self.assertEqual(groups[selector], ["/" + selector[:-3] + ".html", "/" + selector[:-3] + ".worker.html"])
+        self.assertEqual(sorted(url for members in groups.values() for url in members), urls)
         with patch.object(runner, "ROSTER_SHA256", "0" * 64), self.assertRaises(ValueError):
             runner.select_roster(root)
-        with patch.object(runner, "MAX_URLS", 967), self.assertRaises(ValueError):
+        with patch.object(runner, "MAX_URLS", 977), self.assertRaises(ValueError):
             runner.select_roster(root)
+        with patch.object(runner, "ROSTER_COUNT", 977), self.assertRaises(ValueError):
+            runner.select_roster(root)
+
+    def test_duplicate_generated_manifest_urls_are_refused(self) -> None:
+        selector = "Synthetic/case.any.js"
+        manifest = {
+            "items": {"testharness": {"Synthetic": {"case.any.js": ["source-hash", ["Synthetic/case.any.html", {}]]}}}
+        }
+        manifest["items"]["testharness"]["Synthetic"]["case.any.js"].append(["Synthetic/case.any.html", {}])
+        with tempfile.TemporaryDirectory() as temporary, patch.object(runner, "GROUPS", (selector,)):
+            root = Path(temporary)
+            source = root / "tests/wpt/tests" / selector
+            source.parent.mkdir(parents=True)
+            source.write_text("// Fixture source\n")
+            metadata = root / "tests/wpt/meta/MANIFEST.json"
+            metadata.parent.mkdir(parents=True)
+            metadata.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, "Duplicate manifest URLs"):
+                runner.select_roster(root)
 
     def test_missing_archive_or_executable_refused(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -277,7 +299,9 @@ class RosterAndExecutionTests(unittest.TestCase):
                 {"action": "suite_end"},
             ]
             raw.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
-            result = runner.summarize(raw, ["/IndexedDB/a", "/webstorage/b"])
+            groups = {"IndexedDB": ["/IndexedDB/a"], "webstorage": ["/webstorage/b"]}
+            with patch.object(runner, "GROUPS", tuple(groups)):
+                result = runner.summarize(raw, ["/IndexedDB/a", "/webstorage/b"], groups)
             self.assertEqual(result["unexpected_count"], 0)
             self.assertEqual(result["statuses"], {"ERROR": 1})
             self.assertEqual(result["missing_urls"], ["/webstorage/b"])
@@ -285,8 +309,50 @@ class RosterAndExecutionTests(unittest.TestCase):
             self.assertEqual(result["functional_subtest_pass_count"], 0)
             self.assertEqual(result["actual_failure_count"], 1)
             self.assertEqual(runner.gate_result(0, result, True), "failed")
-            with self.assertRaises(ValueError):
-                runner.summarize(raw, ["/different"])
+            with patch.object(runner, "GROUPS", tuple(groups)), self.assertRaises(ValueError):
+                runner.summarize(raw, ["/different"], groups)
+
+    def test_generated_urls_count_only_their_manifest_selector(self) -> None:
+        # Both selectors share a URL prefix. A directory-prefix approximation
+        # would count the exact-source URL as execution of the other group.
+        groups = {
+            "Synthetic": ["/Synthetic/other.html"],
+            "Synthetic/case.any.js": ["/Synthetic/case.any.html", "/Synthetic/case.any.worker.html"],
+        }
+        selected = [url for urls in groups.values() for url in urls]
+        with tempfile.TemporaryDirectory() as temporary, patch.object(runner, "GROUPS", tuple(groups)):
+            raw = Path(temporary) / "raw.jsonl"
+            for other_status in ("SKIP", "OK"):
+                with self.subTest(other_status=other_status):
+                    rows = [
+                        {"action": "test_end", "test": selected[0], "status": other_status},
+                        {"action": "test_end", "test": selected[1], "status": "OK"},
+                        {"action": "test_end", "test": selected[2], "status": "OK"},
+                        {"action": "suite_end"},
+                    ]
+                    raw.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+                    result = runner.summarize(raw, selected, groups)
+                    self.assertEqual(result["executed_groups"]["Synthetic"], int(other_status != "SKIP"))
+                    self.assertEqual(result["executed_groups"]["Synthetic/case.any.js"], 2)
+                    self.assertEqual(
+                        runner.gate_result(0, result, True), "failed" if other_status == "SKIP" else "expectation_match"
+                    )
+
+    def test_incomplete_overlapping_or_wrong_group_membership_is_refused(self) -> None:
+        groups = {"first": ["/first.html"], "second": ["/second.html"]}
+        selected = ["/first.html", "/second.html"]
+        wrong = (
+            {"first": ["/first.html"]},
+            {"first": ["/first.html"], "second": ["/first.html"]},
+            {"first": [], "second": selected},
+            {"first": ["/first.html"], "second": ["/absent.html"]},
+        )
+        with tempfile.TemporaryDirectory() as temporary, patch.object(runner, "GROUPS", tuple(groups)):
+            raw = Path(temporary) / "raw.jsonl"
+            raw.write_text(json.dumps({"action": "suite_end"}) + "\n")
+            for membership in wrong:
+                with self.subTest(membership=membership), self.assertRaises(ValueError):
+                    runner.summarize(raw, selected, membership)
 
     def test_expectation_match_is_not_a_functional_pass_and_drift_is_failure(self) -> None:
         summary = {
@@ -295,7 +361,7 @@ class RosterAndExecutionTests(unittest.TestCase):
             "executed_groups": dict.fromkeys(runner.GROUPS, 1),
             "unexpected_count": 0,
             "functional_subtest_pass_count": 0,
-            "actual_failure_count": 968,
+            "actual_failure_count": 978,
         }
         self.assertEqual(runner.gate_result(0, summary, True), "expectation_match")
         self.assertEqual(summary["functional_subtest_pass_count"], 0)

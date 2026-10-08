@@ -35,11 +35,16 @@ GROUPS = (
     "html/browsers/windows/auxiliary-browsing-contexts/named-lookup-scoped-to-browsing-context-group.html",
     "html/browsers/windows/browsing-context-names/duplicate-name-order.html",
     "html/browsers/windows/targeting-cross-origin-nested-browsing-contexts.html",
+    "WebCryptoAPI/encrypt_decrypt/chacha20_poly1305.tentative.https.any.js",
+    "WebCryptoAPI/serialization/chacha20-poly1305.tentative.https.any.js",
+    "WebCryptoAPI/sign_verify/ecdsa.https.any.js",
+    "WebCryptoAPI/derive_bits_keys/ecdh_bits.https.any.js",
+    "WebCryptoAPI/derive_bits_keys/ecdh_keys.https.any.js",
 )
 # Derived from the public 0b322b0234a1f00f1173b63c299b815d924f3711 manifest.
 # A changed cohort requires a separately reviewed update, never truncation.
-ROSTER_COUNT = 968
-ROSTER_SHA256 = "937349f689de86018bd32b2def9068ac6bdf4118115fec0555970a7306401752"
+ROSTER_COUNT = 978
+ROSTER_SHA256 = "8356f9b33d9ecf9c12943e00faab873884bb8224e31144e33b5210288f479af8"
 MAX_URLS = 1000
 MAX_ARCHIVE_BYTES = 2 * 1024**3
 MAX_UNPACKED_BYTES = 4 * 1024**3
@@ -176,10 +181,10 @@ def verify(output: Path) -> None:
         stream.write("build_run_id=" + ids["BUILD_RUN_ID"] + "\n")
 
 
-def select_roster(root: Path) -> tuple[list[str], dict[str, int]]:
+def select_roster(root: Path) -> tuple[list[str], dict[str, list[str]]]:
     manifest = json.loads((root / "tests/wpt/meta/MANIFEST.json").read_text())["items"]["testharness"]
     selected: list[str] = []
-    counts: dict[str, int] = {}
+    group_urls: dict[str, list[str]] = {}
 
     def walk(node: Any, path: str) -> None:
         if isinstance(node, dict):
@@ -196,14 +201,14 @@ def select_roster(root: Path) -> tuple[list[str], dict[str, int]]:
             node = node[part]
         before = len(selected)
         walk(node, group)
-        counts[group] = len(selected) - before
-        require(counts[group] > 0, "Empty selected group")
+        group_urls[group] = sorted(selected[before:])
+        require(bool(group_urls[group]), "Empty selected group")
     require(len(selected) == len(set(selected)), "Duplicate manifest URLs")
     selected.sort()
     digest = hashlib.sha256(("\n".join(selected) + "\n").encode()).hexdigest()
     require(len(selected) == ROSTER_COUNT and len(selected) <= MAX_URLS, "Roster count changed or exceeded cap")
     require(digest == ROSTER_SHA256, "Public roster changed; review required")
-    return selected, counts
+    return selected, group_urls
 
 
 def extract_package(archive: Path, destination: Path) -> Path:
@@ -262,8 +267,14 @@ def validate_binary_version(version: str, build_sha: str) -> None:
     require(match is not None and build_sha.startswith(match[1]), "Binary build revision mismatch")
 
 
-def summarize(raw: Path, selected: list[str]) -> dict:
+def summarize(raw: Path, selected: list[str], group_urls: dict[str, list[str]]) -> dict:
     require(raw.is_file(), "Raw WPT log missing")
+    require(tuple(group_urls) == GROUPS, "Selected group membership missing or reordered")
+    members = [url for urls in group_urls.values() for url in urls]
+    require(all(group_urls.values()), "Empty selected group membership")
+    require(len(members) == len(set(members)), "Duplicate selected group membership")
+    require(len(selected) == len(members) and set(selected) == set(members), "Group membership differs from roster")
+    membership = {group: set(urls) for group, urls in group_urls.items()}
     completed: set[str] = set()
     statuses: dict[str, int] = {}
     subtests: dict[str, int] = {}
@@ -288,8 +299,8 @@ def summarize(raw: Path, selected: list[str]) -> dict:
                 require(test not in completed, "Duplicate WPT completion")
                 completed.add(test)
                 if row["status"] != "SKIP":
-                    for group in GROUPS:
-                        if test == "/" + group or test.startswith("/" + group + "/"):
+                    for group, urls in membership.items():
+                        if test in urls:
                             executed_groups[group] += 1
     require(not completed.difference(selected), "WPT executed outside the selected roster")
     return {
@@ -332,7 +343,8 @@ def run(root: Path, output: Path) -> None:
         not subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=no"], cwd=root),
         "Dirty WPT source",
     )
-    selected, counts = select_roster(root)
+    selected, group_urls = select_roster(root)
+    counts = {group: len(urls) for group, urls in group_urls.items()}
     (output / "include.txt").write_text("\n".join(selected) + "\n")
     binary = extract_package(output / "download/servo-tech-demo.tar.gz", output / "package")
     child_env = {
@@ -375,7 +387,7 @@ def run(root: Path, output: Path) -> None:
     receipt["exit_code"] = code
     receipt["result"] = "failed"
     write_json(output / "receipt.json", receipt)
-    summary = summarize(output / "raw.jsonl", selected)
+    summary = summarize(output / "raw.jsonl", selected, group_urls)
     receipt.update(summary)
     receipt["metadata_unchanged"] = metadata_matches_head(root)
     receipt["result"] = gate_result(code, summary, receipt["metadata_unchanged"])
@@ -397,7 +409,8 @@ def main() -> None:
     elif args.stage == "run":
         run(args.root.resolve(), output)
     else:
-        selected, counts = select_roster(args.root.resolve())
+        selected, group_urls = select_roster(args.root.resolve())
+        counts = {group: len(urls) for group, urls in group_urls.items()}
         write_json(
             output / "roster.json",
             {"count": len(selected), "sha256": ROSTER_SHA256, "groups": counts, "urls": selected},
