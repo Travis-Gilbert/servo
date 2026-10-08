@@ -37,6 +37,7 @@ pub(crate) use dom::canvas_context;
 pub(crate) mod fetch;
 mod hit_test;
 mod theorem_world_gpu;
+mod native_text;
 pub(crate) mod indexeddb;
 mod init;
 mod layout_image;

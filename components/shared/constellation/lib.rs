@@ -106,6 +106,11 @@ pub enum EmbedderToConstellationMessage {
     /// error is encountered, a correpsonding message will be sent to the embedding layer.
     EvaluateJavaScript(WebViewId, JavaScriptEvaluationId, String),
     /// Resolve or import a native World texture in the active document.
+    NativeText(
+        WebViewId,
+        servo_base::native_text::NativeTextRequest,
+        GenericCallback<servo_base::native_text::NativeTextResult>,
+    ),
     TheoremWorldTexture(
         WebViewId,
         TheoremWorldTextureRequest,

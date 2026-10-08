@@ -865,6 +865,50 @@ impl HTMLInputElement {
         matches!(*self.input_type(), InputType::Color(_)) && !el.disabled_state()
     }
 
+    // Native-only text service uses the same editable buffer as keyboard/IME default actions.
+    // Unlike WebIDL selection getters this also supports textual number controls.
+    pub(crate) fn native_text_snapshot(&self) -> Option<(String, (u32, u32))> {
+        if !self.is_textual_or_password()
+            || self.ReadOnly()
+            || self.upcast::<Element>().disabled_state()
+        {
+            return None;
+        }
+        let input = self.textinput.borrow();
+        Some((
+            input.get_content().to_string(),
+            (
+                input.selection_start_utf16().0 as u32,
+                input.selection_end_utf16().0 as u32,
+            ),
+        ))
+    }
+    pub(crate) fn native_text_select(&self, range: (u32, u32)) {
+        self.textinput.borrow_mut().set_selection_range_utf16(
+            range.0.into(),
+            range.1.into(),
+            crate::textinput::SelectionDirection::Forward,
+        );
+        self.maybe_update_shared_selection();
+    }
+    pub(crate) fn native_text_delete_selection(&self, cx: &mut JSContext, composing: bool) {
+        self.textinput.borrow_mut().insert("");
+        self.textinput.borrow().queue_input_event(
+            self.upcast(),
+            Some(String::new()),
+            if composing {
+                IsComposing::Composing
+            } else {
+                IsComposing::NotComposing
+            },
+            crate::textinput::InputType::InsertCompositionText,
+        );
+        self.value_dirty.set(true);
+        self.value_changed(cx);
+        self.update_placeholder_shown_state();
+        self.upcast::<Node>().dirty(NodeDamage::Other);
+    }
+
     fn handle_key_reaction(&self, cx: &mut JSContext, action: KeyReaction, event: &Event) {
         match action {
             KeyReaction::TriggerDefaultAction => {

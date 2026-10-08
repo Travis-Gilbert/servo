@@ -377,6 +377,7 @@ pub(crate) struct Window {
     webgl_chan: Option<WebGLChan>,
     /// Strong, traced native texture grants scoped to this document.
     theorem_world_gpu: crate::theorem_world_gpu::State,
+    native_text: crate::native_text::State,
 
     #[ignore_malloc_size_of = "defined in webxr"]
     #[no_trace]
@@ -485,6 +486,9 @@ pub(crate) struct Window {
 }
 
 impl Window {
+    pub(crate) fn native_text(&self) -> &crate::native_text::State {
+        &self.native_text
+    }
     pub(crate) fn theorem_world_gpu(&self) -> &crate::theorem_world_gpu::State {
         &self.theorem_world_gpu
     }
@@ -3759,6 +3763,7 @@ impl Window {
             test_runner: Default::default(),
             webgl_chan,
             theorem_world_gpu: Default::default(),
+            native_text: Default::default(),
             #[cfg(feature = "webxr")]
             webxr_registry,
             pending_image_callbacks: Default::default(),

@@ -54,6 +54,7 @@ pub use crate::input_events::*;
 use crate::user_contents::UserContentManagerId;
 pub use crate::webdriver::*;
 pub use servo_base::theorem_world_gpu::*;
+pub use servo_base::native_text::*;
 
 /// A point in a `WebView`, either expressed in device pixels or page pixels.
 /// Page pixels are CSS pixels, which take into account device pixel scale,

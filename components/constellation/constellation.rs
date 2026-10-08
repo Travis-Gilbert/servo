@@ -1525,6 +1525,34 @@ where
             ) => {
                 self.handle_evaluate_javascript(webview_id, evaluation_id, script);
             },
+            EmbedderToConstellationMessage::NativeText(webview, request, callback) => {
+                use servo_base::native_text::{NativeTextError, NativeTextRequest};
+                let pipeline = self
+                    .browsing_contexts
+                    .get(&BrowsingContextId::from(webview))
+                    .and_then(|context| self.pipelines.get(&context.pipeline_id));
+                if let Some(pipeline) = pipeline {
+                    if matches!(&request,NativeTextRequest::Edit{expected,..} if expected.webview!=webview || expected.document!=pipeline.id)
+                    {
+                        let _ = callback.send(Err(NativeTextError::StaleContext));
+                    } else {
+                        let failure = callback.clone();
+                        if pipeline
+                            .event_loop
+                            .send(ScriptThreadMessage::NativeText(
+                                pipeline.id,
+                                request,
+                                callback,
+                            ))
+                            .is_err()
+                        {
+                            let _ = failure.send(Err(NativeTextError::DocumentUnavailable));
+                        }
+                    }
+                } else {
+                    let _ = callback.send(Err(NativeTextError::DocumentUnavailable));
+                }
+            },
             EmbedderToConstellationMessage::TheoremWorldTexture(webview_id, request, callback) => {
                 self.handle_theorem_world_texture(webview_id, request, callback);
             },

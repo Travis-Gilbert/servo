@@ -786,6 +786,32 @@ impl WebView {
         );
     }
 
+    /// Query or edit the actual focused input/textarea in the current document.
+    /// Edits bind to its exact document, focus sequence, element, text and selection.
+    pub fn native_text(
+        &self,
+        request: embedder_traits::NativeTextRequest,
+        callback: impl FnOnce(embedder_traits::NativeTextResult) + Send + 'static,
+    ) {
+        let mut callback = Some(callback);
+        let callback = GenericCallback::new(move |result| {
+            if let Some(callback) = callback.take() {
+                callback(
+                    result.unwrap_or(Err(embedder_traits::NativeTextError::DocumentUnavailable)),
+                );
+            }
+        })
+        .expect("native text callback");
+        self.inner()
+            .servo
+            .constellation_proxy()
+            .send(EmbedderToConstellationMessage::NativeText(
+                self.id(),
+                request,
+                callback,
+            ));
+    }
+
     /// Register, validate, import, or revoke a native World texture in this view's current document.
     ///
     /// # Safety
