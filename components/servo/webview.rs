@@ -807,6 +807,8 @@ impl WebView {
                     | "attention"
                     | "participant"
                     | "participant_frame"
+                    | "clipboard_context"
+                    | "clipboard_refresh"
             ) || body.len() > 16384
                 || serde_json::from_str::<serde_json::Value>(&body).is_err()
             {
