@@ -147,8 +147,10 @@ Try's decision/build/result jobs and calls the one-job reusable WPT workflow.
 Normal Try pushes and manual defaults preserve their build path. Invalid or
 missing identities fail verification rather than falling back to a build.
 
-Prepare a reviewed JSON input file with `reuse-artifact` set to `true`, and string
-values for `engine-sha`, `build-run-id`, `artifact-id`, and `artifact-digest`.
+Prepare a reviewed JSON input file with string-valued inputs: set
+`reuse-artifact` to `"true"`, plus `engine-sha`, `build-run-id`, `artifact-id`,
+and `artifact-digest`. The gh CLI requires strings here even for a boolean
+workflow input; GitHub parses `"true"` into the declared boolean.
 Then, after the successful artifact exists and dispatch is authorized:
 
 ```sh
