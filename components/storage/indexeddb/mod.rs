@@ -2952,13 +2952,29 @@ impl IndexedDBManager {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    use profile_traits::generic_callback::GenericCallback;
     use servo_base::generic_channel;
     use servo_base::threadpool::ThreadPool;
     use servo_url::ImmutableOrigin;
-    use storage_traits::indexeddb::{IndexedDBDescription, IndexedDBTxnMode, KeyPath};
+    use storage_traits::StorageThreads;
+    use storage_traits::cache_storage::CacheStorageThreadMessage;
+    use storage_traits::client_storage::{
+        ClientStorageThreadHandle, StorageIdentifier, StorageProxyMap, StorageType,
+    };
+    use storage_traits::indexeddb::{
+        BackendError, DeleteDatabaseMsg, IndexedDBDescription, IndexedDBThreadMsg,
+        IndexedDBTxnMode, KeyPath, KvsEngine, SyncOperation,
+    };
+    use storage_traits::webstorage_thread::WebStorageThreadMsg;
     use url::Host;
+    use uuid::Uuid;
 
-    use super::IndexedDBEnvironment;
+    use super::{IndexedDBEnvironment, IndexedDBManager};
+    use crate::ClientStorageThreadFactory;
     use crate::indexeddb::engines::SqliteEngine;
 
     fn test_origin() -> ImmutableOrigin {
@@ -2967,6 +2983,199 @@ mod tests {
             Host::Domain("localhost".to_string()),
             80,
         )
+    }
+
+    /// A registry that has already shut down must reject the delete through the
+    /// manager's existing error path, rather than panic before it can reply.
+    #[test]
+    fn test_disconnected_registry_delete_reports_error_and_manager_keeps_serving() {
+        let base_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let description = IndexedDBDescription {
+            name: "disconnected-registry-db".to_string(),
+            origin: test_origin(),
+        };
+        let engine: Box<dyn KvsEngine> = Box::new(
+            SqliteEngine::new(
+                base_dir.path().to_path_buf(),
+                true,
+                &description,
+                ThreadPool::global(),
+            )
+            .unwrap(),
+        );
+        let database_path = base_dir.path().join("indexeddb.sqlite");
+        assert!(database_path.is_file());
+
+        let (manager_sender, manager_port) = generic_channel::channel().unwrap();
+        let mut manager = IndexedDBManager::new(manager_port, manager_sender.clone());
+        manager.databases.insert(
+            description.clone(),
+            IndexedDBEnvironment::new(engine, manager_sender),
+        );
+
+        let (registry_sender, registry_port) = generic_channel::channel().unwrap();
+        drop(registry_port);
+        let proxy_map = StorageProxyMap {
+            bottle_id: 1,
+            handle: ClientStorageThreadHandle::new(registry_sender),
+        };
+        let (reply_sender, replies) = mpsc::channel();
+        let callback =
+            GenericCallback::new(profile::time::Profiler::create(&None, None), move |reply| {
+                reply_sender
+                    .send(reply.expect("delete callback decoding failed"))
+                    .unwrap();
+            })
+            .unwrap();
+
+        manager.start_delete_database(description.clone(), Uuid::new_v4(), proxy_map, callback);
+        match replies
+            .recv_timeout(Duration::from_secs(10))
+            .expect("disconnected registry delete did not reply")
+        {
+            DeleteDatabaseMsg::Done(Err(BackendError::DbErr(message))) => {
+                assert_eq!(message, "Failed to communicate with client storage.");
+            },
+            other => panic!("disconnected registry must report a database error: {other:?}"),
+        }
+        assert!(!manager.connection_queues.contains_key(&description));
+        assert!(
+            database_path.is_file(),
+            "failed delete must not claim a durable deletion"
+        );
+
+        // The failed delete removes its environment as normal, but the same
+        // manager must still answer a subsequent request rather than die.
+        let (version_sender, version_reply) = generic_channel::channel().unwrap();
+        manager.handle_sync_operation(SyncOperation::Version(
+            version_sender,
+            description.origin,
+            description.name,
+        ));
+        assert!(matches!(
+            version_reply.try_recv_timeout(Duration::from_secs(10)),
+            Ok(Err(BackendError::DbNotFound))
+        ));
+    }
+
+    /// Hold the real manager until production shutdown requests IndexedDB Exit.
+    /// A registry-first shutdown then deterministically loses the queued delete.
+    /// This covers a ready synchronous delete, not asynchronous transaction drain.
+    #[test]
+    fn test_storage_exit_completes_queued_delete_before_stopping_registry() {
+        let profile = tempfile::tempdir().expect("Failed to create temp profile");
+        let registry: ClientStorageThreadHandle =
+            ClientStorageThreadFactory::new(Some(profile.path().to_path_buf()), false);
+        let description = IndexedDBDescription {
+            name: "queued-shutdown-delete".to_string(),
+            origin: test_origin(),
+        };
+        let proxy_map = registry
+            .obtain_a_storage_bottle_map(
+                StorageType::Local,
+                None,
+                StorageIdentifier::IndexedDB,
+                description.origin.clone(),
+            )
+            .recv()
+            .unwrap()
+            .unwrap();
+        let bottle_id = proxy_map.bottle_id;
+        let (database_dir, created) = registry
+            .create_database(bottle_id, description.name.clone())
+            .recv()
+            .unwrap()
+            .unwrap();
+        assert!(created);
+        let engine: Box<dyn KvsEngine> = Box::new(
+            SqliteEngine::new(
+                database_dir.clone(),
+                created,
+                &description,
+                ThreadPool::global(),
+            )
+            .unwrap(),
+        );
+        let (manager_sender, manager_port) = generic_channel::channel().unwrap();
+        let mut manager = IndexedDBManager::new(manager_port, manager_sender.clone());
+        let mut environment = IndexedDBEnvironment::new(engine, manager_sender.clone());
+        environment.set_version(7).unwrap();
+        manager.databases.insert(description.clone(), environment);
+        assert!(database_dir.join("indexeddb.sqlite").is_file());
+
+        let (reply_sender, replies) = mpsc::channel();
+        let callback =
+            GenericCallback::new(profile::time::Profiler::create(&None, None), move |reply| {
+                reply_sender
+                    .send(reply.expect("delete callback decoding failed"))
+                    .unwrap();
+            })
+            .unwrap();
+        manager_sender
+            .send(IndexedDBThreadMsg::Sync(SyncOperation::DeleteDatabase(
+                callback,
+                description.origin.clone(),
+                description.name.clone(),
+                proxy_map,
+                Uuid::new_v4(),
+            )))
+            .unwrap();
+
+        // The relay gates manager.start on the actual production Exit request.
+        // Forwarding it behind Delete preserves a deterministic real-port order.
+        let (idb_proxy, idb_proxy_port) = generic_channel::channel().unwrap();
+        let manager_thread = thread::spawn(move || {
+            let exit = idb_proxy_port
+                .recv()
+                .expect("shutdown did not request IndexedDB Exit");
+            assert!(matches!(
+                &exit,
+                IndexedDBThreadMsg::Sync(SyncOperation::Exit(_))
+            ));
+            manager_sender.send(exit).unwrap();
+            manager.start();
+        });
+
+        // WebStorage and CacheStorage are explicit exit-protocol stand-ins;
+        // the registry, SQLite engine, manager, and shutdown helper are real.
+        let (web_storage, web_storage_port) = generic_channel::channel().unwrap();
+        let web_storage_thread = thread::spawn(move || match web_storage_port.recv().unwrap() {
+            WebStorageThreadMsg::Exit(sender) => sender.send(()).unwrap(),
+            _ => panic!("unexpected WebStorage operation in shutdown-only stand-in"),
+        });
+        let (cache_storage, cache_storage_port) = generic_channel::channel().unwrap();
+        let cache_storage_thread =
+            thread::spawn(move || match cache_storage_port.recv().unwrap() {
+                CacheStorageThreadMessage::Exit(sender) => sender.send(()).unwrap(),
+                _ => panic!("unexpected CacheStorage operation in shutdown-only stand-in"),
+            });
+        let threads = StorageThreads::new(registry.into(), idb_proxy, web_storage, cache_storage);
+        threads.exit().expect("production storage shutdown failed");
+        manager_thread
+            .join()
+            .expect("IndexedDB manager panicked during shutdown");
+        web_storage_thread.join().unwrap();
+        cache_storage_thread.join().unwrap();
+
+        assert!(matches!(
+            replies.recv_timeout(Duration::from_secs(10)).unwrap(),
+            DeleteDatabaseMsg::Done(Ok(7))
+        ));
+        assert!(
+            !database_dir.exists(),
+            "queued delete did not remove its durable directory"
+        );
+        let registry_db =
+            rusqlite::Connection::open(profile.path().join("clientstorage/default_v1/reg.sqlite"))
+                .unwrap();
+        let remaining: i64 = registry_db
+            .query_row(
+                "SELECT COUNT(*) FROM databases WHERE bottle_id = ?1 AND name = ?2",
+                (bottle_id, description.name),
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0, "queued delete left a durable registry row");
     }
 
     #[test]

@@ -9,7 +9,7 @@ use servo_url::ImmutableOrigin;
 
 use crate::cache_storage::CacheStorageThreadMessage;
 use crate::client_storage::{ClientStorageThreadHandle, ClientStorageThreadMessage};
-use crate::indexeddb::IndexedDBThreadMsg;
+use crate::indexeddb::{IndexedDBThreadMsg, SyncOperation};
 use crate::webstorage_thread::{OriginDescriptor, WebStorageThreadMsg, WebStorageType};
 
 pub mod cache_storage;
@@ -38,6 +38,51 @@ impl StorageThreads {
             web_storage_thread,
             cache_storage_thread,
         }
+    }
+
+    /// Stop storage consumers before their registry, after script event loops join.
+    /// IndexedDB can still synchronously create/delete registry entries while handling
+    /// messages queued before Exit. Its acknowledgement ends those registry requests;
+    /// it does not drain blocked requests, asynchronous SQLite batches or worker teardown.
+    /// Every thread is asked to exit even if an earlier thread has disconnected.
+    pub fn exit(&self) -> Result<(), String> {
+        fn exit_thread<T: Serialize>(
+            thread: &GenericSender<T>,
+            name: &str,
+            exit_message: impl FnOnce(GenericSender<()>) -> T,
+        ) -> Result<(), String> {
+            let (sender, receiver) = generic_channel::channel()
+                .ok_or_else(|| format!("Failed to create {name} exit channel"))?;
+            thread
+                .send(exit_message(sender))
+                .map_err(|error| format!("Failed to send {name} exit: {error}"))?;
+            receiver
+                .recv()
+                .map_err(|error| format!("Failed to receive {name} exit: {error}"))
+        }
+
+        let indexeddb = exit_thread(&self.idb_thread, "IndexedDB", |sender| {
+            IndexedDBThreadMsg::Sync(SyncOperation::Exit(sender))
+        });
+        let web_storage = exit_thread(
+            &self.web_storage_thread,
+            "WebStorage",
+            WebStorageThreadMsg::Exit,
+        );
+        let cache_storage = exit_thread(
+            &self.cache_storage_thread,
+            "CacheStorage",
+            CacheStorageThreadMessage::Exit,
+        );
+        let client_storage = exit_thread(
+            &self.client_storage_thread,
+            "client storage",
+            ClientStorageThreadMessage::Exit,
+        );
+        indexeddb
+            .and(web_storage)
+            .and(cache_storage)
+            .and(client_storage)
     }
 
     pub fn persisted(

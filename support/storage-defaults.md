@@ -209,3 +209,44 @@ full logs are preserved in Theorem's migration execution evidence. This does
 not establish a full Tidy pass: local `cargo-deny` remains unavailable. Hosted
 Crown, Clippy, Tidy, unit/doc and required native/WPT gates must pass for the
 new head before promotion; consumer pins remain unchanged.
+
+
+## IndexedDB registry lifetime during shutdown
+
+Selected WPT run 37767602557 exposed an IndexedDBManager panic after a test had
+reported OK: a queued database deletion sent to an already stopped client-storage
+registry and unwrapped `Disconnected`. An OK test status did not prove clean
+browser teardown.
+
+`StorageThreads::exit` now sends and awaits IndexedDB Exit before stopping the
+registry, and also stops WebStorage/CacheStorage before their registry. Both
+public and private groups use this helper from constellation after script event
+loops join. All stages are attempted even if one consumer has already exited;
+the helper returns the first communication failure. Registry obtain/create/delete
+helpers preserve their receiver APIs but let a failed send disconnect the reply
+receiver, reaching existing caller error paths instead of panicking.
+
+The queued-delete regression uses the real registry, SQLite engine, manager and
+production exit helper. It gates manager startup on shutdown's Exit request,
+requires the queued delete's version-7 success reply and clean manager join, then
+independently checks directory and registry-row removal. WebStorage/CacheStorage
+are explicit exit-protocol stand-ins in that test. Separate tests cover all three
+disconnected registry helpers, manager error/recovery without false durable
+success, and continuing group shutdown after IndexedDB has already exited.
+
+Run the full built-in storage component suite and the actual caller check:
+
+```sh
+cargo +1.95.0 nextest run --locked -p servo-storage --lib --test main
+cargo +1.95.0 check --locked -p servo-constellation -p servo-constellation-traits --features zeroize/derive --lib
+```
+
+The focused caller check explicitly supplies the zeroize derive feature normally
+unified through `script_bindings`; the bare constellation package currently lacks
+that inherited feature edge. The initial bare-package failure is retained separately.
+
+The IndexedDB Exit acknowledgement establishes that the manager will make no
+further registry calls. It does not drain blocked connection requests, outstanding
+script callbacks, asynchronous SQLite batches or complete service-worker teardown.
+The regression does not substitute for rerunning the native/browser shutdown path
+on a newly built artifact. Neither consumer pin or WPT expectation metadata changes.
