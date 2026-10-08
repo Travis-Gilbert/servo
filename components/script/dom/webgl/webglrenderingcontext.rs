@@ -180,6 +180,8 @@ pub(crate) struct WebGLRenderingContext {
     #[ignore_malloc_size_of = "Defined in servo_canvas_traits"]
     #[no_trace]
     last_error: Cell<Option<WebGLError>>,
+    // Sticky after an admitted native import, including canvas resize/recovery.
+    native_protected: Cell<bool>,
     texture_packing_alignment: Cell<u8>,
     texture_unpacking_settings: Cell<TextureUnpacking>,
     // TODO(nox): Should be Cell<u8>.
@@ -211,6 +213,23 @@ pub(crate) struct WebGLRenderingContext {
 }
 
 impl WebGLRenderingContext {
+    /// Native pixels may be sampled for rendering, but never exported to page code.
+    pub(crate) fn protect_native_surface(&self) {
+        self.native_protected.set(true);
+    }
+
+    pub(crate) fn native_surface_is_protected(&self) -> bool {
+        self.native_protected.get()
+    }
+
+    pub(crate) fn deny_native_readback(&self) -> bool {
+        if !self.native_surface_is_protected() {
+            return false;
+        }
+        self.webgl_error(WebGLError::InvalidOperation);
+        true
+    }
+
     #[cfg_attr(crown, expect(crown::unrooted_must_root))]
     pub(crate) fn new_inherited(
         window: &Window,
@@ -250,6 +269,7 @@ impl WebGLRenderingContext {
                 limits: ctx_data.limits,
                 canvas,
                 last_error: Cell::new(None),
+                native_protected: Cell::new(false),
                 texture_packing_alignment: Cell::new(4),
                 texture_unpacking_settings: Cell::new(TextureUnpacking::CONVERT_COLORSPACE),
                 texture_unpacking_alignment: Cell::new(4),
@@ -1998,6 +2018,10 @@ impl CanvasContext for WebGLRenderingContext {
         self.droppable.webgl_sender.context_id()
     }
 
+    fn origin_is_clean(&self) -> bool {
+        !self.native_surface_is_protected()
+    }
+
     fn canvas(&self) -> Option<RootedHTMLCanvasElementOrOffscreenCanvas> {
         Some(RootedHTMLCanvasElementOrOffscreenCanvas::from(&self.canvas))
     }
@@ -2181,6 +2205,14 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
     #[expect(unsafe_code)]
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn GetParameter(&self, cx: &mut JSContext, parameter: u32, mut retval: MutableHandleValue) {
+        if self.native_surface_is_protected()
+            && matches!(parameter,
+                constants::TEXTURE_BINDING_2D | constants::TEXTURE_BINDING_CUBE_MAP |
+                WebGL2RenderingContextConstants::TEXTURE_BINDING_2D_ARRAY |
+                WebGL2RenderingContextConstants::TEXTURE_BINDING_3D)
+        {
+            return retval.set(NullValue());
+        }
         if !self
             .extension_manager
             .is_get_parameter_name_enabled(parameter)
@@ -3357,6 +3389,11 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         pname: u32,
         mut retval: MutableHandleValue,
     ) {
+        if self.native_surface_is_protected()
+            && pname == constants::FRAMEBUFFER_ATTACHMENT_OBJECT_NAME
+        {
+            return retval.set(NullValue());
+        }
         // Check if currently bound framebuffer is non-zero as per spec.
         if let Some(fb) = self.bound_draw_framebuffer.get() {
             // Opaque framebuffers cannot have their attachments inspected
@@ -3932,6 +3969,9 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         pixel_type: u32,
         mut pixels: CustomAutoRooterGuard<Option<ArrayBufferView>>,
     ) {
+        if self.deny_native_readback() {
+            return;
+        }
         handle_potential_webgl_error!(self, self.validate_framebuffer(), return);
 
         let pixels =

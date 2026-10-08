@@ -81,6 +81,7 @@ webxr = [
 ]
 
 [dependencies]
+serde_json = { workspace = true }
 accesskit = { workspace = true }
 bitflags = { workspace = true }
 cookie = { workspace = true }

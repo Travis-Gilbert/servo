@@ -609,6 +609,19 @@ impl Layout for LayoutThread {
         })
     }
 
+    fn query_native_text_rect(&self) -> Option<Rect<Au, CSSPixel>> {
+        let tree = self.stacking_context_tree.borrow();
+        let info = &tree.as_ref()?.paint_info;
+        let mut union = None;
+        for (rect, spatial_id) in &info.native_text_rects {
+            let transform = info.scroll_tree.cumulative_node_to_root_transform(*spatial_id);
+            let rect = crate::query::transform_au_rectangle(
+                servo_geometry::f32_rect_to_au_rect(rect.to_rect()).cast_unit(), transform)?;
+            union = Some(union.map_or(rect, |previous: Rect<Au, CSSPixel>| previous.union(&rect)));
+        }
+        union
+    }
+
     #[servo_tracing::instrument(skip_all)]
     fn query_elements_from_point(
         &self,
@@ -1913,7 +1926,7 @@ impl ReflowPhases {
                     Self::StackingContextTreeConstruction
                 },
                 QueryMsg::ResolvedStyleQuery(_) => Self::empty(),
-                QueryMsg::NodesFromPointQuery => {
+                QueryMsg::NodesFromPointQuery | QueryMsg::NativeTextGeometry => {
                     Self::StackingContextTreeConstruction | Self::DisplayListConstruction
                 },
                 QueryMsg::BoxArea |

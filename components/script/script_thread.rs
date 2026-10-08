@@ -1964,8 +1964,56 @@ impl ScriptThread {
                 pipeline_id,
                 evaluation_id,
                 script,
+                expected,
             ) => {
-                self.handle_evaluate_javascript(webview_id, pipeline_id, evaluation_id, script, cx);
+                self.handle_evaluate_javascript(
+                    webview_id,
+                    pipeline_id,
+                    evaluation_id,
+                    script,
+                    expected,
+                    cx,
+                );
+            },
+            ScriptThreadMessage::NativeAccessibility(pipeline_id, request, callback) => {
+                let Some(window) = self.documents.borrow().find_window(pipeline_id) else {
+                    let _ = callback.send(Err(
+                        servo_base::native_text::NativeTextError::DocumentUnavailable,
+                    ));
+                    return;
+                };
+                let mut realm = enter_auto_realm(cx, window.as_global_scope());
+                let result = crate::native_accessibility::dispatch(
+                    &window,
+                    request,
+                    &mut realm.current_realm(),
+                );
+                let _ = callback.send(result);
+            },
+            ScriptThreadMessage::NativeText(pipeline_id, request, callback) => {
+                let Some(window) = self.documents.borrow().find_window(pipeline_id) else {
+                    let _ = callback.send(Err(
+                        servo_base::native_text::NativeTextError::DocumentUnavailable,
+                    ));
+                    return;
+                };
+                let mut realm = enter_auto_realm(cx, window.as_global_scope());
+                let result =
+                    crate::native_text::dispatch(&window, request, &mut realm.current_realm());
+                let _ = callback.send(result);
+            },
+            ScriptThreadMessage::TheoremWorldTexture(pipeline_id, request, callback) => {
+                let Some(window) = self.documents.borrow().find_window(pipeline_id) else {
+                    let _ = callback.send(Err(servo_base::theorem_world_gpu::TheoremWorldTextureError::DocumentUnavailable));
+                    return;
+                };
+                let mut realm = enter_auto_realm(cx, window.as_global_scope());
+                crate::theorem_world_gpu::dispatch(
+                    &window,
+                    request,
+                    callback,
+                    &mut realm.current_realm(),
+                );
             },
             ScriptThreadMessage::DocumentLayoutSnapshot(pipeline_id, callback) => {
                 self.handle_document_layout_snapshot(pipeline_id, callback, cx);
@@ -4377,6 +4425,7 @@ impl ScriptThread {
         pipeline_id: PipelineId,
         evaluation_id: JavaScriptEvaluationId,
         script: String,
+        expected: Option<servo_base::native_accessibility::NativeDocumentIdentity>,
         cx: &mut js::context::JSContext,
     ) {
         let Some(window) = self.documents.borrow().find_window(pipeline_id) else {
@@ -4391,6 +4440,22 @@ impl ScriptThread {
             return;
         };
 
+        // This check and evaluation execute in one script task. A queued
+        // navigation/document.open cannot retarget an admitted fixed operation.
+        if expected.as_ref().is_some_and(|expected| {
+            !window.Document().is_fully_active()
+                || crate::native_accessibility::document_identity(&window) != *expected
+        }) {
+            let _ = self.senders.pipeline_to_constellation_sender.send((
+                webview_id,
+                pipeline_id,
+                ScriptToConstellationMessage::FinishJavaScriptEvaluation(
+                    evaluation_id,
+                    Err(JavaScriptEvaluationError::WebViewNotReady),
+                ),
+            ));
+            return;
+        }
         let global_scope = window.as_global_scope();
         let mut realm = enter_auto_realm(cx, global_scope);
         let cx = &mut realm.current_realm();

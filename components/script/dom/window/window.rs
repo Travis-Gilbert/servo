@@ -375,6 +375,9 @@ pub(crate) struct Window {
     /// A handle for communicating messages to the WebGL thread, if available.
     #[no_trace]
     webgl_chan: Option<WebGLChan>,
+    /// Strong, traced native texture grants scoped to this document.
+    theorem_world_gpu: crate::theorem_world_gpu::State,
+    native_text: crate::native_text::State,
 
     #[ignore_malloc_size_of = "defined in webxr"]
     #[no_trace]
@@ -483,6 +486,13 @@ pub(crate) struct Window {
 }
 
 impl Window {
+    pub(crate) fn native_text(&self) -> &crate::native_text::State {
+        &self.native_text
+    }
+    pub(crate) fn theorem_world_gpu(&self) -> &crate::theorem_world_gpu::State {
+        &self.theorem_world_gpu
+    }
+
     pub(crate) fn script_thread(&self) -> Rc<ScriptThread> {
         Weak::upgrade(&self.weak_script_thread)
             .expect("Weak reference should always be upgradable when a ScriptThread is running")
@@ -3080,6 +3090,11 @@ impl Window {
             .query_text_index(node.to_trusted_node_address(), point_in_viewport)
     }
 
+    pub(crate) fn native_text_rect_query(&self) -> Option<Rect<Au, CSSPixel>> {
+        self.layout_reflow(QueryMsg::NativeTextGeometry);
+        self.layout().query_native_text_rect()
+    }
+
     pub(crate) fn elements_from_point_query(
         &self,
         point: LayoutPoint,
@@ -3752,6 +3767,8 @@ impl Window {
             #[cfg(feature = "bluetooth")]
             test_runner: Default::default(),
             webgl_chan,
+            theorem_world_gpu: Default::default(),
+            native_text: Default::default(),
             #[cfg(feature = "webxr")]
             webxr_registry,
             pending_image_callbacks: Default::default(),

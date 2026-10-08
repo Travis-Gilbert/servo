@@ -11,6 +11,9 @@
 mod from_script_message;
 mod structured_data;
 
+use servo_base::theorem_world_gpu::{
+    TheoremWorldTextureError, TheoremWorldTextureReceipt, TheoremWorldTextureRequest,
+};
 use std::collections::VecDeque;
 use std::fmt;
 use std::time::Duration;
@@ -50,6 +53,8 @@ pub enum EmbedderToConstellationMessage {
     AllowNavigationResponse(PipelineId, bool),
     /// Request to load a page, with optionally additional data in [`URLRequest`].
     LoadUrl(WebViewId, UrlRequest),
+    /// Retire a pending top-level navigation without discarding the active document.
+    StopLoading(WebViewId),
     /// Request to traverse the joint session history of the provided browsing context.
     TraverseHistory(WebViewId, TraversalDirection, TraversalId),
     /// Inform the Constellation that a `WebView`'s [`ViewportDetails`] have changed.
@@ -99,7 +104,30 @@ pub enum EmbedderToConstellationMessage {
     PaintMetric(PipelineId, PaintMetricEvent),
     /// Evaluate a JavaScript string in the context of a `WebView`. When execution is complete or an
     /// error is encountered, a correpsonding message will be sent to the embedding layer.
-    EvaluateJavaScript(WebViewId, JavaScriptEvaluationId, String),
+    EvaluateJavaScript(
+        WebViewId,
+        JavaScriptEvaluationId,
+        String,
+        Option<servo_base::native_accessibility::NativeDocumentIdentity>,
+    ),
+    /// Observe or act on actual current-document native semantics.
+    NativeAccessibility(
+        WebViewId,
+        servo_base::native_accessibility::NativeAccessibilityRequest,
+        GenericCallback<servo_base::native_accessibility::NativeAccessibilityResult>,
+    ),
+    /// Query or edit the actual focused current-document text buffer.
+    NativeText(
+        WebViewId,
+        servo_base::native_text::NativeTextRequest,
+        GenericCallback<servo_base::native_text::NativeTextResult>,
+    ),
+    /// Resolve or import a native World texture in the active document.
+    TheoremWorldTexture(
+        WebViewId,
+        TheoremWorldTextureRequest,
+        GenericCallback<Result<TheoremWorldTextureReceipt, TheoremWorldTextureError>>,
+    ),
     /// Capture an owned document layout snapshot and invoke the callback asynchronously.
     DocumentLayoutSnapshot(
         WebViewId,

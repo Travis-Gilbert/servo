@@ -213,6 +213,7 @@ impl DisplayListBuilder<'_> {
 
         // Clear any caret color from previous display list constructions.
         builder.paint_info.caret_property_binding = None;
+        builder.paint_info.native_text_rects.clear();
 
         builder.add_all_spatial_nodes();
 
@@ -1311,6 +1312,8 @@ impl Fragment {
             )
             .to_webrender();
 
+            builder.paint_info.native_text_rects.push((selection_rect, state.spatial_id));
+
             if let Some(selection_color) = fragment
                 .selected_style
                 .borrow()
@@ -1334,6 +1337,8 @@ impl Fragment {
             ),
         )
         .to_webrender();
+
+        builder.paint_info.native_text_rects.push((insertion_point_rect, state.spatial_id));
 
         let color = parent_style.clone_color();
         let caret_color = match parent_style.clone_caret_color().0 {

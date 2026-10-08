@@ -9,6 +9,9 @@
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
 
+use servo_base::theorem_world_gpu::{
+    TheoremWorldTextureError, TheoremWorldTextureReceipt, TheoremWorldTextureRequest,
+};
 use std::fmt;
 
 use crossbeam_channel::RecvTimeoutError;
@@ -291,7 +294,31 @@ pub enum ScriptThreadMessage {
     SetScrollStates(PipelineId, ScrollStateUpdate),
     /// Evaluate the given JavaScript and return a result via a corresponding message
     /// to the Constellation.
-    EvaluateJavaScript(WebViewId, PipelineId, JavaScriptEvaluationId, String),
+    EvaluateJavaScript(
+        WebViewId,
+        PipelineId,
+        JavaScriptEvaluationId,
+        String,
+        Option<servo_base::native_accessibility::NativeDocumentIdentity>,
+    ),
+    /// Observe or act on actual current-document native semantics.
+    NativeAccessibility(
+        PipelineId,
+        servo_base::native_accessibility::NativeAccessibilityRequest,
+        GenericCallback<servo_base::native_accessibility::NativeAccessibilityResult>,
+    ),
+    /// Query or edit the actual focused current-document text buffer.
+    NativeText(
+        PipelineId,
+        servo_base::native_text::NativeTextRequest,
+        GenericCallback<servo_base::native_text::NativeTextResult>,
+    ),
+    /// Resolve or import a native World texture in the active document.
+    TheoremWorldTexture(
+        PipelineId,
+        TheoremWorldTextureRequest,
+        GenericCallback<Result<TheoremWorldTextureReceipt, TheoremWorldTextureError>>,
+    ),
     /// Capture the active pipeline document through its live layout state.
     DocumentLayoutSnapshot(
         PipelineId,

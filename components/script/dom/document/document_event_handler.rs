@@ -865,6 +865,70 @@ impl DocumentEventHandler {
             return;
         };
 
+        self.handle_mouse_button_at_hit(cx, event, input_event, &hit_test_result);
+    }
+
+    /// Native accessibility activation uses the same trusted pointer/default-
+    /// action implementation as compositor-routed mouse input. The caller has
+    /// already validated a current-document exact node/state observation.
+    pub(crate) fn handle_native_accessibility_click(
+        &self,
+        cx: &mut JSContext,
+        point: Point2D<f32, CSSPixel>,
+        expected: &Node,
+    ) -> Result<(), servo_base::native_text::NativeTextError> {
+        use servo_base::native_text::NativeTextError;
+        if self.mouse_buttons_down.get() != 0 {
+            return Err(NativeTextError::EditRefused);
+        }
+        let hit = self
+            .window
+            .hit_test_from_point_in_viewport(point)
+            .ok_or(NativeTextError::EditRefused)?;
+        if !expected.is_shadow_including_inclusive_ancestor_of(&hit.node)
+            || !self.window.Document().is_fully_active()
+        {
+            return Err(NativeTextError::StaleContext);
+        }
+        let native_event = |event, pressed_mouse_buttons| ConstellationInputEvent {
+            hit_test_result: None,
+            pressed_mouse_buttons,
+            active_keyboard_modifiers: Modifiers::empty(),
+            event: InputEvent::MouseButton(event).into(),
+        };
+        let down = MouseButtonEvent::new(
+            MouseButtonAction::Down,
+            MouseButton::Left,
+            point.into(),
+        );
+        self.handle_mouse_button_at_hit(cx, down, &native_event(down, 1), &hit);
+        // Down can replace/remove/cover the target. Do not deliver Up or
+        // activation to a replacement. Cancel only this synchronous native
+        // gesture through the same existing pointer/focus/default-action owner.
+        let current_hit = self.window.hit_test_from_point_in_viewport(point);
+        if !self.window.Document().is_fully_active()
+            || current_hit
+                .as_ref()
+                .is_none_or(|hit| !expected.is_shadow_including_inclusive_ancestor_of(&hit.node))
+        {
+            self.last_mouse_button_down_point.take();
+            self.mouse_buttons_down.set(0);
+            self.unset_active_element();
+            self.implicit_release_pointer_capture(cx, PointerId::Mouse as i32, "mouse", true);
+            return Err(NativeTextError::StaleContext);
+        }
+        let up = MouseButtonEvent::new(MouseButtonAction::Up, MouseButton::Left, point.into());
+        self.handle_mouse_button_at_hit(cx, up, &native_event(up, 0), &current_hit.unwrap());
+        Ok(())
+    }
+
+    fn handle_mouse_button_at_hit(
+        &self,
+        cx: &mut JSContext,
+        event: MouseButtonEvent,
+        input_event: &ConstellationInputEvent,
+        hit_test_result: &HitTestResult,
+    ) {
         debug!(
             "{:?}: at {:?}",
             event.action, hit_test_result.point_in_frame
@@ -1566,7 +1630,7 @@ impl DocumentEventHandler {
         flags.into()
     }
 
-    fn handle_ime_event(&self, cx: &mut JSContext, event: ImeEvent) -> InputEventResult {
+    pub(crate) fn handle_ime_event(&self, cx: &mut JSContext, event: ImeEvent) -> InputEventResult {
         let document = self.window.Document();
         let composition_event = match event {
             ImeEvent::Dismissed => {

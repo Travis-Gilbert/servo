@@ -542,6 +542,16 @@ impl WebView {
             ))
     }
 
+    /// Stop this view's pending top-level navigation, preserving its active
+    /// document and session history. Initial construction is not interrupted.
+    /// Requests are ordered with subsequent [`Self::load`] calls on this view.
+    pub fn stop_loading(&self) {
+        self.inner()
+            .servo
+            .constellation_proxy()
+            .send(EmbedderToConstellationMessage::StopLoading(self.id()));
+    }
+
     /// Reload the currently loaded page in this [`WebView`].
     pub fn reload(&self) {
         self.inner_mut().load_status = LoadStatus::Started;
@@ -773,6 +783,131 @@ impl WebView {
             self.id(),
             script.to_string(),
             Box::new(callback),
+        );
+    }
+
+    /// Invoke only the immutable World surface controller in an exact native
+    /// document. The script owner revalidates the identity immediately before
+    /// evaluation; callers cannot provide script or a function selector.
+    pub fn evaluate_world_surface(
+        &self,
+        expected: servo_base::native_accessibility::NativeDocumentIdentity,
+        command: Option<(String, String)>,
+        callback: impl FnOnce(Result<JSValue, JavaScriptEvaluationError>) + 'static,
+    ) {
+        let script = if let Some((op, body)) = command {
+            if !matches!(
+                op.as_str(),
+                "bind"
+                    | "activate"
+                    | "blur"
+                    | "retire"
+                    | "caret"
+                    | "accessibility"
+                    | "attention"
+                    | "participant"
+                    | "participant_frame"
+                    | "clipboard_context"
+                    | "clipboard_refresh"
+            ) || body.len() > 16384
+                || serde_json::from_str::<serde_json::Value>(&body).is_err()
+            {
+                callback(Err(JavaScriptEvaluationError::InternalError));
+                return;
+            }
+            format!(
+                "(() => {{ const d=Object.getOwnPropertyDescriptor(globalThis,'__theoremWorldSurfaceControlV1'); if(!d || d.writable!==false || d.configurable!==false || typeof d.value!=='function')throw new Error('World controller unavailable'); return JSON.stringify(d.value({},{})); }})()",
+                serde_json::to_string(&op).expect("operation serializes"),
+                body
+            )
+        } else {
+            "(() => { const d=Object.getOwnPropertyDescriptor(globalThis,'__theoremWorldSurfacePollV1'); if(!d || d.writable!==false || d.configurable!==false || typeof d.value!=='function')throw new Error('World controller unavailable'); return JSON.stringify(d.value()); })()".into()
+        };
+        self.inner()
+            .servo
+            .javascript_evaluator_mut()
+            .evaluate_in_document(self.id(), script, Some(expected), Box::new(callback));
+    }
+
+    /// Observe and act on current-document native semantics; no script selectors.
+    pub fn native_accessibility(
+        &self,
+        request: embedder_traits::NativeAccessibilityRequest,
+        callback: impl FnOnce(embedder_traits::NativeAccessibilityResult) + Send + 'static,
+    ) {
+        let mut callback = Some(callback);
+        let callback = GenericCallback::new(move |result| {
+            if let Some(callback) = callback.take() {
+                callback(
+                    result.unwrap_or(Err(embedder_traits::NativeTextError::DocumentUnavailable)),
+                );
+            }
+        })
+        .expect("native accessibility callback");
+        self.inner().servo.constellation_proxy().send(
+            EmbedderToConstellationMessage::NativeAccessibility(self.id(), request, callback),
+        );
+    }
+
+    /// Query or edit the actual focused input/textarea in the current document.
+    /// Edits bind to exact document, focus sequence, element, text and selection.
+    pub fn native_text(
+        &self,
+        request: embedder_traits::NativeTextRequest,
+        callback: impl FnOnce(embedder_traits::NativeTextResult) + Send + 'static,
+    ) {
+        let mut callback = Some(callback);
+        let callback = GenericCallback::new(move |result| {
+            if let Some(callback) = callback.take() {
+                callback(
+                    result.unwrap_or(Err(embedder_traits::NativeTextError::DocumentUnavailable)),
+                );
+            }
+        })
+        .expect("native text callback");
+        self.inner()
+            .servo
+            .constellation_proxy()
+            .send(EmbedderToConstellationMessage::NativeText(
+                self.id(),
+                request,
+                callback,
+            ));
+    }
+
+    /// Register, validate, import, or revoke a native World texture in this view's current document.
+    ///
+    /// # Safety
+    /// Import accepts an IOSurface address borrowed from an admitted native producer lease.
+    /// The caller must retain that lease without modifying or reusing its allocation until
+    /// the callback completes, including error completion. Never accept addresses from JS,
+    /// network requests, or a different process. This API refuses multiprocess mode.
+    pub unsafe fn theorem_world_texture(
+        &self,
+        request: embedder_traits::TheoremWorldTextureRequest,
+        callback: impl FnOnce(
+            Result<
+                embedder_traits::TheoremWorldTextureReceipt,
+                embedder_traits::TheoremWorldTextureError,
+            >,
+        ) + Send
+        + 'static,
+    ) {
+        if servo_config::opts::get().multiprocess || !cfg!(target_os = "macos") {
+            callback(Err(embedder_traits::TheoremWorldTextureError::Unsupported));
+            return;
+        }
+        let mut callback = Some(callback);
+        let callback = GenericCallback::new(move |result| {
+            if let Some(callback) = callback.take() {
+                callback(result.unwrap_or(Err(
+                    embedder_traits::TheoremWorldTextureError::DocumentUnavailable,
+                )));
+            }
+        })
+        .expect("Failed to create native World texture callback");
+        self.inner().servo.constellation_proxy().send(
+            EmbedderToConstellationMessage::TheoremWorldTexture(self.id(), request, callback),
         );
     }
 

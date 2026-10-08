@@ -1466,6 +1466,26 @@ where
             EmbedderToConstellationMessage::WebDriverCommand(command) => {
                 self.handle_webdriver_msg(command);
             },
+            EmbedderToConstellationMessage::StopLoading(webview_id) => {
+                let context = BrowsingContextId::from(webview_id);
+                // An initial view has no committed active context to preserve.
+                // Do not strand that construction by aborting its only pipeline.
+                if self.browsing_contexts.contains_key(&context) {
+                    let pending: Vec<_> = self
+                        .pending_changes
+                        .iter()
+                        .filter(|change| {
+                            change.webview_id == webview_id
+                                && change.browsing_context_id == context
+                                && change.new_browsing_context_info.is_none()
+                        })
+                        .map(|change| change.new_pipeline_id)
+                        .collect();
+                    for pipeline in pending {
+                        self.handle_abort_load_url_msg(pipeline);
+                    }
+                }
+            },
             EmbedderToConstellationMessage::Reload(webview_id) => {
                 self.handle_reload_msg(webview_id);
             },
@@ -1502,8 +1522,69 @@ where
                 webview_id,
                 evaluation_id,
                 script,
+                expected,
             ) => {
-                self.handle_evaluate_javascript(webview_id, evaluation_id, script);
+                self.handle_evaluate_javascript(webview_id, evaluation_id, script, expected);
+            },
+            EmbedderToConstellationMessage::NativeAccessibility(webview, request, callback) => {
+                use servo_base::native_accessibility::NativeAccessibilityRequest;
+                use servo_base::native_text::NativeTextError;
+                let pipeline = self
+                    .browsing_contexts
+                    .get(&BrowsingContextId::from(webview))
+                    .and_then(|context| self.pipelines.get(&context.pipeline_id));
+                if let Some(pipeline) = pipeline {
+                    if matches!(&request,NativeAccessibilityRequest::Action{webview: expected_webview, document: expected_document,..} if *expected_webview!=webview || *expected_document!=pipeline.id)
+                    {
+                        let _ = callback.send(Err(NativeTextError::StaleContext));
+                    } else {
+                        let failure = callback.clone();
+                        if pipeline
+                            .event_loop
+                            .send(ScriptThreadMessage::NativeAccessibility(
+                                pipeline.id,
+                                request,
+                                callback,
+                            ))
+                            .is_err()
+                        {
+                            let _ = failure.send(Err(NativeTextError::DocumentUnavailable));
+                        }
+                    }
+                } else {
+                    let _ = callback.send(Err(NativeTextError::DocumentUnavailable));
+                }
+            },
+            EmbedderToConstellationMessage::NativeText(webview, request, callback) => {
+                use servo_base::native_text::{NativeTextError, NativeTextRequest};
+                let pipeline = self
+                    .browsing_contexts
+                    .get(&BrowsingContextId::from(webview))
+                    .and_then(|context| self.pipelines.get(&context.pipeline_id));
+                if let Some(pipeline) = pipeline {
+                    if matches!(&request,NativeTextRequest::Edit{expected,..} if expected.webview!=webview || expected.document!=pipeline.id)
+                    {
+                        let _ = callback.send(Err(NativeTextError::StaleContext));
+                    } else {
+                        let failure = callback.clone();
+                        if pipeline
+                            .event_loop
+                            .send(ScriptThreadMessage::NativeText(
+                                pipeline.id,
+                                request,
+                                callback,
+                            ))
+                            .is_err()
+                        {
+                            let _ = failure.send(Err(NativeTextError::DocumentUnavailable));
+                        }
+                    }
+                } else {
+                    let _ = callback.send(Err(NativeTextError::DocumentUnavailable));
+                }
+            },
+            EmbedderToConstellationMessage::TheoremWorldTexture(webview_id, request, callback) => {
+                self.handle_theorem_world_texture(webview_id, request, callback);
             },
             EmbedderToConstellationMessage::DocumentLayoutSnapshot(webview_id, callback) => {
                 self.handle_document_layout_snapshot(webview_id, callback);
@@ -1646,6 +1727,55 @@ where
     }
 
     #[servo_tracing::instrument(skip_all)]
+    fn handle_theorem_world_texture(
+        &mut self,
+        webview: WebViewId,
+        request: servo_base::theorem_world_gpu::TheoremWorldTextureRequest,
+        callback: GenericCallback<
+            Result<
+                servo_base::theorem_world_gpu::TheoremWorldTextureReceipt,
+                servo_base::theorem_world_gpu::TheoremWorldTextureError,
+            >,
+        >,
+    ) {
+        use servo_base::theorem_world_gpu::{
+            TheoremWorldTextureError as Error, TheoremWorldTextureRequest as Request,
+        };
+        // Cleanup may target an inactive document still retained in session history.
+        // Registration, validation and imports target the current top-level pipeline.
+        let pipeline = if let Request::Revoke { binding } = &request {
+            self.pipelines.get(&binding.document).filter(|pipeline| {
+                binding.webview == webview && pipeline.webview_id == webview
+            })
+        } else {
+            self.browsing_contexts
+                .get(&BrowsingContextId::from(webview))
+                .and_then(|context| self.pipelines.get(&context.pipeline_id))
+        };
+        let Some(pipeline) = pipeline else {
+            let _ = callback.send(Err(Error::DocumentUnavailable));
+            return;
+        };
+        if let Request::Import { binding, .. } | Request::Validate { binding } = &request {
+            if binding.webview != webview || binding.document != pipeline.id {
+                let _ = callback.send(Err(Error::StaleBinding));
+                return;
+            }
+        }
+        let failure = callback.clone();
+        if pipeline
+            .event_loop
+            .send(ScriptThreadMessage::TheoremWorldTexture(
+                pipeline.id,
+                request,
+                callback,
+            ))
+            .is_err()
+        {
+            let _ = failure.send(Err(Error::DocumentUnavailable));
+        }
+    }
+
     fn handle_document_layout_snapshot(
         &mut self,
         webview_id: WebViewId,
@@ -1721,6 +1851,7 @@ where
         webview_id: WebViewId,
         evaluation_id: JavaScriptEvaluationId,
         script: String,
+        expected: Option<servo_base::native_accessibility::NativeDocumentIdentity>,
     ) {
         let browsing_context_id = BrowsingContextId::from(webview_id);
         let Some(pipeline) = self
@@ -1735,6 +1866,15 @@ where
             return;
         };
 
+        if expected.as_ref().is_some_and(|expected| {
+            expected.webview != webview_id || expected.pipeline != pipeline.id
+        }) {
+            self.handle_finish_javascript_evaluation(
+                evaluation_id,
+                Err(JavaScriptEvaluationError::WebViewNotReady),
+            );
+            return;
+        }
         if pipeline
             .event_loop
             .send(ScriptThreadMessage::EvaluateJavaScript(
@@ -1742,6 +1882,7 @@ where
                 pipeline.id,
                 evaluation_id,
                 script,
+                expected,
             ))
             .is_err()
         {
@@ -6022,6 +6163,15 @@ where
             warn!("Not sending embedder control response for unknown pipeline {pipeline_id:?}");
             return;
         };
+
+        // A control receipt belongs to its actual current document, including iframe
+        // browsing contexts. A retained/BFCache pipeline must not consume it.
+        if pipeline.webview_id != id.webview_id
+            || !self.browsing_contexts.get(&pipeline.browsing_context_id)
+                .is_some_and(|context| context.pipeline_id == pipeline_id)
+        {
+            return;
+        }
 
         if let Err(error) = pipeline
             .event_loop

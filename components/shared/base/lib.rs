@@ -15,6 +15,9 @@ pub mod id;
 pub mod print_tree;
 mod rope;
 pub mod text;
+pub mod theorem_world_gpu;
+pub mod native_accessibility;
+pub mod native_text;
 pub mod threadpool;
 mod unicode_block;
 

@@ -98,7 +98,10 @@ impl MixedMessage {
                 #[cfg(feature = "webgpu")]
                 ScriptThreadMessage::SetWebGPUPort(..) => None,
                 ScriptThreadMessage::SetScrollStates(id, ..) => Some(*id),
-                ScriptThreadMessage::EvaluateJavaScript(_, id, _, _) => Some(*id),
+                ScriptThreadMessage::EvaluateJavaScript(_, id, _, _, _) => Some(*id),
+                ScriptThreadMessage::TheoremWorldTexture(id, ..) => Some(*id),
+                ScriptThreadMessage::NativeAccessibility(id, ..) => Some(*id),
+                ScriptThreadMessage::NativeText(id, ..) => Some(*id),
                 ScriptThreadMessage::DocumentLayoutSnapshot(id, _) => Some(*id),
                 ScriptThreadMessage::HitTest(id, ..) => Some(*id),
                 ScriptThreadMessage::SendImageKeysBatch(..) => None,

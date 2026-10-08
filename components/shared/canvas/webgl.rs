@@ -118,6 +118,17 @@ pub enum WebGLMsg {
         GLContextAttributes,
         GenericSender<Result<WebGLCreateContextResult, String>>,
     ),
+    /// Import a retained native frame after script authenticated its actual DOM destination.
+    TheoremWorldImport(
+        servo_base::theorem_world_gpu::TheoremWorldTextureBinding,
+        servo_base::theorem_world_gpu::TheoremWorldFrame,
+        GenericSender<Result<(), servo_base::theorem_world_gpu::TheoremWorldTextureError>>,
+        // Keep the native producer lease alive even if script dispatch unwinds.
+        servo_base::generic_channel::GenericCallback<Result<
+            servo_base::theorem_world_gpu::TheoremWorldTextureReceipt,
+            servo_base::theorem_world_gpu::TheoremWorldTextureError,
+        >>,
+    ),
     /// Set an [`ImageKey`] on a `WebGLContext`.
     SetImageKey(WebGLContextId, ImageKey),
     /// Resizes a WebGLContext.
