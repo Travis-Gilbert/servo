@@ -99,7 +99,10 @@ impl IDBCursor {
         // If this's transaction's state is not active, throw a "TransactionInactiveError"
         // DOMException.
         if !self.transaction.is_active() || !self.transaction.is_usable() {
-            return Err(Error::TransactionInactive(None));
+            return Err(Error::TransactionInactive(Some(
+                "The cursor cannot iterate because its transaction is not active or usable"
+                    .to_owned(),
+            )));
         }
 
         // If this's source or effective object store has been deleted, throw an
@@ -126,6 +129,58 @@ impl IDBCursor {
     /// Kept separate from `check_transaction_and_source` because the read-only check falls
     /// between the inactive check and the deleted check, and the three iteration methods have
     /// no read-only check at all.
+
+    fn check_writable(&self) -> Fallible<()> {
+        // Step 2. If transaction's state is not active, throw a "TransactionInactiveError"
+        // DOMException.
+        if !self.transaction.is_active() || !self.transaction.is_usable() {
+            return Err(Error::TransactionInactive(Some(
+                "The cursor cannot modify records because its transaction is not active or usable"
+                    .to_owned(),
+            )));
+        }
+
+        // Step 3. If transaction is a read-only transaction, throw a "ReadOnlyError"
+        // DOMException.
+        if let IDBTransactionMode::Readonly = self.transaction.get_mode() {
+            return Err(Error::ReadOnly(Some(
+                "The cursor cannot modify records in a read-only transaction".to_owned(),
+            )));
+        }
+
+        // Step 4. If this's source or effective object store has been deleted, throw an
+        // "InvalidStateError" DOMException.
+        let store = self.effective_object_store();
+        if !self.transaction.Db().object_store_exists(&store.get_name()) {
+            return Err(Error::InvalidState(Some(
+                "The cursor's effective object store has been deleted".to_owned(),
+            )));
+        }
+        if let ObjectStoreOrIndex::Index(index) = &self.source &&
+            !store.has_index(&index.Name())
+        {
+            return Err(Error::InvalidState(Some(
+                "The cursor's source index has been deleted".to_owned(),
+            )));
+        }
+
+        // Step 5. If this's got value flag is false, throw an "InvalidStateError" DOMException.
+        self.check_got_value()?;
+
+        // Step 6. If this's key only flag is true, throw an "InvalidStateError" DOMException.
+        if self.key_only {
+            return Err(Error::InvalidState(Some(
+                "A key-only cursor has no value to write".to_owned(),
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// If this's got value flag is false, throw an "InvalidStateError" DOMException.
+    ///
+    /// The flag is unset while a previous iteration is outstanding, so this is what refuses a
+    /// second `continue` before the first one's success event has fired.
         };
         let key_range = self.range.clone();
 
@@ -759,7 +814,10 @@ pub(crate) fn iterate_cursor(
                     "iterate_cursor was given a primary key for a cursor that is not an index \
                      cursor in direction next or prev."
                 );
-                return Err(Error::InvalidAccess(None));
+                return Err(Error::InvalidAccess(Some(
+                    "Cursor iteration with a primary key requires an index cursor in direction next or prev"
+                        .to_owned(),
+                )));
             },
         }
     }
@@ -1000,7 +1058,9 @@ pub(crate) fn iterate_cursor(
     // record. A cursor that somehow did not is a request that failed, not a crash.
     let Some(found_record) = found_record else {
         warn!("iterate_cursor reached step 10 without a found record.");
-        return Err(Error::Operation(None));
+        return Err(Error::Operation(Some(
+            "Cursor iteration completed without a selected record".to_owned(),
+        )));
     };
 
     // Step 10. Set cursor’s position to position.

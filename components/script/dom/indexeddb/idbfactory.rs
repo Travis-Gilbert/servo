@@ -572,10 +572,14 @@ impl IDBFactory {
             )
             .recv();
         let Ok(response) = message else {
-            return Err(Error::Operation(None));
+            return Err(Error::Operation(Some(
+                "The IndexedDB storage bottle map response could not be received".to_owned(),
+            )));
         };
         let Ok(proxy_map) = response else {
-            return Err(Error::Operation(None));
+            return Err(Error::Operation(Some(
+                "The IndexedDB storage bottle map could not be obtained".to_owned(),
+            )));
         };
         Ok(proxy_map)
     }

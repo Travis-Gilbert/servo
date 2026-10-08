@@ -1979,6 +1979,7 @@ impl Drop for WindowProxyHandler {
     }
 }
 
+
 // How WindowProxy objects are garbage collected.
 
 #[expect(unsafe_code)]

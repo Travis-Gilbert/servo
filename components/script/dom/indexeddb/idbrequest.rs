@@ -505,7 +505,12 @@ impl RequestListener {
                         .as_ref()
                         .map(|source| source.object_store());
                     let result = postcard::from_bytes(&record.value)
-                        .map_err(|_| Error::Data(None))
+                        .map_err(|_| {
+                            Error::Data(Some(
+                                "The requested IndexedDB record value could not be decoded"
+                                    .to_owned(),
+                            ))
+                        })
                         .and_then(|data| {
                             structuredclone::read(cx, &global, data, answer.handle_mut())
                         })
@@ -592,7 +597,9 @@ impl RequestListener {
                             let element = match kind {
                                 GetAllKind::Values => (|| {
                                     let data = postcard::from_bytes(&record.value)
-                                        .map_err(|_| Error::Data(None))?;
+                                        .map_err(|_| {
+                                            Error::Data(Some("An IndexedDB getAll record value could not be decoded".to_owned()))
+                                        })?;
                                     structuredclone::read(
                                         cx,
                                         &global,
@@ -627,7 +634,10 @@ impl RequestListener {
                                             ));
                                         },
                                     ),
-                                    None => Err(Error::InvalidState(None)),
+                                    None => Err(Error::InvalidState(Some(
+                                        "The getAllRecords request has no source object store"
+                                            .to_owned(),
+                                    ))),
                                 },
                             };
                             if let Err(e) = element {
@@ -665,7 +675,10 @@ impl RequestListener {
                                 &global,
                                 cx,
                                 request,
-                                Error::InvalidState(None),
+                                Error::InvalidState(Some(
+                                    "The index backfill response has no source object store"
+                                        .to_owned(),
+                                )),
                             );
                             return;
                         };
@@ -691,7 +704,9 @@ impl RequestListener {
                             &global,
                             cx,
                             request,
-                            Error::InvalidState(None),
+                            Error::InvalidState(Some(
+                                "IndexedDB returned records for a request that does not read records".to_owned(),
+                            )),
                         );
                         return;
                     },
@@ -1249,7 +1264,9 @@ impl IDBRequest {
                 unstarted_task_source.queue(task!(idb_request_unstarted: move |cx| {
                     unstarted_listener.handle_async_request_finished(
                         cx,
-                        Ok(IdbResult::Error(Error::Operation(None))),
+                        Ok(IdbResult::Error(Error::Operation(Some(
+                            "The IndexedDB request could not create its response callback".to_owned(),
+                        )))),
                     );
                 }));
                 return Ok(request);

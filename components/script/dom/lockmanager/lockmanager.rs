@@ -194,7 +194,13 @@ impl LockManager {
         // If this's relevant global object's associated Document is not fully
         // active, return a promise rejected with an "InvalidStateError" DOMException.
         if !self.is_fully_active() {
-            promise.reject_error(realm, Error::InvalidState(None));
+            promise.reject_error(
+                realm,
+                Error::InvalidState(Some(
+                    "A lock cannot be requested from a document that is not fully active"
+                        .to_owned(),
+                )),
+            );
             return promise;
         }
 
@@ -205,7 +211,12 @@ impl LockManager {
         // Step 3. If origin is an opaque origin, then return a promise rejected
         // with a "SecurityError" DOMException.
         if !origin.is_tuple() {
-            promise.reject_error(realm, Error::Security(None));
+            promise.reject_error(
+                realm,
+                Error::Security(Some(
+                    "A lock cannot be requested from an opaque origin".to_owned(),
+                )),
+            );
             return promise;
         }
 
@@ -541,7 +552,12 @@ impl LockManagerMethods<crate::DomTypeHolder> for LockManager {
         // If this's relevant global object's associated Document is not fully
         // active, return a promise rejected with an "InvalidStateError" DOMException.
         if !self.is_fully_active() {
-            promise.reject_error(realm, Error::InvalidState(None));
+            promise.reject_error(
+                realm,
+                Error::InvalidState(Some(
+                    "Locks cannot be queried from a document that is not fully active".to_owned(),
+                )),
+            );
             return promise;
         }
 
@@ -550,7 +566,12 @@ impl LockManagerMethods<crate::DomTypeHolder> for LockManager {
         // with a "SecurityError" DOMException.
         let origin = global.origin().immutable().clone();
         if !origin.is_tuple() {
-            promise.reject_error(realm, Error::Security(None));
+            promise.reject_error(
+                realm,
+                Error::Security(Some(
+                    "Locks cannot be queried from an opaque origin".to_owned(),
+                )),
+            );
             return promise;
         }
 
