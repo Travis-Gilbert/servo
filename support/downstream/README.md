@@ -5,8 +5,8 @@ pins; this document does not promote a consumer pin or establish engine acceptan
 
 `queue.json` covers every public downstream commit after upstream Servo v0.5.0
 `1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019` through
-`6dd8897f0379218f3dcb0181dd84e30117a9917e`, in application order. Its 69 entries
-include the 56-commit frozen baseline and 13 forward cleanup/maintenance commits.
+`86e6da7e5db02b7bcce2e4e61e53a099bafcdeaf`, in application order. Its 71 entries
+include the 56-commit frozen baseline and 15 forward cleanup/maintenance commits.
 Each entry names its purpose, exact upstream base, retention rationale, regression
 mapping, and pending evidence/equivalence status. The conservative dependency chain
 records cumulative replay order; it does not claim every predecessor is a semantic
