@@ -91,20 +91,41 @@ pub(crate) struct IDBCursor {
 }
 
 impl IDBCursor {
-    pub(crate) fn check_transaction_active(&self) -> ErrorResult {
-        if !self.transaction.is_active() || !self.transaction.is_usable() {
-            Err(Error::TransactionInactive(Some(
-                "Transaction is not active".to_owned(),
-            )))
-        } else {
-            Ok(())
-        }
-    }
-
-    /// The object store or index this cursor was opened on.
     pub(crate) fn source(&self) -> &ObjectStoreOrIndex {
         &self.source
     }
+
+    fn check_transaction_and_source(&self) -> Fallible<()> {
+        // If this's transaction's state is not active, throw a "TransactionInactiveError"
+        // DOMException.
+        if !self.transaction.is_active() || !self.transaction.is_usable() {
+            return Err(Error::TransactionInactive(None));
+        }
+
+        // If this's source or effective object store has been deleted, throw an
+        // "InvalidStateError" DOMException.
+        let store = self.effective_object_store();
+        if !self.transaction.Db().object_store_exists(&store.get_name()) {
+            return Err(Error::InvalidState(Some(
+                "The cursor's effective object store has been deleted".to_owned(),
+            )));
+        }
+        if let ObjectStoreOrIndex::Index(index) = &self.source &&
+            !store.has_index(&index.Name())
+        {
+            return Err(Error::InvalidState(Some(
+                "The cursor's source index has been deleted".to_owned(),
+            )));
+        }
+        Ok(())
+    }
+
+    /// The preconditions `update` and `delete` share: steps 2 through 6 of both algorithms,
+    /// in the order their exceptions are observable in.
+    ///
+    /// Kept separate from `check_transaction_and_source` because the read-only check falls
+    /// between the inactive check and the deleted check, and the three iteration methods have
+    /// no read-only check at all.
         };
         let key_range = self.range.clone();
 

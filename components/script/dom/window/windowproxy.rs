@@ -161,10 +161,13 @@ pub(crate) struct WindowProxy {
     script_window_proxies: Rc<ScriptWindowProxies>,
 }
 
+struct WindowProxyIds {
+    browsing_context_id: BrowsingContextId,
+    webview_id: WebViewId,
+}
 impl WindowProxy {
     fn new_inherited(
-        browsing_context_id: BrowsingContextId,
-        webview_id: WebViewId,
+        ids: WindowProxyIds,
         currently_active: Option<PipelineId>,
         frame_element: Option<&Element>,
         parent: Option<&WindowProxy>,
@@ -175,8 +178,8 @@ impl WindowProxy {
         let name = frame_element.map_or(name, |e| e.get_string_attribute(&local_name!("name")));
         WindowProxy {
             reflector: Reflector::new(),
-            browsing_context_id,
-            webview_id,
+            browsing_context_id: ids.browsing_context_id,
+            webview_id: ids.webview_id,
             name: DomRefCell::new(name),
             currently_active: Cell::new(currently_active),
             discarded: Cell::new(false),
@@ -226,8 +229,10 @@ impl WindowProxy {
 
             let current = Some(window.upcast::<GlobalScope>().pipeline_id());
             let window_proxy = Box::new(WindowProxy::new_inherited(
-                browsing_context_id,
-                webview_id,
+                WindowProxyIds {
+                    browsing_context_id,
+                    webview_id,
+                },
                 current,
                 frame_element,
                 parent,
@@ -277,8 +282,10 @@ impl WindowProxy {
         unsafe {
             // Create a new browsing context.
             let window_proxy = Box::new(WindowProxy::new_inherited(
-                browsing_context_id,
-                webview_id,
+                WindowProxyIds {
+                    browsing_context_id,
+                    webview_id,
+                },
                 None,
                 None,
                 parent,
