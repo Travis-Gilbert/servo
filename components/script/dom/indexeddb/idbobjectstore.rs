@@ -675,7 +675,7 @@ impl IDBObjectStore {
     pub(crate) fn store_record_with_known_key(
         &self,
         cx: &mut JSContext,
-        source: RequestSource,
+        source: RootedTraceableBox<RequestSource>,
         value: HandleValue,
         key: &IndexedDBKeyType,
     ) -> Fallible<DomRoot<IDBRequest>> {
@@ -731,7 +731,7 @@ impl IDBObjectStore {
     pub(crate) fn delete_record_with_known_key(
         &self,
         cx: &mut JSContext,
-        source: RequestSource,
+        source: RootedTraceableBox<RequestSource>,
         key: &IndexedDBKeyType,
     ) -> Fallible<DomRoot<IDBRequest>> {
         IDBRequest::execute_async_from_source(

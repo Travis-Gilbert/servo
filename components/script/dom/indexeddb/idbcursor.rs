@@ -29,6 +29,7 @@ use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::structuredclone;
+use crate::dom::bindings::trace::RootedTraceableBox;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::indexeddb::idbindex::IDBIndex;
 use crate::dom::indexeddb::idbobjectstore::IDBObjectStore;
@@ -626,7 +627,7 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
         };
         self.effective_object_store().store_record_with_known_key(
             cx,
-            RequestSource::Cursor(Dom::from_ref(self)),
+            RootedTraceableBox::new(RequestSource::Cursor(Dom::from_ref(self))),
             value,
             &effective_key,
         )
@@ -647,7 +648,7 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
         };
         self.effective_object_store().delete_record_with_known_key(
             cx,
-            RequestSource::Cursor(Dom::from_ref(self)),
+            RootedTraceableBox::new(RequestSource::Cursor(Dom::from_ref(self))),
             &effective_key,
         )
     }

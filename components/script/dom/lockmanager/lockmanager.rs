@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use dom_struct::dom_struct;
@@ -32,7 +33,6 @@ use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
-use crate::dom::bindings::trace::HashMapTracedValues;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::lockmanager::lock::Lock;
 use crate::dom::promise::Promise;
@@ -92,12 +92,12 @@ pub(crate) struct LockManager {
     /// The next request id to allocate. Ids are unique per client.
     next_request_id: Cell<u64>,
     #[ignore_malloc_size_of = "promises and callbacks"]
-    pending: DomRefCell<HashMapTracedValues<u64, PendingRequest>>,
+    pending: DomRefCell<HashMap<u64, PendingRequest>>,
     #[ignore_malloc_size_of = "promises"]
-    held: DomRefCell<HashMapTracedValues<u64, HeldLock>>,
+    held: DomRefCell<HashMap<u64, HeldLock>>,
     /// `query()` promises awaiting a snapshot.
     #[ignore_malloc_size_of = "promises"]
-    queries: DomRefCell<HashMapTracedValues<u64, Rc<Promise>>>,
+    queries: DomRefCell<HashMap<u64, Rc<Promise>>>,
     /// Handler of constellation responses, created on first use.
     #[no_trace]
     result_handler: DomRefCell<Option<GenericCallback<WebLockResponse>>>,
@@ -109,9 +109,9 @@ impl LockManager {
             reflector_: Reflector::new(),
             client_id: Uuid::new_v4().simple().to_string(),
             next_request_id: Cell::new(0),
-            pending: DomRefCell::new(HashMapTracedValues::new()),
-            held: DomRefCell::new(HashMapTracedValues::new()),
-            queries: DomRefCell::new(HashMapTracedValues::new()),
+            pending: DomRefCell::new(HashMap::new()),
+            held: DomRefCell::new(HashMap::new()),
+            queries: DomRefCell::new(HashMap::new()),
             result_handler: DomRefCell::new(None),
         }
     }
