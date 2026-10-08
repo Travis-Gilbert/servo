@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use rusqlite::Connection;
 use servo_base::generic_channel;
-use servo_base::generic_channel::GenericCallback;
+use servo_base::generic_channel::{GenericCallback, ReceiveError};
 use servo_base::id::{
     BrowsingContextId, PIPELINE_NAMESPACE, PipelineNamespace, PipelineNamespaceId, WebViewId,
 };
@@ -51,7 +51,7 @@ fn obtain_bottle_map(
 
 #[test]
 fn test_exit() {
-    let handle: ClientStorageThreadHandle = ClientStorageThreadFactory::new(None, false, None);
+    let handle: ClientStorageThreadHandle = ClientStorageThreadFactory::new(None, false);
 
     let (sender, receiver) = generic_channel::channel().unwrap();
     handle
@@ -69,7 +69,7 @@ fn test_workflow() {
     install_test_namespace();
     let tmp_dir = tempfile::tempdir().unwrap();
     let handle: ClientStorageThreadHandle =
-        ClientStorageThreadFactory::new(Some(tmp_dir.path().to_path_buf()), false, None);
+        ClientStorageThreadFactory::new(Some(tmp_dir.path().to_path_buf()), false);
 
     let url = ServoUrl::parse("https://example.com").unwrap();
 
@@ -136,7 +136,7 @@ fn test_repeated_local_obtain_reuses_same_logical_rows() {
     install_test_namespace();
     let tmp_dir = tempfile::tempdir().unwrap();
     let handle: ClientStorageThreadHandle =
-        ClientStorageThreadFactory::new(Some(tmp_dir.path().to_path_buf()), false, None);
+        ClientStorageThreadFactory::new(Some(tmp_dir.path().to_path_buf()), false);
 
     let origin = ServoUrl::parse("https://example.com").unwrap().origin();
     let webview = Some(WebViewId::new(servo_base::id::TEST_PAINTER_ID));
@@ -191,7 +191,7 @@ fn test_repeated_session_obtain_reuses_same_logical_rows() {
     install_test_namespace();
     let tmp_dir = tempfile::tempdir().unwrap();
     let handle: ClientStorageThreadHandle =
-        ClientStorageThreadFactory::new(Some(tmp_dir.path().to_path_buf()), false, None);
+        ClientStorageThreadFactory::new(Some(tmp_dir.path().to_path_buf()), false);
 
     let origin = ServoUrl::parse("https://example.com").unwrap().origin();
     let webview = Some(WebViewId::new(servo_base::id::TEST_PAINTER_ID));
@@ -247,7 +247,7 @@ fn test_local_persistence_and_estimate() {
     install_test_namespace();
     let tmp_dir = tempfile::tempdir().unwrap();
     let handle: ClientStorageThreadHandle =
-        ClientStorageThreadFactory::new(Some(tmp_dir.path().to_path_buf()), false, None);
+        ClientStorageThreadFactory::new(Some(tmp_dir.path().to_path_buf()), false);
 
     let origin = ServoUrl::parse("https://example.com").unwrap().origin();
     let webview = WebViewId::new(servo_base::id::TEST_PAINTER_ID);
@@ -299,7 +299,7 @@ fn test_storage_manager_operations_fail_for_opaque_origins() {
     install_test_namespace();
     let tmp_dir = tempfile::tempdir().unwrap();
     let handle: ClientStorageThreadHandle =
-        ClientStorageThreadFactory::new(Some(tmp_dir.path().to_path_buf()), false, None);
+        ClientStorageThreadFactory::new(Some(tmp_dir.path().to_path_buf()), false);
 
     let origin = ServoUrl::parse("data:text/plain,hello").unwrap().origin();
 
@@ -314,4 +314,33 @@ fn test_storage_manager_operations_fail_for_opaque_origins() {
     let (cb, rx) = GenericCallback::new_blocking().unwrap();
     handle.estimate(origin, cb).unwrap();
     assert!(rx.recv().unwrap().is_err());
+}
+
+fn disconnected_registry() -> ClientStorageThreadHandle {
+    let (sender, receiver) = generic_channel::channel().unwrap();
+    drop(receiver);
+    ClientStorageThreadHandle::new(sender)
+}
+
+#[test]
+fn test_obtain_bottle_map_after_registry_exit_reports_disconnection() {
+    let receiver = disconnected_registry().obtain_a_storage_bottle_map(
+        StorageType::Local,
+        None,
+        StorageIdentifier::IndexedDB,
+        ServoUrl::parse("https://example.com").unwrap().origin(),
+    );
+    assert!(matches!(receiver.recv(), Err(ReceiveError::Disconnected)));
+}
+
+#[test]
+fn test_create_database_after_registry_exit_reports_disconnection() {
+    let receiver = disconnected_registry().create_database(1, "shutdown".into());
+    assert!(matches!(receiver.recv(), Err(ReceiveError::Disconnected)));
+}
+
+#[test]
+fn test_delete_database_after_registry_exit_reports_disconnection() {
+    let receiver = disconnected_registry().delete_database(1, "shutdown".into());
+    assert!(matches!(receiver.recv(), Err(ReceiveError::Disconnected)));
 }

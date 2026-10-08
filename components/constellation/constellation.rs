@@ -107,13 +107,13 @@ use devtools_traits::{
 use embedder_traits::resources::{self, Resource};
 use embedder_traits::user_contents::{UserContentManagerId, UserContents};
 use embedder_traits::{
+    AnimationState, DocumentLayoutSnapshot, DocumentLayoutSnapshotError, EmbedderControlId,
+    EmbedderControlResponse, EmbedderProxy, FocusSequenceNumber, GenericEmbedderProxy,
+    HitTestResult, InputEvent, InputEventAndId, InputEventOutcome, JSValue,
     JavaScriptEvaluationError, JavaScriptEvaluationId, KeyboardEvent, MediaSessionActionType,
     MediaSessionEvent, MediaSessionPlaybackState, MouseButton, MouseButtonAction, MouseButtonEvent,
     NewWebViewDetails, PaintHitTestResult, Theme, ViewportDetails, WakeLockDelegate, WakeLockType,
-    AnimationState, DocumentLayoutSnapshot, DocumentLayoutSnapshotError, EmbedderControlId,
     WebDriverCommandMsg, WebDriverLoadStatus, WebDriverScriptCommand, WebViewPoint,
-    HitTestResult, InputEvent, InputEventAndId, InputEventOutcome, JSValue,
-    EmbedderControlResponse, EmbedderProxy, FocusSequenceNumber, GenericEmbedderProxy,
 };
 use euclid::Size2D;
 use euclid::default::Size2D as UntypedSize2D;
@@ -164,18 +164,14 @@ use servo_constellation_traits::{
     DocumentState, EmbedderToConstellationMessage, IFrameLoadInfo, IFrameLoadInfoWithData,
     IFrameSizeMsg, LoadData, LoadOrigin, LogEntry, MessagePortMsg, NamedBrowsingContextInfo,
     NavigationHistoryBehavior, PaintMetricEvent, PortMessageTask, PortTransferInfo,
-    RemoteFocusOperation, SWManagerSenders,
-    ScreenshotReadinessResponse, ScriptToConstellationMessage, ScrollStateUpdate,
-    ServiceWorkerAlgorithm, ServiceWorkerManagerFactory, ServiceWorkerMsg,
-    StructuredSerializedData, TargetSnapshotParams, TraversalDirection, UserContentManagerAction,
-    WindowSizeType,
+    RemoteFocusOperation, SWManagerSenders, ScreenshotReadinessResponse,
+    ScriptToConstellationMessage, ScrollStateUpdate, ServiceWorkerAlgorithm,
+    ServiceWorkerManagerFactory, ServiceWorkerMsg, StructuredSerializedData, TargetSnapshotParams,
+    TraversalDirection, UserContentManagerAction, WindowSizeType,
 };
 use servo_url::{Host, ImmutableOrigin, ServoUrl};
 use storage_traits::StorageThreads;
-use storage_traits::cache_storage::CacheStorageThreadMessage;
-use storage_traits::client_storage::ClientStorageThreadMessage;
-use storage_traits::indexeddb::{IndexedDBThreadMsg, SyncOperation};
-use storage_traits::webstorage_thread::{WebStorageThreadMsg, WebStorageType};
+use storage_traits::webstorage_thread::WebStorageType;
 use style::global_style_data::StyleThreadPool;
 #[cfg(feature = "webgpu")]
 use webgpu::canvas_context::WebGpuExternalImageMap;
@@ -2187,12 +2183,12 @@ where
                 load_data,
                 history_handling,
             ) => {
-                let Some((webview_id, pipeline_id)) =
-                    self.browsing_contexts
-                        .get(&browsing_context_id)
-                        .map(|browsing_context| {
-                            (browsing_context.webview_id, browsing_context.pipeline_id)
-                        })
+                let Some((webview_id, pipeline_id)) = self
+                    .browsing_contexts
+                    .get(&browsing_context_id)
+                    .map(|browsing_context| {
+                        (browsing_context.webview_id, browsing_context.pipeline_id)
+                    })
                 else {
                     return warn!("{browsing_context_id}: Load in unknown browsing context");
                 };
@@ -3013,22 +3009,6 @@ where
         // Channels to receive signals when threads are done exiting.
         let (core_ipc_sender, core_ipc_receiver) =
             generic_channel::oneshot().expect("Failed to create IPC channel!");
-        let (public_client_storage_generic_sender, public_client_storage_generic_receiver) =
-            generic_channel::channel().expect("Failed to create generic channel!");
-        let (private_client_storage_generic_sender, private_client_storage_generic_receiver) =
-            generic_channel::channel().expect("Failed to create generic channel!");
-        let (private_cache_storage_generic_sender, private_cache_storage_generic_receiver) =
-            generic_channel::channel().expect("Failed to create generic channel!");
-        let (public_cache_storage_generic_sender, public_cache_storage_generic_receiver) =
-            generic_channel::channel().expect("Failed to create generic channel!");
-        let (public_indexeddb_ipc_sender, public_indexeddb_ipc_receiver) =
-            generic_channel::channel().expect("Failed to create generic channel!");
-        let (private_indexeddb_ipc_sender, private_indexeddb_ipc_receiver) =
-            generic_channel::channel().expect("Failed to create generic channel!");
-        let (public_web_storage_generic_sender, public_web_storage_generic_receiver) =
-            generic_channel::channel().expect("Failed to create generic channel!");
-        let (private_web_storage_generic_sender, private_web_storage_generic_receiver) =
-            generic_channel::channel().expect("Failed to create generic channel!");
 
         debug!("Exiting core resource threads.");
         if let Err(e) = self
@@ -3046,70 +3026,15 @@ where
             }
         }
 
-        debug!("Exiting public client storage thread.");
-        if let Err(e) = generic_channel::GenericSend::send(
-            &self.public_storage_threads,
-            ClientStorageThreadMessage::Exit(public_client_storage_generic_sender),
-        ) {
-            warn!("Exit public client storage thread failed ({})", e);
+        // Script threads have joined. Keep each registry alive until its consumers
+        // acknowledge exit, including IndexedDB requests queued during script teardown.
+        debug!("Exiting public storage threads.");
+        if let Err(error) = self.public_storage_threads.exit() {
+            warn!("Exit public storage threads failed ({error})");
         }
-        debug!("Exiting private client storage thread.");
-        if let Err(e) = generic_channel::GenericSend::send(
-            &self.private_storage_threads,
-            ClientStorageThreadMessage::Exit(private_client_storage_generic_sender),
-        ) {
-            warn!("Exit private client storage thread failed ({})", e);
-        }
-
-        debug!("Exiting public cache storage thread.");
-        if let Err(e) = generic_channel::GenericSend::send(
-            &self.public_storage_threads,
-            CacheStorageThreadMessage::Exit(public_cache_storage_generic_sender),
-        ) {
-            warn!("Exit public cache storage thread failed ({})", e);
-        }
-        debug!("Exiting private cache storage thread.");
-        if let Err(e) = generic_channel::GenericSend::send(
-            &self.private_storage_threads,
-            CacheStorageThreadMessage::Exit(private_cache_storage_generic_sender),
-        ) {
-            warn!("Exit private cache storage thread failed ({})", e);
-        }
-
-        debug!("Exiting public indexeddb resource threads.");
-        if let Err(e) =
-            self.public_storage_threads
-                .send(IndexedDBThreadMsg::Sync(SyncOperation::Exit(
-                    public_indexeddb_ipc_sender,
-                )))
-        {
-            warn!("Exit public indexeddb thread failed ({})", e);
-        }
-
-        debug!("Exiting private indexeddb resource threads.");
-        if let Err(e) =
-            self.private_storage_threads
-                .send(IndexedDBThreadMsg::Sync(SyncOperation::Exit(
-                    private_indexeddb_ipc_sender,
-                )))
-        {
-            warn!("Exit private indexeddb thread failed ({})", e);
-        }
-
-        debug!("Exiting public web storage thread.");
-        if let Err(e) = generic_channel::GenericSend::send(
-            &self.public_storage_threads,
-            WebStorageThreadMsg::Exit(public_web_storage_generic_sender),
-        ) {
-            warn!("Exit public web storage thread failed ({})", e);
-        }
-
-        debug!("Exiting private web storage thread.");
-        if let Err(e) = generic_channel::GenericSend::send(
-            &self.private_storage_threads,
-            WebStorageThreadMsg::Exit(private_web_storage_generic_sender),
-        ) {
-            warn!("Exit private web storage thread failed ({})", e);
+        debug!("Exiting private storage threads.");
+        if let Err(error) = self.private_storage_threads.exit() {
+            warn!("Exit private storage threads failed ({error})");
         }
 
         #[cfg(feature = "bluetooth")]
@@ -3179,30 +3104,6 @@ where
         // Receive exit signals from threads.
         if let Err(e) = core_ipc_receiver.recv() {
             warn!("Exit resource thread failed ({:?})", e);
-        }
-        if let Err(e) = public_client_storage_generic_receiver.recv() {
-            warn!("Exit public client storage thread failed ({:?})", e);
-        }
-        if let Err(e) = private_client_storage_generic_receiver.recv() {
-            warn!("Exit private client storage thread failed ({:?})", e);
-        }
-        if let Err(e) = private_cache_storage_generic_receiver.recv() {
-            warn!("Exit private cache storage thread failed ({:?})", e);
-        }
-        if let Err(e) = public_cache_storage_generic_receiver.recv() {
-            warn!("Exit public cache storage thread failed ({:?})", e);
-        }
-        if let Err(e) = public_indexeddb_ipc_receiver.recv() {
-            warn!("Exit public indexeddb thread failed ({:?})", e);
-        }
-        if let Err(e) = private_indexeddb_ipc_receiver.recv() {
-            warn!("Exit private indexeddb thread failed ({:?})", e);
-        }
-        if let Err(e) = public_web_storage_generic_receiver.recv() {
-            warn!("Exit public web storage thread failed ({:?})", e);
-        }
-        if let Err(e) = private_web_storage_generic_receiver.recv() {
-            warn!("Exit private web storage thread failed ({:?})", e);
         }
 
         debug!("Shutting-down IPC router thread in constellation.");
@@ -6053,8 +5954,8 @@ where
         // In order to get repeatability, we sort the pipeline ids.
         let mut pipeline_ids: Vec<&PipelineId> = self.pipelines.keys().collect();
         pipeline_ids.sort_unstable();
-        if let Some((ref mut rng, probability)) = self.random_pipeline_closure
-            && let Some(pipeline_id) = pipeline_ids.choose(rng)
+        if let Some((ref mut rng, probability)) = self.random_pipeline_closure &&
+            let Some(pipeline_id) = pipeline_ids.choose(rng)
         {
             let pipeline_id = **pipeline_id;
             let pending_pipeline = self.pipelines.get(&pipeline_id).is_some_and(|pipeline| {
@@ -6072,7 +5973,7 @@ where
                 // Note that we deliberately do not do any of the tidying up
                 // associated with closing a pipeline. The constellation should cope!
                 warn!("{}: Randomly closing pipeline", pipeline_id);
-                self.random_pipeline_closures.insert(pipeline_id.clone());
+                self.random_pipeline_closures.insert(pipeline_id);
                 self.pipelines
                     .get(&pipeline_id)
                     .expect("selected pipeline should still be registered")

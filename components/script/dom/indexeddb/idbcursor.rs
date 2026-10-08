@@ -11,10 +11,9 @@ use js::jsval::{JSVal, UndefinedValue};
 use js::rust::{HandleValue, MutableHandleValue};
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
-use storage_traits::indexeddb::{IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord};
-
 use storage_traits::indexeddb::{
-    AsyncOperation, AsyncReadOnlyOperation, KvsOperationContext, KvsOperationTarget, RecordsShape,
+    AsyncOperation, AsyncReadOnlyOperation, IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord,
+    KvsOperationContext, KvsOperationTarget, RecordsShape,
 };
 
 use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::{
@@ -29,6 +28,7 @@ use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::structuredclone;
+use crate::dom::bindings::trace::RootedTraceableBox;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::indexeddb::idbindex::IDBIndex;
 use crate::dom::indexeddb::idbobjectstore::IDBObjectStore;
@@ -228,7 +228,10 @@ impl IDBCursor {
         // If this's transaction's state is not active, throw a "TransactionInactiveError"
         // DOMException.
         if !self.transaction.is_active() || !self.transaction.is_usable() {
-            return Err(Error::TransactionInactive(None));
+            return Err(Error::TransactionInactive(Some(
+                "The cursor cannot iterate because its transaction is not active or usable"
+                    .to_owned(),
+            )));
         }
 
         // If this's source or effective object store has been deleted, throw an
@@ -239,12 +242,12 @@ impl IDBCursor {
                 "The cursor's effective object store has been deleted".to_owned(),
             )));
         }
-        if let ObjectStoreOrIndex::Index(index) = &self.source {
-            if !store.has_index(&index.Name()) {
-                return Err(Error::InvalidState(Some(
-                    "The cursor's source index has been deleted".to_owned(),
-                )));
-            }
+        if let ObjectStoreOrIndex::Index(index) = &self.source &&
+            !store.has_index(&index.Name())
+        {
+            return Err(Error::InvalidState(Some(
+                "The cursor's source index has been deleted".to_owned(),
+            )));
         }
         Ok(())
     }
@@ -259,13 +262,18 @@ impl IDBCursor {
         // Step 2. If transaction's state is not active, throw a "TransactionInactiveError"
         // DOMException.
         if !self.transaction.is_active() || !self.transaction.is_usable() {
-            return Err(Error::TransactionInactive(None));
+            return Err(Error::TransactionInactive(Some(
+                "The cursor cannot modify records because its transaction is not active or usable"
+                    .to_owned(),
+            )));
         }
 
         // Step 3. If transaction is a read-only transaction, throw a "ReadOnlyError"
         // DOMException.
         if let IDBTransactionMode::Readonly = self.transaction.get_mode() {
-            return Err(Error::ReadOnly(None));
+            return Err(Error::ReadOnly(Some(
+                "The cursor cannot modify records in a read-only transaction".to_owned(),
+            )));
         }
 
         // Step 4. If this's source or effective object store has been deleted, throw an
@@ -405,11 +413,7 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbcursor-primarykey>
-    fn GetPrimaryKey(
-        &self,
-        cx: &mut JSContext,
-        mut value: MutableHandleValue,
-    ) -> Fallible<()> {
+    fn GetPrimaryKey(&self, cx: &mut JSContext, mut value: MutableHandleValue) -> Fallible<()> {
         // NOTE: If primaryKey returns an object (e.g. a Date or Array),
         // it returns the same object instance every time it is inspected,
         // until the cursor’s effective key is changed. This means that if the object is modified,
@@ -626,7 +630,7 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
         };
         self.effective_object_store().store_record_with_known_key(
             cx,
-            RequestSource::Cursor(Dom::from_ref(self)),
+            RootedTraceableBox::new(RequestSource::Cursor(Dom::from_ref(self))),
             value,
             &effective_key,
         )
@@ -647,7 +651,7 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
         };
         self.effective_object_store().delete_record_with_known_key(
             cx,
-            RequestSource::Cursor(Dom::from_ref(self)),
+            RootedTraceableBox::new(RequestSource::Cursor(Dom::from_ref(self))),
             &effective_key,
         )
     }
@@ -705,7 +709,10 @@ pub(crate) fn iterate_cursor(
                     "iterate_cursor was given a primary key for a cursor that is not an index \
                      cursor in direction next or prev."
                 );
-                return Err(Error::InvalidAccess(None));
+                return Err(Error::InvalidAccess(Some(
+                    "Cursor iteration with a primary key requires an index cursor in direction next or prev"
+                        .to_owned(),
+                )));
             },
         }
     }
@@ -951,7 +958,9 @@ pub(crate) fn iterate_cursor(
     // record. A cursor that somehow did not is a request that failed, not a crash.
     let Some(found_record) = found_record else {
         warn!("iterate_cursor reached step 10 without a found record.");
-        return Err(Error::Operation(None));
+        return Err(Error::Operation(Some(
+            "Cursor iteration completed without a selected record".to_owned(),
+        )));
     };
 
     // Step 10. Set cursor’s position to position.

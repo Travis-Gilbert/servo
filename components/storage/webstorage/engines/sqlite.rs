@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use rusqlite::{Connection, OptionalExtension};
 use servo_base::threadpool::ThreadPool;
+use storage_traits::webstorage_thread::WebStorageEngine;
 
 use crate::shared::{DB_IN_MEMORY_INIT_PRAGMAS, DB_IN_MEMORY_PRAGMAS, DB_INIT_PRAGMAS, DB_PRAGMAS};
-use storage_traits::webstorage_thread::WebStorageEngine;
 
 pub struct SqliteEngine {
     connection: Connection,
@@ -139,5 +139,27 @@ impl WebStorageEngine for SqliteEngine {
             )
             .map(|size| size as usize)
             .map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use storage_traits::webstorage_thread::WebStorageEngine;
+
+    use super::SqliteEngine;
+
+    #[test]
+    fn default_emptiness_tracks_rows_and_preserves_database_errors() {
+        let mut engine = SqliteEngine {
+            connection: SqliteEngine::init_db(None).unwrap(),
+        };
+        assert!(engine.is_empty().unwrap());
+        engine.set("key", "value").unwrap();
+        assert!(!engine.is_empty().unwrap());
+        engine.clear().unwrap();
+        assert!(engine.is_empty().unwrap());
+
+        engine.connection.execute("DROP TABLE data", []).unwrap();
+        assert_eq!(engine.is_empty().unwrap_err(), engine.len().unwrap_err());
     }
 }

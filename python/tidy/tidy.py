@@ -67,6 +67,7 @@ Config = TypedDict(
     {
         "skip-check-licenses": bool,
         "disallowed-coauthors": list[str],
+        "coauthors-history-base": str,
         "lint-scripts": list,
         "blocked-packages": dict[str, Any],
         "ignore": IgnoreConfig,
@@ -77,6 +78,7 @@ Config = TypedDict(
 config: Config = {
     "skip-check-licenses": False,
     "disallowed-coauthors": [],
+    "coauthors-history-base": "",
     "lint-scripts": [],
     "blocked-packages": {},
     "ignore": {
@@ -1193,6 +1195,27 @@ def run_coauthors_check() -> int:
     # Linting the whole commit history takes less than 500ms, and avoids having to reason about
     # exactly how many commits are needed (see #44723)
     log_command = ["git", "log", f"--format={log_format}"]
+    history_base = config["coauthors-history-base"]
+    if history_base != "":
+        # Downstream forks may preserve an explicitly frozen historical baseline. This does
+        # not change the default upstream whole-history check or the pull request body check.
+        if not isinstance(history_base, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", history_base):
+            print("\r  | coauthors-history-base must be an exact 40-character commit SHA")
+            return 1
+        try:
+            object_type = subprocess.check_output(
+                ["git", "cat-file", "-t", history_base], text=True, stderr=subprocess.STDOUT
+            ).strip()
+            if object_type != "commit":
+                print("\r  | coauthors-history-base must identify a commit, not another Git object")
+                return 1
+            subprocess.check_output(
+                ["git", "merge-base", "--is-ancestor", history_base, "HEAD"], stderr=subprocess.STDOUT
+            )
+        except subprocess.CalledProcessError:
+            print("\r  | coauthors-history-base must exist and be an ancestor of HEAD")
+            return 1
+        log_command.append(f"{history_base}..HEAD")
     log = subprocess.check_output(log_command, text=True)
     errors = check_coauthors(pull_request_body, log, verbose=is_pr_ci)
 

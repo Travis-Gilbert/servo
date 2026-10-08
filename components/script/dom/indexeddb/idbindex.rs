@@ -21,10 +21,10 @@ use storage_traits::indexeddb::{
 
 use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::IDBCursorDirection;
 use crate::dom::bindings::error::Fallible;
-use crate::dom::bindings::trace::RootedTraceableBox;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
+use crate::dom::bindings::trace::RootedTraceableBox;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::idbobjectstore::KeyPath;
 use crate::dom::indexeddb::idbcursor::{IDBCursor, IterationParam, ObjectStoreOrIndex};
@@ -176,7 +176,10 @@ impl IDBIndex {
     fn check_transaction_active(&self) -> Fallible<()> {
         let transaction = self.object_store.transaction();
         if !transaction.is_active() || !transaction.is_usable() {
-            return Err(Error::TransactionInactive(None));
+            return Err(Error::TransactionInactive(Some(
+                "The index request cannot run because its transaction is not active or usable"
+                    .to_owned(),
+            )));
         }
         Ok(())
     }
@@ -248,7 +251,7 @@ impl IDBIndex {
         IDBRequest::execute_async_from_source(
             cx,
             &self.object_store,
-            RequestSource::Index(Dom::from_ref(self)),
+            RootedTraceableBox::new(RequestSource::Index(Dom::from_ref(self))),
             self.operation_context(),
             |callback| {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
@@ -405,7 +408,7 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
             IDBRequest::execute_async_from_source(
                 cx,
                 &self.object_store,
-                RequestSource::Index(Dom::from_ref(self)),
+                RootedTraceableBox::new(RequestSource::Index(Dom::from_ref(self))),
                 self.operation_context(),
                 |callback| {
                     AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetItem {
@@ -443,7 +446,7 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
             IDBRequest::execute_async_from_source(
                 cx,
                 &self.object_store,
-                RequestSource::Index(Dom::from_ref(self)),
+                RootedTraceableBox::new(RequestSource::Index(Dom::from_ref(self))),
                 self.operation_context(),
                 |callback| {
                     AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetKey {
@@ -482,7 +485,7 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
         IDBRequest::execute_async_from_source(
             cx,
             &self.object_store,
-            RequestSource::Index(Dom::from_ref(self)),
+            RootedTraceableBox::new(RequestSource::Index(Dom::from_ref(self))),
             self.operation_context(),
             |callback| {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
@@ -521,7 +524,7 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
         IDBRequest::execute_async_from_source(
             cx,
             &self.object_store,
-            RequestSource::Index(Dom::from_ref(self)),
+            RootedTraceableBox::new(RequestSource::Index(Dom::from_ref(self))),
             self.operation_context(),
             |callback| {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
@@ -561,7 +564,7 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
         IDBRequest::execute_async_from_source(
             cx,
             &self.object_store,
-            RequestSource::Index(Dom::from_ref(self)),
+            RootedTraceableBox::new(RequestSource::Index(Dom::from_ref(self))),
             self.operation_context(),
             |callback| {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
@@ -600,7 +603,7 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
             IDBRequest::execute_async_from_source(
                 cx,
                 &self.object_store,
-                RequestSource::Index(Dom::from_ref(self)),
+                RootedTraceableBox::new(RequestSource::Index(Dom::from_ref(self))),
                 self.operation_context(),
                 |callback| {
                     AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Count {

@@ -3,7 +3,6 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::thread;
 
 use log::error;
@@ -42,19 +41,11 @@ impl CacheStorageEngineFactory for DefaultCacheStorageEngineFactory {
 }
 
 pub trait CacheStorageThreadFactory {
-    fn new(
-        config_dir: Option<PathBuf>,
-        temporary_storage: bool,
-        factory: Option<Arc<dyn CacheStorageEngineFactory>>,
-    ) -> Self;
+    fn new(config_dir: Option<PathBuf>, temporary_storage: bool) -> Self;
 }
 
 impl CacheStorageThreadFactory for CacheStorageThreadHandle {
-    fn new(
-        config_dir: Option<PathBuf>,
-        temporary_storage: bool,
-        factory: Option<Arc<dyn CacheStorageEngineFactory>>,
-    ) -> CacheStorageThreadHandle {
+    fn new(config_dir: Option<PathBuf>, temporary_storage: bool) -> CacheStorageThreadHandle {
         let (generic_sender, generic_receiver) = generic_channel::channel().unwrap();
         let mut temp_dir: Option<tempfile::TempDir> = None;
         let base_dir = config_dir
@@ -79,7 +70,7 @@ impl CacheStorageThreadFactory for CacheStorageThreadHandle {
             .spawn(move || {
                 // Keep temp_dir alive while the thread runs.
                 let _ = temp_dir;
-                let factory = factory.unwrap_or_else(|| Arc::new(DefaultCacheStorageEngineFactory));
+                let factory = DefaultCacheStorageEngineFactory;
                 let Ok(engine) = factory.open(storage_dir) else {
                     error!("Failed to initialize CacheStorage engine");
                     return;

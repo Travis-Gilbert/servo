@@ -71,7 +71,11 @@ impl IDBRecord {
         this.primary_key.set(primary_key.get());
 
         rooted!(&in(cx) let mut value = UndefinedValue());
-        let data = postcard::from_bytes(&record.value).map_err(|_| Error::Data(None))?;
+        let data = postcard::from_bytes(&record.value).map_err(|_| {
+            Error::Data(Some(
+                "The stored IndexedDB record value could not be decoded".to_owned(),
+            ))
+        })?;
         structuredclone::read(cx, global, data, value.handle_mut())?;
         // A store that generates keys into an in-line key path does not store the key inside the
         // value. `record.value` is the stored bytes, so the key goes back in here.

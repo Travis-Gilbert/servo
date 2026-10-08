@@ -5,6 +5,7 @@
 use std::path::Path;
 
 use crate::parser::{get_default_url, location_bar_input_to_url, parse_url_or_filename};
+use crate::prefs::ServoShellPreferences;
 
 #[cfg(not(target_os = "windows"))]
 const FAKE_CWD: &str = "/fake/cwd";
@@ -88,6 +89,11 @@ fn test_argument_parsing_special() {
 
 // Helper function to test url
 fn test_url(input: &str, location: &str, cmdline_if_exists: &str, cmdline_otherwise: &str) {
+    // These parser cases use an explicit upstream search fixture, independent of fork defaults.
+    let preferences = ServoShellPreferences {
+        searchpage: "https://duckduckgo.com/html/?q=%s".into(),
+        ..Default::default()
+    };
     assert_eq!(
         location_bar_input_to_url(input, "https://duckduckgo.com/html/?q=%s")
             .unwrap()
@@ -95,12 +101,27 @@ fn test_url(input: &str, location: &str, cmdline_if_exists: &str, cmdline_otherw
         location
     );
     assert_eq!(
-        get_default_url(Some(input), FAKE_CWD, |_| true, &Default::default()).into_string(),
+        get_default_url(Some(input), FAKE_CWD, |_| true, &preferences).into_string(),
         cmdline_if_exists
     );
     assert_eq!(
-        get_default_url(Some(input), FAKE_CWD, |_| false, &Default::default()).into_string(),
+        get_default_url(Some(input), FAKE_CWD, |_| false, &preferences).into_string(),
         cmdline_otherwise
+    );
+}
+
+#[test]
+fn test_fork_default_search_url() {
+    let preferences = ServoShellPreferences::default();
+    assert_eq!(
+        get_default_url(Some("dragonfruit"), FAKE_CWD, |_| false, &preferences).into_string(),
+        "http://theorem.local/search?q=dragonfruit"
+    );
+    assert_eq!(
+        location_bar_input_to_url("dragonfruit", &preferences.searchpage)
+            .unwrap()
+            .into_string(),
+        "http://theorem.local/search?q=dragonfruit"
     );
 }
 

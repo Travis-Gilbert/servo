@@ -7,7 +7,6 @@ mod engines;
 use std::borrow::ToOwned;
 use std::collections::hash_map::Entry;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::thread;
 
 use log::warn;
@@ -40,7 +39,6 @@ pub trait WebStorageThreadFactory {
         config_dir: Option<PathBuf>,
         mem_profiler_chan: MemProfilerChan,
         reporter_name: String,
-        factory: Option<Arc<dyn WebStorageEngineFactory>>,
     ) -> Self;
 }
 
@@ -50,7 +48,6 @@ impl WebStorageThreadFactory for GenericSender<WebStorageThreadMsg> {
         config_dir: Option<PathBuf>,
         mem_profiler_chan: MemProfilerChan,
         reporter_name: String,
-        factory: Option<Arc<dyn WebStorageEngineFactory>>,
     ) -> GenericSender<WebStorageThreadMsg> {
         let (chan, port) = generic_channel::channel().unwrap();
         let chan2 = chan.clone();
@@ -58,7 +55,7 @@ impl WebStorageThreadFactory for GenericSender<WebStorageThreadMsg> {
             .name("WebStorageManager".to_owned())
             .spawn(move || {
                 mem_profiler_chan.run_with_memory_reporting(
-                    || WebStorageManager::new(port, config_dir, factory).start(),
+                    || WebStorageManager::new(port, config_dir).start(),
                     reporter_name,
                     chan2,
                     WebStorageThreadMsg::CollectMemoryReport,
@@ -168,10 +165,8 @@ struct WebStorageManager {
     session_storage_origins: StorageOrigins,
     local_storage_origins: StorageOrigins,
     session_data: FxHashMap<WebViewId, FxHashMap<ImmutableOrigin, OriginEntry>>,
-    session_environments: FxHashMap<WebViewId, FxHashMap<ImmutableOrigin, WebStorageEnvironment>>,
     config_dir: Option<PathBuf>,
-    engine_factory: Arc<dyn WebStorageEngineFactory>,
-    use_engine_for_session: bool,
+    engine_factory: SqliteWebStorageEngineFactory,
     environments: FxHashMap<ImmutableOrigin, WebStorageEnvironment>,
 }
 
@@ -179,23 +174,18 @@ impl WebStorageManager {
     fn new(
         port: GenericReceiver<WebStorageThreadMsg>,
         config_dir: Option<PathBuf>,
-        engine_factory: Option<Arc<dyn WebStorageEngineFactory>>,
     ) -> WebStorageManager {
         let mut local_storage_origins = StorageOrigins::new();
         if let Some(ref config_dir) = config_dir {
             read_json_from_file(&mut local_storage_origins, config_dir, "localstorage.json");
         }
-        let use_engine_for_session = engine_factory.is_some();
         WebStorageManager {
             port,
             session_storage_origins: StorageOrigins::new(),
             local_storage_origins,
             session_data: FxHashMap::default(),
-            session_environments: FxHashMap::default(),
             config_dir,
-            engine_factory: engine_factory
-                .unwrap_or_else(|| Arc::new(SqliteWebStorageEngineFactory)),
-            use_engine_for_session,
+            engine_factory: SqliteWebStorageEngineFactory,
             environments: FxHashMap::default(),
         }
     }
@@ -273,9 +263,7 @@ impl WebStorageManager {
             reports.push(Report {
                 path: path!["storage", "session"],
                 kind: ReportKind::ExplicitJemallocHeapSize,
-                size: self.session_data.size_of(ops)
-                    + self.session_environments.size_of(ops)
-                    + self.session_storage_origins.size_of(ops),
+                size: self.session_data.size_of(ops) + self.session_storage_origins.size_of(ops),
             });
         });
         reports
@@ -287,39 +275,22 @@ impl WebStorageManager {
         }
     }
 
-    fn get_origin_location(
-        &self,
-        storage_type: WebStorageType,
-        webview_id: Option<WebViewId>,
-        origin: &ImmutableOrigin,
-    ) -> Option<PathBuf> {
-        match &self.config_dir {
-            Some(config_dir) => {
-                const NAMESPACE_SERVO_WEBSTORAGE: &uuid::Uuid = &Uuid::from_bytes([
-                    0x37, 0x9e, 0x56, 0xb0, 0x1a, 0x76, 0x44, 0xc5, 0xa4, 0xdb, 0xe2, 0x18, 0xc5,
-                    0xc8, 0xa3, 0x5d,
-                ]);
-                let scope = match storage_type {
-                    WebStorageType::Local => origin.ascii_serialization(),
-                    WebStorageType::Session => format!(
-                        "{}|{}",
-                        webview_id.expect("session storage requires a webview"),
-                        origin.ascii_serialization()
-                    ),
-                };
-                let origin_uuid = Uuid::new_v5(NAMESPACE_SERVO_WEBSTORAGE, scope.as_bytes());
-                let base = config_dir.join("webstorage");
-                Some(match storage_type {
-                    WebStorageType::Local => base.join(origin_uuid.to_string()),
-                    WebStorageType::Session => base.join("session").join(origin_uuid.to_string()),
-                })
-            },
-            None => None,
-        }
+    fn get_origin_location(&self, origin: &ImmutableOrigin) -> Option<PathBuf> {
+        self.config_dir.as_ref().map(|config_dir| {
+            const NAMESPACE_SERVO_WEBSTORAGE: &uuid::Uuid = &Uuid::from_bytes([
+                0x37, 0x9e, 0x56, 0xb0, 0x1a, 0x76, 0x44, 0xc5, 0xa4, 0xdb, 0xe2, 0x18, 0xc5, 0xc8,
+                0xa3, 0x5d,
+            ]);
+            let origin_uuid = Uuid::new_v5(
+                NAMESPACE_SERVO_WEBSTORAGE,
+                origin.ascii_serialization().as_bytes(),
+            );
+            config_dir.join("webstorage").join(origin_uuid.to_string())
+        })
     }
 
     fn add_new_environment(&mut self, origin: &ImmutableOrigin) -> Result<(), String> {
-        let origin_location = self.get_origin_location(WebStorageType::Local, None, origin);
+        let origin_location = self.get_origin_location(origin);
 
         let engine =
             self.engine_factory
@@ -365,64 +336,6 @@ impl WebStorageManager {
             .environments
             .get_mut(origin)
             .expect("environment should exist after add_new_environment"))
-    }
-
-    fn add_new_session_environment(
-        &mut self,
-        webview_id: WebViewId,
-        origin: &ImmutableOrigin,
-    ) -> Result<(), String> {
-        let origin_location =
-            self.get_origin_location(WebStorageType::Session, Some(webview_id), origin);
-        let engine = self.engine_factory.open(
-            WebStorageType::Session,
-            Some(webview_id),
-            origin,
-            origin_location,
-        )?;
-        self.session_environments
-            .entry(webview_id)
-            .or_default()
-            .insert(origin.clone(), WebStorageEnvironment::new(engine));
-        Ok(())
-    }
-
-    fn get_session_environment(
-        &mut self,
-        webview_id: WebViewId,
-        origin: &ImmutableOrigin,
-    ) -> Result<&WebStorageEnvironment, String> {
-        let exists = self
-            .session_environments
-            .get(&webview_id)
-            .is_some_and(|origins| origins.contains_key(origin));
-        if !exists {
-            self.add_new_session_environment(webview_id, origin)?;
-        }
-        Ok(self
-            .session_environments
-            .get(&webview_id)
-            .and_then(|origins| origins.get(origin))
-            .expect("session environment should exist after add_new_session_environment"))
-    }
-
-    fn get_session_environment_mut(
-        &mut self,
-        webview_id: WebViewId,
-        origin: &ImmutableOrigin,
-    ) -> Result<&mut WebStorageEnvironment, String> {
-        let exists = self
-            .session_environments
-            .get(&webview_id)
-            .is_some_and(|origins| origins.contains_key(origin));
-        if !exists {
-            self.add_new_session_environment(webview_id, origin)?;
-        }
-        Ok(self
-            .session_environments
-            .get_mut(&webview_id)
-            .and_then(|origins| origins.get_mut(origin))
-            .expect("session environment should exist after add_new_session_environment"))
     }
 
     fn select_session_data(
@@ -495,13 +408,6 @@ impl WebStorageManager {
         origin: ImmutableOrigin,
     ) {
         let length = match storage_type {
-            WebStorageType::Session if self.use_engine_for_session => self
-                .get_session_environment(webview_id, &origin)
-                .and_then(|environment| environment.engine.len())
-                .unwrap_or_else(|error| {
-                    warn!("Failed to read session Web Storage length: {error}");
-                    0
-                }),
             WebStorageType::Session => self
                 .select_session_data(webview_id, &origin)
                 .map_or(0, |entry| entry.inner().len()),
@@ -527,13 +433,6 @@ impl WebStorageManager {
         index: u32,
     ) {
         let key = match storage_type {
-            WebStorageType::Session if self.use_engine_for_session => self
-                .get_session_environment(webview_id, &origin)
-                .and_then(|environment| environment.engine.key(index as usize))
-                .unwrap_or_else(|error| {
-                    warn!("Failed to read session Web Storage key: {error}");
-                    None
-                }),
             WebStorageType::Session => self
                 .select_session_data(webview_id, &origin)
                 .and_then(|entry| entry.inner().keys().nth(index as usize))
@@ -559,13 +458,6 @@ impl WebStorageManager {
         origin: ImmutableOrigin,
     ) {
         let keys = match storage_type {
-            WebStorageType::Session if self.use_engine_for_session => self
-                .get_session_environment(webview_id, &origin)
-                .and_then(|environment| environment.engine.keys())
-                .unwrap_or_else(|error| {
-                    warn!("Failed to read session Web Storage keys: {error}");
-                    vec![]
-                }),
             WebStorageType::Session => self
                 .select_session_data(webview_id, &origin)
                 .map_or(vec![], |entry| entry.inner().keys().cloned().collect()),
@@ -597,17 +489,6 @@ impl WebStorageManager {
         value: String,
     ) {
         let message = match storage_type {
-            WebStorageType::Session if self.use_engine_for_session => {
-                self.session_storage_origins
-                    .ensure_origin_descriptor(&origin);
-                let result = self
-                    .get_session_environment_mut(webview_id, &origin)
-                    .and_then(|environment| Self::set_engine_item(environment, &name, &value));
-                result.unwrap_or_else(|error| {
-                    warn!("Failed to set session Web Storage item: {error}");
-                    Err(())
-                })
-            },
             WebStorageType::Session => {
                 let entry = self.ensure_session_data_mut(webview_id, origin);
                 let total_size = entry.size();
@@ -653,13 +534,6 @@ impl WebStorageManager {
         name: String,
     ) {
         let value = match storage_type {
-            WebStorageType::Session if self.use_engine_for_session => self
-                .get_session_environment(webview_id, &origin)
-                .and_then(|environment| environment.engine.get(&name))
-                .unwrap_or_else(|error| {
-                    warn!("Failed to get session Web Storage item: {error}");
-                    None
-                }),
             WebStorageType::Session => self
                 .select_session_data(webview_id, &origin)
                 .and_then(|entry| entry.inner().get(&name))
@@ -687,13 +561,6 @@ impl WebStorageManager {
         name: String,
     ) {
         let old_value = match storage_type {
-            WebStorageType::Session if self.use_engine_for_session => self
-                .get_session_environment_mut(webview_id, &origin)
-                .and_then(|environment| environment.engine.delete(&name))
-                .unwrap_or_else(|error| {
-                    warn!("Failed to remove session Web Storage item: {error}");
-                    None
-                }),
             WebStorageType::Session => self
                 .select_session_data_mut(webview_id, &origin)
                 .and_then(|entry| entry.remove(&name)),
@@ -718,13 +585,6 @@ impl WebStorageManager {
         origin: ImmutableOrigin,
     ) {
         let changed = match storage_type {
-            WebStorageType::Session if self.use_engine_for_session => self
-                .get_session_environment_mut(webview_id, &origin)
-                .and_then(|environment| environment.engine.clear())
-                .unwrap_or_else(|error| {
-                    warn!("Failed to clear session Web Storage: {error}");
-                    false
-                }),
             WebStorageType::Session => self
                 .select_session_data_mut(webview_id, &origin)
                 .is_some_and(|entry| {
@@ -749,65 +609,6 @@ impl WebStorageManager {
     }
 
     fn clone(&mut self, src_webview_id: WebViewId, dest_webview_id: WebViewId) {
-        if self.use_engine_for_session {
-            if let Some(dest_origins) = self.session_environments.remove(&dest_webview_id) {
-                for (_, mut environment) in dest_origins {
-                    if let Err(error) = environment.engine.clear() {
-                        warn!("Failed to clear destination session Web Storage: {error}");
-                    }
-                }
-            }
-
-            let snapshots = self
-                .session_environments
-                .get(&src_webview_id)
-                .map(|origins| {
-                    origins
-                        .iter()
-                        .filter_map(|(origin, environment)| {
-                            let snapshot = environment.engine.keys().and_then(|keys| {
-                                keys.into_iter()
-                                    .map(|key| {
-                                        environment
-                                            .engine
-                                            .get(&key)
-                                            .map(|value| value.map(|value| (key, value)))
-                                    })
-                                    .collect::<Result<Option<Vec<_>>, _>>()
-                            });
-                            match snapshot {
-                                Ok(Some(entries)) => Some((origin.clone(), entries)),
-                                Ok(None) => {
-                                    warn!("Session Web Storage key disappeared during clone");
-                                    None
-                                },
-                                Err(error) => {
-                                    warn!("Failed to read session Web Storage for clone: {error}");
-                                    None
-                                },
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-
-            for (origin, entries) in snapshots {
-                let result = self
-                    .get_session_environment_mut(dest_webview_id, &origin)
-                    .and_then(|environment| {
-                        environment.engine.clear()?;
-                        for (key, value) in entries {
-                            environment.engine.set(&key, &value)?;
-                        }
-                        Ok(())
-                    });
-                if let Err(error) = result {
-                    warn!("Failed to clone session Web Storage: {error}");
-                }
-            }
-            return;
-        }
-
         let Some(src_origin_entries) = self.session_data.get(&src_webview_id) else {
             return;
         };
@@ -828,27 +629,6 @@ impl WebStorageManager {
         match storage_type {
             WebStorageType::Session => {
                 let origins = self.session_storage_origins.take_origins_for_sites(sites);
-
-                if self.use_engine_for_session {
-                    let mut failed_origins = Vec::new();
-                    self.session_environments.retain(|_, origins_map| {
-                        for origin in &origins {
-                            if let Some(mut environment) = origins_map.remove(origin) {
-                                if let Err(error) = environment.engine.clear() {
-                                    warn!("Failed to clear session Web Storage origin: {error}");
-                                    origins_map.insert(origin.clone(), environment);
-                                    failed_origins.push(origin.clone());
-                                }
-                            }
-                        }
-                        !origins_map.is_empty()
-                    });
-                    for origin in failed_origins {
-                        self.session_storage_origins
-                            .ensure_origin_descriptor(&origin);
-                    }
-                    return;
-                }
 
                 self.session_data.retain(|_, origins_map| {
                     for origin in &origins {
@@ -873,13 +653,13 @@ impl WebStorageManager {
                     self.environments.remove(&origin);
                     if self.config_dir.is_some() {
                         let origin_location = self
-                            .get_origin_location(WebStorageType::Local, None, &origin)
+                            .get_origin_location(&origin)
                             .expect("Should always be able to get origin location.");
-                        if let Err(error) = std::fs::remove_dir_all(&origin_location) {
-                            if error.kind() != std::io::ErrorKind::NotFound {
-                                warn!("Failed to delete origin location: {:?}", error);
-                                self.local_storage_origins.ensure_origin_descriptor(&origin);
-                            }
+                        if let Err(error) = std::fs::remove_dir_all(&origin_location) &&
+                            error.kind() != std::io::ErrorKind::NotFound
+                        {
+                            warn!("Failed to delete origin location: {:?}", error);
+                            self.local_storage_origins.ensure_origin_descriptor(&origin);
                         }
                     }
                 }

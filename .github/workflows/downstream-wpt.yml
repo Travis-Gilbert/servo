@@ -1,0 +1,106 @@
+name: Downstream selected WPT (existing artifact)
+
+on:
+  workflow_call:
+    inputs:
+      engine-sha:
+        required: true
+        type: string
+      build-run-id:
+        required: true
+        type: string
+      artifact-id:
+        required: true
+        type: string
+      artifact-digest:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      engine-sha:
+        description: Reviewed full engine SHA with successful Main run
+        required: true
+        type: string
+      build-run-id:
+        description: Successful same-repository Main run ID
+        required: true
+        type: string
+      artifact-id:
+        description: Immutable checked-release-binary-linux artifact ID from that run
+        required: true
+        type: string
+      artifact-digest:
+        description: Reviewed artifact API digest (sha256 plus colon plus 64 hex digits)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  selected-wpt:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 160
+    env:
+      ENGINE_SHA: ${{ inputs.engine-sha }}
+      BUILD_RUN_ID: ${{ inputs.build-run-id }}
+      ARTIFACT_ID: ${{ inputs.artifact-id }}
+      ARTIFACT_DIGEST: ${{ inputs.artifact-digest }}
+      GST_PLUGIN_FEATURE_RANK: pulsesink:NONE,alsasink:NONE,jacksink:NONE,fakesink:MAX
+    steps:
+      - name: Checkout reviewed orchestration
+        uses: actions/checkout@v6
+        with:
+          path: orchestration
+          persist-credentials: false
+          sparse-checkout: support/downstream
+      - name: Verify successful build and artifact provenance
+        id: verified
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 orchestration/support/downstream/run_wpt.py verify --output evidence
+      - name: Checkout exact public engine sources
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.verified.outputs.engine_sha }}
+          path: engine
+          persist-credentials: false
+      - name: Download existing package (no engine build)
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ steps.verified.outputs.artifact_id }}
+          run-id: ${{ steps.verified.outputs.build_run_id }}
+          repository: Travis-Gilbert/servo
+          github-token: ${{ github.token }}
+          digest-mismatch: error
+          path: evidence/download
+      - name: Setup pinned Python and uv
+        uses: ./engine/.github/actions/setup-python
+        with:
+          python-version-file-path: engine/.python-version
+      - name: Bootstrap ephemeral runner dependencies
+        timeout-minutes: 30
+        working-directory: engine
+        # Same dependency route as linux-wpt.yml. Installs the pinned Rust
+        # toolchain/system packages, but skips Cargo tools and builds no engine.
+        run: |
+          set -euo pipefail
+          sudo apt update
+          ./mach bootstrap --yes --skip-lints --skip-nextest
+          sudo apt install -qy --no-install-recommends mesa-vulkan-drivers fonts-noto-cjk fonts-dejavu-extra
+          sudo apt purge -y fonts-droid-fallback
+      - name: Run capped public component corpus
+        timeout-minutes: 125
+        run: python3 orchestration/support/downstream/run_wpt.py run --root engine --output evidence
+      - name: Preserve provenance and actual results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: downstream-selected-wpt-${{ github.run_id }}
+          if-no-files-found: error
+          path: |
+            evidence/*.json
+            evidence/*.jsonl
+            evidence/*.log
+            evidence/include.txt

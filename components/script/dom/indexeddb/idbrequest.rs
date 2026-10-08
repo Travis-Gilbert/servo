@@ -35,6 +35,7 @@ use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::structuredclone;
+use crate::dom::bindings::trace::RootedTraceableBox;
 use crate::dom::domexception::DOMException;
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
 use crate::dom::eventtarget::EventTarget;
@@ -56,7 +57,7 @@ use crate::realms::enter_auto_realm;
 /// records on the wire, but the source the spec exposes is whichever surface the method was
 /// called on. `IDBIndex`'s eight operations and `IDBCursor`'s `update` and `delete` all travel
 /// over an object store while reporting the index or the cursor as their source.
-#[derive(JSTraceable, MallocSizeOf)]
+#[derive(Clone, JSTraceable, MallocSizeOf)]
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
 pub(crate) enum RequestSource {
     ObjectStore(Dom<IDBObjectStore>),
@@ -454,7 +455,7 @@ impl RequestListener {
         // retained transaction if that association was unexpectedly cleared or replaced, or the
         // pending count and RequestHandled frontier would never advance.
         match request.transaction.get() {
-            Some(request_transaction) if &*request_transaction == &*transaction => {},
+            Some(request_transaction) if *request_transaction == *transaction => {},
             Some(_) => warn!(
                 "An IndexedDB reply arrived for a request associated with a different transaction."
             ),
@@ -510,7 +511,12 @@ impl RequestListener {
                         .as_ref()
                         .map(|source| source.object_store());
                     let result = postcard::from_bytes(&record.value)
-                        .map_err(|_| Error::Data(None))
+                        .map_err(|_| {
+                            Error::Data(Some(
+                                "The requested IndexedDB record value could not be decoded"
+                                    .to_owned(),
+                            ))
+                        })
                         .and_then(|data| {
                             structuredclone::read(cx, &global, data, answer.handle_mut())
                         })
@@ -597,7 +603,9 @@ impl RequestListener {
                             let element = match kind {
                                 GetAllKind::Values => (|| {
                                     let data = postcard::from_bytes(&record.value)
-                                        .map_err(|_| Error::Data(None))?;
+                                        .map_err(|_| {
+                                            Error::Data(Some("An IndexedDB getAll record value could not be decoded".to_owned()))
+                                        })?;
                                     structuredclone::read(
                                         cx,
                                         &global,
@@ -625,13 +633,17 @@ impl RequestListener {
                                 // A `getAllRecords` request always has a source, so a reply that
                                 // arrives without one cannot be projected into records.
                                 GetAllKind::Records => match &store {
-                                    Some(store) => IDBRecord::new(cx, &global, store, record)
-                                        .map(|idb_record| {
+                                    Some(store) => IDBRecord::new(cx, &global, store, record).map(
+                                        |idb_record| {
                                             array.handle_mut_at(i).set(ObjectValue(
                                                 *idb_record.reflector().get_jsobject(),
                                             ));
-                                        }),
-                                    None => Err(Error::InvalidState(None)),
+                                        },
+                                    ),
+                                    None => Err(Error::InvalidState(Some(
+                                        "The getAllRecords request has no source object store"
+                                            .to_owned(),
+                                    ))),
                                 },
                             };
                             if let Err(e) = element {
@@ -669,7 +681,10 @@ impl RequestListener {
                                 &global,
                                 cx,
                                 request,
-                                Error::InvalidState(None),
+                                Error::InvalidState(Some(
+                                    "The index backfill response has no source object store"
+                                        .to_owned(),
+                                )),
                             );
                             return;
                         };
@@ -695,7 +710,9 @@ impl RequestListener {
                             &global,
                             cx,
                             request,
-                            Error::InvalidState(None),
+                            Error::InvalidState(Some(
+                                "IndexedDB returned records for a request that does not read records".to_owned(),
+                            )),
                         );
                         return;
                     },
@@ -916,8 +933,9 @@ impl IDBRequest {
         reflect_dom_object_with_cx(Box::new(IDBRequest::new_inherited()), global, cx)
     }
 
-    pub(crate) fn set_source(&self, source: RequestSource) {
-        *self.source.borrow_mut() = Some(source);
+    pub(crate) fn set_source(&self, source: RootedTraceableBox<RequestSource>) {
+        // Keep the incoming DOM edge rooted until the traced request owns its copy.
+        *self.source.borrow_mut() = Some((*source).clone());
     }
 
     pub fn set_ready_state_done(&self) {
@@ -1054,7 +1072,7 @@ impl IDBRequest {
     pub(crate) fn execute_async_from_source<T, F>(
         cx: &mut JSContext,
         store: &IDBObjectStore,
-        source: RequestSource,
+        source: RootedTraceableBox<RequestSource>,
         context: KvsOperationContext,
         operation_fn: F,
         request: Option<DomRoot<IDBRequest>>,
@@ -1152,60 +1170,12 @@ impl IDBRequest {
         )
     }
 
-    /// `asynchronously execute a request` for an operation that has already failed.
-    ///
-    /// <https://w3c.github.io/IndexedDB/#asynchronously-execute-a-request> runs the operation in
-    /// parallel and reports its failure by firing an error event at the request, so an operation
-    /// that cannot even start still answers asynchronously rather than throwing out of the method
-    /// that created the request. `store a record into an object store` fails this way when the
-    /// store's key generator can no longer produce a key.
-    pub(crate) fn execute_async_failure(
-        cx: &mut JSContext,
-        store: &IDBObjectStore,
-        error: Error,
-    ) -> Fallible<DomRoot<IDBRequest>> {
-        // Step 1. Let transaction be the transaction associated with source.
-        let transaction = store.transaction();
-        let global = transaction.global();
-        // Step 2. Assert: transaction is active.
-        if !transaction.is_active() || !transaction.is_usable() {
-            return Err(Error::TransactionInactive(None));
-        }
-
-        let request_id = transaction.allocate_request_id();
-        // Step 3. Let request be a new request with source as source.
-        let request = IDBRequest::new(cx, &global);
-        request.set_source(RequestSource::ObjectStore(Dom::from_ref(store)));
-        request.set_transaction(&transaction);
-        // Step 4. Add request to the end of transaction's request list.
-        transaction.add_request(&request);
-
-        // Step 5. The answer is already known, so the returning task is queued here instead of
-        // by a backend reply. It still reports the request id as handled, which is what keeps
-        // the transaction's commit bookkeeping in step with the requests script placed.
-        let listener = RequestListener {
-            request: Trusted::new(&request),
-            transaction: Trusted::new(&transaction),
-            records_param: None,
-            request_id,
-            visibility: RequestVisibility::Script,
-        };
-        global.task_manager().database_access_task_source().queue(
-            task!(idb_request_failed: move |cx| {
-                listener.handle_async_request_finished(cx, Ok(IdbResult::Error(error)));
-            }),
-        );
-
-        // Step 6. Return request.
-        Ok(request)
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn execute_async_inner<T, F>(
         cx: &mut JSContext,
         store: &IDBObjectStore,
         store_name: String,
-        source: Option<RequestSource>,
+        source: Option<RootedTraceableBox<RequestSource>>,
         context: KvsOperationContext,
         operation_fn: F,
         request: Option<DomRoot<IDBRequest>>,
@@ -1230,9 +1200,9 @@ impl IDBRequest {
         // Step 3: If request was not given, let request be a new request with source as source.
         let request = request.unwrap_or_else(|| {
             let new_request = IDBRequest::new(cx, &global);
-            new_request.set_source(
-                source.unwrap_or_else(|| RequestSource::ObjectStore(Dom::from_ref(store))),
-            );
+            new_request.set_source(source.unwrap_or_else(|| {
+                RootedTraceableBox::new(RequestSource::ObjectStore(Dom::from_ref(store)))
+            }));
             new_request.set_transaction(&transaction);
             new_request
         });
@@ -1294,13 +1264,15 @@ impl IDBRequest {
                 // No reply channel means no backend reply will ever arrive for a request the
                 // transaction is already counting, and a request that never settles wedges the
                 // transaction's commit bookkeeping. `asynchronously execute a request` reports
-                // an operation that cannot start by answering the request with an error, which
-                // is what `execute_async_failure` does for an already-failed operation.
+                // an operation that cannot start by answering the counted request with an
+                // asynchronous error, preserving the transaction's completion bookkeeping.
                 warn!("Could not create an IndexedDB request callback: {error:?}");
                 unstarted_task_source.queue(task!(idb_request_unstarted: move |cx| {
                     unstarted_listener.handle_async_request_finished(
                         cx,
-                        Ok(IdbResult::Error(Error::Operation(None))),
+                        Ok(IdbResult::Error(Error::Operation(Some(
+                            "The IndexedDB request could not create its response callback".to_owned(),
+                        )))),
                     );
                 }));
                 return Ok(request);
@@ -1321,12 +1293,12 @@ impl IDBRequest {
             AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate { .. })
         );
         match (iterates, records_param.is_some()) {
-            (true, false) => warn!(
-                "Iterate must carry the RecordsParam that names the algorithm reading it"
-            ),
-            (false, true) => warn!(
-                "records_param should not be provided for an operation that reads no records"
-            ),
+            (true, false) => {
+                warn!("Iterate must carry the RecordsParam that names the algorithm reading it")
+            },
+            (false, true) => {
+                warn!("records_param should not be provided for an operation that reads no records")
+            },
             _ => {},
         }
 

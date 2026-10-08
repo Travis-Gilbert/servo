@@ -1069,12 +1069,14 @@ impl GlobalScope {
     /// state and later returns keeps its `LockManager` identity.
     pub(crate) fn release_web_locks(&self) {
         if let Some(client_id) = self.web_lock_client_id.borrow().as_ref() {
-            let _ = self.script_to_constellation_chan().send(
-                ScriptToConstellationMessage::WebLock(WebLockMessage::ClientGone {
-                    origin: self.origin().immutable().clone(),
-                    client_id: client_id.clone(),
-                }),
-            );
+            let _ =
+                self.script_to_constellation_chan()
+                    .send(ScriptToConstellationMessage::WebLock(
+                        WebLockMessage::ClientGone {
+                            origin: self.origin().immutable().clone(),
+                            client_id: client_id.clone(),
+                        },
+                    ));
         }
     }
 

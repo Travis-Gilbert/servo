@@ -115,24 +115,24 @@ impl RequestInterceptor {
                         .typed_try_get::<ContentLength>()
                         .map_err(|_| invalid_response("invalid or conflicting Content-Length"))?
                         .map(|length| length.0);
-                    if length.is_some()
-                        && webresource_response.headers.contains_key(TRANSFER_ENCODING)
+                    if length.is_some() &&
+                        webresource_response.headers.contains_key(TRANSFER_ENCODING)
                     {
                         return Err(invalid_response(
                             "Content-Length conflicts with Transfer-Encoding",
                         ));
                     }
-                    has_body = request.method != Method::HEAD
-                        && !matches!(
+                    has_body = request.method != Method::HEAD &&
+                        !matches!(
                             webresource_response.status_code,
-                            StatusCode::NO_CONTENT
-                                | StatusCode::RESET_CONTENT
-                                | StatusCode::NOT_MODIFIED
+                            StatusCode::NO_CONTENT |
+                                StatusCode::RESET_CONTENT |
+                                StatusCode::NOT_MODIFIED
                         );
-                    if !has_body
-                        && request.method != Method::HEAD
-                        && webresource_response.status_code != StatusCode::NOT_MODIFIED
-                        && length.is_some_and(|length| length != 0)
+                    if !has_body &&
+                        request.method != Method::HEAD &&
+                        webresource_response.status_code != StatusCode::NOT_MODIFIED &&
+                        length.is_some_and(|length| length != 0)
                     {
                         return Err(invalid_response(
                             "bodyless response declares a nonempty body",

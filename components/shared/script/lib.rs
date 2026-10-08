@@ -15,10 +15,10 @@ use crossbeam_channel::RecvTimeoutError;
 use devtools_traits::ScriptToDevtoolsControlMsg;
 use embedder_traits::user_contents::{UserContentManagerId, UserContents};
 use embedder_traits::{
-    JavaScriptEvaluationId, MediaSessionActionType, PaintHitTestResult, ScriptToEmbedderChan,
     DocumentLayoutSnapshot, DocumentLayoutSnapshotError, EmbedderControlId,
-    Theme, ViewportDetails, WebDriverScriptCommand, WebViewPoint,
     EmbedderControlResponse, FocusSequenceNumber, HitTestResult, InputEventAndId,
+    JavaScriptEvaluationId, MediaSessionActionType, PaintHitTestResult, ScriptToEmbedderChan,
+    Theme, ViewportDetails, WebDriverScriptCommand, WebViewPoint,
 };
 use euclid::{Scale, Size2D};
 use fonts_traits::{SystemFontServiceProxySender, WebFontLoadEvent};

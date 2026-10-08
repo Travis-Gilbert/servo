@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use dom_struct::dom_struct;
@@ -32,7 +33,6 @@ use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
-use crate::dom::bindings::trace::HashMapTracedValues;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::lockmanager::lock::Lock;
 use crate::dom::promise::Promise;
@@ -92,12 +92,12 @@ pub(crate) struct LockManager {
     /// The next request id to allocate. Ids are unique per client.
     next_request_id: Cell<u64>,
     #[ignore_malloc_size_of = "promises and callbacks"]
-    pending: DomRefCell<HashMapTracedValues<u64, PendingRequest>>,
+    pending: DomRefCell<HashMap<u64, PendingRequest>>,
     #[ignore_malloc_size_of = "promises"]
-    held: DomRefCell<HashMapTracedValues<u64, HeldLock>>,
+    held: DomRefCell<HashMap<u64, HeldLock>>,
     /// `query()` promises awaiting a snapshot.
     #[ignore_malloc_size_of = "promises"]
-    queries: DomRefCell<HashMapTracedValues<u64, Rc<Promise>>>,
+    queries: DomRefCell<HashMap<u64, Rc<Promise>>>,
     /// Handler of constellation responses, created on first use.
     #[no_trace]
     result_handler: DomRefCell<Option<GenericCallback<WebLockResponse>>>,
@@ -109,15 +109,16 @@ impl LockManager {
             reflector_: Reflector::new(),
             client_id: Uuid::new_v4().simple().to_string(),
             next_request_id: Cell::new(0),
-            pending: DomRefCell::new(HashMapTracedValues::new()),
-            held: DomRefCell::new(HashMapTracedValues::new()),
-            queries: DomRefCell::new(HashMapTracedValues::new()),
+            pending: DomRefCell::new(HashMap::new()),
+            held: DomRefCell::new(HashMap::new()),
+            queries: DomRefCell::new(HashMap::new()),
             result_handler: DomRefCell::new(None),
         }
     }
 
     pub(crate) fn new(cx: &mut JSContext, global: &GlobalScope) -> DomRoot<LockManager> {
-        let manager = reflect_dom_object_with_cx(Box::new(LockManager::new_inherited()), global, cx);
+        let manager =
+            reflect_dom_object_with_cx(Box::new(LockManager::new_inherited()), global, cx);
         global.register_web_lock_client(manager.client_id.clone());
         manager
     }
@@ -193,7 +194,13 @@ impl LockManager {
         // If this's relevant global object's associated Document is not fully
         // active, return a promise rejected with an "InvalidStateError" DOMException.
         if !self.is_fully_active() {
-            promise.reject_error(realm, Error::InvalidState(None));
+            promise.reject_error(
+                realm,
+                Error::InvalidState(Some(
+                    "A lock cannot be requested from a document that is not fully active"
+                        .to_owned(),
+                )),
+            );
             return promise;
         }
 
@@ -204,7 +211,12 @@ impl LockManager {
         // Step 3. If origin is an opaque origin, then return a promise rejected
         // with a "SecurityError" DOMException.
         if !origin.is_tuple() {
-            promise.reject_error(realm, Error::Security(None));
+            promise.reject_error(
+                realm,
+                Error::Security(Some(
+                    "A lock cannot be requested from an opaque origin".to_owned(),
+                )),
+            );
             return promise;
         }
 
@@ -252,8 +264,7 @@ impl LockManager {
             promise.reject_error(
                 realm,
                 Error::NotSupported(Some(
-                    "The 'signal' option cannot be used with 'steal' or 'ifAvailable'."
-                        .to_string(),
+                    "The 'signal' option cannot be used with 'steal' or 'ifAvailable'.".to_string(),
                 )),
             );
             return promise;
@@ -292,7 +303,10 @@ impl LockManager {
             mode: to_web_lock_mode(mode),
             if_available: options.ifAvailable,
             steal: options.steal,
-            pipeline_bound: self.global().downcast::<SharedWorkerGlobalScope>().is_none(),
+            pipeline_bound: self
+                .global()
+                .downcast::<SharedWorkerGlobalScope>()
+                .is_none(),
             result_handler,
         });
         if !sent {
@@ -483,7 +497,13 @@ impl LockManager {
 
     /// <https://w3c.github.io/web-locks/#release-the-lock>, followed by
     /// settling the lock's released promise.
-    fn waiting_promise_settled(&self, cx: &mut CurrentRealm, request_id: u64, fulfilled: bool, value: HandleValue) {
+    fn waiting_promise_settled(
+        &self,
+        cx: &mut CurrentRealm,
+        request_id: u64,
+        fulfilled: bool,
+        value: HandleValue,
+    ) {
         // A stolen lock was already released and its promise rejected.
         let Some(held) = self.held.borrow_mut().remove(&request_id) else {
             return;
@@ -532,7 +552,12 @@ impl LockManagerMethods<crate::DomTypeHolder> for LockManager {
         // If this's relevant global object's associated Document is not fully
         // active, return a promise rejected with an "InvalidStateError" DOMException.
         if !self.is_fully_active() {
-            promise.reject_error(realm, Error::InvalidState(None));
+            promise.reject_error(
+                realm,
+                Error::InvalidState(Some(
+                    "Locks cannot be queried from a document that is not fully active".to_owned(),
+                )),
+            );
             return promise;
         }
 
@@ -541,7 +566,12 @@ impl LockManagerMethods<crate::DomTypeHolder> for LockManager {
         // with a "SecurityError" DOMException.
         let origin = global.origin().immutable().clone();
         if !origin.is_tuple() {
-            promise.reject_error(realm, Error::Security(None));
+            promise.reject_error(
+                realm,
+                Error::Security(Some(
+                    "Locks cannot be queried from an opaque origin".to_owned(),
+                )),
+            );
             return promise;
         }
 
@@ -549,7 +579,9 @@ impl LockManagerMethods<crate::DomTypeHolder> for LockManager {
         // resolve promise with it.
         let request_id = self.allocate_request_id();
         let result_handler = self.get_or_setup_result_handler();
-        self.queries.borrow_mut().insert(request_id, promise.clone());
+        self.queries
+            .borrow_mut()
+            .insert(request_id, promise.clone());
         let sent = self.send(WebLockMessage::Query {
             origin,
             request_id,
