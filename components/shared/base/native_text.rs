@@ -15,6 +15,21 @@ pub struct NativeTextContext {
     pub marked: Option<(u32, u32)>,
     /// Actual focused element bounds in CSS viewport coordinates.
     pub rect: [f64; 4],
+    /// Viewport CSS pixels from actual glyph-selection/caret layout; never element bounds.
+    pub selection_rect: Option<[f64; 4]>,
+}
+impl NativeTextContext {
+    /// Geometry is a layout observation, not an editor identity or edit precondition.
+    /// Native edit chains retain exact document/focus/buffer state while caret paint moves.
+    pub fn same_editor_state(&self, other: &Self) -> bool {
+        self.webview == other.webview
+            && self.document == other.document
+            && self.element == other.element
+            && self.focus_sequence == other.focus_sequence
+            && self.text == other.text
+            && self.selection == other.selection
+            && self.marked == other.marked
+    }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum NativeTextAction {

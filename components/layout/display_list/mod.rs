@@ -248,6 +248,7 @@ impl DisplayListBuilder<'_> {
 
         // Clear any caret color from previous display list constructions.
         builder.paint_info.caret_property_binding = None;
+        builder.paint_info.native_text_rects.clear();
 
         builder.add_all_spatial_nodes();
 
@@ -1352,6 +1353,8 @@ impl Fragment {
             )
             .to_webrender();
 
+            builder.paint_info.native_text_rects.push((selection_rect, state.spatial_id));
+
             let unfocused_color = *UNFOCUSED_SELECTION_COLOR;
             let style_color = fragment.selected_style().clone_background_color();
             let selection_color = if builder.frame_focused {
@@ -1401,6 +1404,8 @@ impl Fragment {
             ),
         )
         .to_webrender();
+
+        builder.paint_info.native_text_rects.push((insertion_point_rect, state.spatial_id));
 
         let color = parent_style.clone_color();
         let caret_color = match parent_style.clone_caret_color().0 {

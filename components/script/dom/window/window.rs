@@ -3255,6 +3255,11 @@ impl Window {
         Some((node, result.1))
     }
 
+    pub(crate) fn native_text_rect_query(&self) -> Option<Rect<Au, CSSPixel>> {
+        self.layout_reflow(QueryMsg::NativeTextGeometry);
+        self.layout().query_native_text_rect()
+    }
+
     pub(crate) fn elements_from_point_query(
         &self,
         flags: HitTestFlags,

@@ -469,6 +469,7 @@ pub trait Layout {
         node: TrustedNodeAddress,
         point_in_viewport: Point2D<Au, CSSPixel>,
     ) -> Option<(OpaqueNode, Utf32CodeUnits)>;
+    fn query_native_text_rect(&self) -> Option<Rect<Au, CSSPixel>>;
     fn hit_test(&self, flags: HitTestFlags, point: LayoutPoint) -> HitTestResult;
     fn query_effective_overflow(&self, node: TrustedNodeAddress) -> Option<AxesOverflow>;
     fn query_document_layout_snapshot(&self) -> Option<DocumentLayoutSnapshotProjection>;
@@ -626,6 +627,7 @@ pub enum QueryMsg {
     ScrollingAreaOrOffsetQuery,
     StyleQuery,
     TextIndexQuery,
+    NativeTextGeometry,
     PaddingQuery,
     FlushForUpdateTheRenderingQuery,
     DocumentLayoutSnapshot,
