@@ -23,7 +23,6 @@ pub trait PreferencesObserver: Send + Sync {
     /// the second component is the new value of the preference.
     fn prefs_changed(&self, _changes: &[(&'static str, PrefValue)]) {}
 }
-
 static OBSERVERS: RwLock<Vec<Box<dyn PreferencesObserver>>> = RwLock::new(Vec::new());
 
 #[inline]
@@ -648,44 +647,20 @@ pub enum UserAgentPlatform {
 }
 
 impl UserAgentPlatform {
-    /// Convert this [`UserAgentPlatform`] into its corresponding `String` value, ie the
-    /// default user-agent to use for this platform.
-    pub fn to_user_agent_string(&self) -> String {
-        const SERVO_VERSION: &str = env!("CARGO_PKG_VERSION");
-        match self {
-            UserAgentPlatform::Desktop
-                if cfg!(all(target_os = "windows", target_arch = "x86_64")) =>
-            {
-                format!(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; {ARCH}; rv:153.0) Servo/{SERVO_VERSION} Firefox/153.0"
-                )
-            },
-            UserAgentPlatform::Desktop if cfg!(target_os = "macos") => {
-                format!(
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:153.0) Servo/{SERVO_VERSION} Firefox/153.0"
-                )
-            },
-            UserAgentPlatform::Desktop => {
-                format!(
-                    "Mozilla/5.0 (X11; Linux {ARCH}; rv:153.0) Servo/{SERVO_VERSION} Firefox/153.0"
-                )
-            },
-            UserAgentPlatform::Android => {
-                format!(
-                    "Mozilla/5.0 (Android 10; Mobile; rv:153.0) Servo/{SERVO_VERSION} Firefox/153.0"
-                )
-            },
-            UserAgentPlatform::OpenHarmony => format!(
-                "Mozilla/5.0 (OpenHarmony; Mobile; rv:153.0) Servo/{SERVO_VERSION} Firefox/153.0"
-            ),
-            UserAgentPlatform::Ios => format!(
-                "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X; rv:153.0) Servo/{SERVO_VERSION} Firefox/153.0"
-            ),
+    /// Return the default `UserAgentPlatform` for this platform. This is
+    /// not an implementation of `Default` so that it can be `const`.
+    pub const fn default() -> Self {
+        if cfg!(target_os = "android") {
+            Self::Android
+        } else if cfg!(target_env = "ohos") {
+            Self::OpenHarmony
+        } else if cfg!(target_os = "ios") {
+            Self::Ios
+        } else {
+            Self::Desktop
         }
     }
-}
 
-impl UserAgentPlatform {
     /// Convert this [`UserAgentPlatform`] into its corresponding `String` value, ie the
     /// default user-agent to use for this platform.
     pub fn to_user_agent_string(&self) -> String {

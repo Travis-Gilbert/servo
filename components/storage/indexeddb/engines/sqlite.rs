@@ -2327,7 +2327,7 @@ mod tests {
         where
             T: for<'de> Deserialize<'de> + Serialize + Send + Sync,
         {
-            GenericCallback::new(ProfilerChan(None), |_| {}).expect("Could not construct callback")
+            GenericCallback::new(|_| {}).expect("Could not construct callback")
         }
 
         fn run(db: &SqliteEngine, serial_number: u64, requests: Vec<KvsOperation>) {
@@ -2403,7 +2403,7 @@ mod tests {
 
         let read = |key: f64| {
             let (tx, rx) = generic_channel::channel().unwrap();
-            let callback = GenericCallback::new(ProfilerChan(None), move |result| {
+            let callback = GenericCallback::new(move |result| {
                 assert!(tx.send(result.unwrap()).is_ok());
             })
             .expect("Could not construct callback");

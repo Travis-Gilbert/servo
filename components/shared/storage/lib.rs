@@ -13,7 +13,7 @@ use crate::cache_storage::{CacheStorageEngineFactory, CacheStorageThreadMessage}
 use crate::client_storage::{
     ClientStorageThreadHandle, ClientStorageThreadMessage, RegistryEngineFactory,
 };
-use crate::indexeddb::{IndexedDBThreadMsg, IndexedDbEngineFactory};
+use crate::indexeddb::{IndexedDBThreadMsg, IndexedDbEngineFactory, SyncOperation};
 use crate::webstorage_thread::{
     OriginDescriptor, WebStorageEngineFactory, WebStorageThreadMsg, WebStorageType,
 };

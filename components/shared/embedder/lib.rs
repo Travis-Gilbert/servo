@@ -1131,6 +1131,7 @@ pub struct DocumentLayoutSnapshotNode {
     pub source: DocumentLayoutSnapshotNodeSource,
 }
 
+#[derive(Default)]
 pub enum DocumentLayoutSnapshotNodeSource {
     /// Ordinary element in the document tree.
     #[default]
@@ -1148,6 +1149,7 @@ pub struct DocumentLayoutViewport {
     pub height: u32,
 }
 
+#[derive(Default)]
 pub enum DocumentLayoutSnapshotSource {
     /// Projected from Servo's live fragment and stacking-context trees.
     #[default]
@@ -1190,6 +1192,7 @@ pub enum HitTestResult {
     /// The webview has no active document or the engine could not answer the query.
     Unavailable,
 }
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct JavaScriptErrorInfo {
     pub message: String,
     pub filename: String,

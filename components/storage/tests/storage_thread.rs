@@ -9,15 +9,15 @@ use std::sync::{Arc, Mutex};
 
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use profile_traits::generic_callback::GenericCallback as ProfiledCallback;
+use profile::mem as profile_mem;
+use servo_base::generic_channel::{self, GenericCallback, GenericSend, ReceiveError};
 use servo_base::id::{BrowsingContextId, Index, PipelineNamespaceId, TEST_WEBVIEW_ID, WebViewId};
 use servo_url::ServoUrl;
 use storage_traits::cache_storage::{
     CacheStorageEngine, CacheStorageEngineFactory, CacheStorageError, CacheStorageThreadMessage,
     CacheStorageThreadResponse,
 };
-use storage_traits::client_storage::{
-    ClientStorageThreadMessage, StorageIdentifier, StorageProxyMap, StorageType,
-};
+use storage_traits::client_storage::{StorageIdentifier, StorageProxyMap, StorageType};
 use storage_traits::indexeddb::{
     BackendResult, ConnectionMsg, CreateObjectResult, IndexedDBDescription, IndexedDBIndex,
     IndexedDBThreadMsg, IndexedDbEngineFactory, KeyPath, KvsEngine, KvsTransaction, SyncOperation,
@@ -57,10 +57,17 @@ fn test_default_cache_storage_engine_supports_all_operations() {
         StorageEngines::default(),
     );
     let origin = ServoUrl::parse("https://example.com").unwrap().origin();
-    let proxy = StorageProxyMap {
-        bottle_id: 77,
-        handle: public_storage_threads.client_storage_handle(),
-    };
+    let proxy = public_storage_threads
+        .client_storage_handle()
+        .obtain_a_storage_bottle_map(
+            StorageType::Local,
+            None,
+            StorageIdentifier::Caches,
+            origin.clone(),
+        )
+        .recv()
+        .expect("no reply to obtain CacheStorage bottle map")
+        .expect("failed to obtain CacheStorage bottle map");
 
     let (callback, receiver) = GenericCallback::new_blocking().unwrap();
     GenericSend::send(
@@ -73,7 +80,9 @@ fn test_default_cache_storage_engine_supports_all_operations() {
         },
     )
     .unwrap();
-    let CacheStorageThreadResponse::HasCacheResult(result) = receiver.recv().unwrap();
+    let CacheStorageThreadResponse::HasCacheResult(result) = receiver.recv().unwrap() else {
+        panic!("expected HasCache response");
+    };
     assert!(!result.unwrap());
 
     let (callback, receiver) = GenericCallback::new_blocking().unwrap();
@@ -105,7 +114,9 @@ fn test_default_cache_storage_engine_supports_all_operations() {
         },
     )
     .unwrap();
-    let CacheStorageThreadResponse::KeysResult(result) = receiver.recv().unwrap();
+    let CacheStorageThreadResponse::KeysResult(result) = receiver.recv().unwrap() else {
+        panic!("expected Keys response");
+    };
     assert!(result.unwrap().is_empty());
 
     let (callback, receiver) = GenericCallback::new_blocking().unwrap();
@@ -119,7 +130,9 @@ fn test_default_cache_storage_engine_supports_all_operations() {
         },
     )
     .unwrap();
-    let CacheStorageThreadResponse::DeleteCacheResult(result) = receiver.recv().unwrap();
+    let CacheStorageThreadResponse::DeleteCacheResult(result) = receiver.recv().unwrap() else {
+        panic!("expected DeleteCache response");
+    };
     assert!(result.unwrap());
 
     let (callback, receiver) = GenericCallback::new_blocking().unwrap();
@@ -133,7 +146,9 @@ fn test_default_cache_storage_engine_supports_all_operations() {
         },
     )
     .unwrap();
-    let CacheStorageThreadResponse::HasCacheResult(result) = receiver.recv().unwrap();
+    let CacheStorageThreadResponse::HasCacheResult(result) = receiver.recv().unwrap() else {
+        panic!("expected HasCache response");
+    };
     assert!(!result.unwrap());
 
     shutdown_storage_group(&private_storage_threads);
@@ -266,7 +281,11 @@ impl WebStorageEngineFactory for RecordingWebStorageFactory {
         origin: &servo_url::ImmutableOrigin,
         _db_dir: Option<PathBuf>,
     ) -> Result<Box<dyn WebStorageEngine>, String> {
-        let context = (storage_type, webview_id, origin.ascii_serialization());
+        let context = (
+            storage_type,
+            webview_id,
+            origin.ascii_serialization().into_owned(),
+        );
         self.opens.lock().unwrap().push(context.clone());
         Ok(Box::new(InMemoryWebStorageEngine {
             values: BTreeMap::new(),
@@ -443,8 +462,12 @@ fn test_default_storage_preserves_profile_and_session_boundaries() {
 }
 
 fn test_group_exit_still_stops_registry_when_indexeddb_has_exited() {
-    let (private, public) =
-        storage::new_storage_threads(profile_mem::Profiler::create(), None, false);
+    let (private, public) = storage::new_storage_threads(
+        profile_mem::Profiler::create(),
+        None,
+        false,
+        StorageEngines::default(),
+    );
     let (sender, receiver) = generic_channel::channel().unwrap();
     GenericSend::send(
         &public,
@@ -504,7 +527,9 @@ fn test_storage_engine_factory_is_selected_end_to_end() {
     )
     .unwrap();
 
-    let CacheStorageThreadResponse::HasCacheResult(result) = receiver.recv().unwrap();
+    let CacheStorageThreadResponse::HasCacheResult(result) = receiver.recv().unwrap() else {
+        panic!("expected HasCache response");
+    };
     assert!(result.unwrap());
 
     let (callback, receiver) = GenericCallback::new_blocking().unwrap();
@@ -536,7 +561,9 @@ fn test_storage_engine_factory_is_selected_end_to_end() {
         },
     )
     .unwrap();
-    let CacheStorageThreadResponse::KeysResult(result) = receiver.recv().unwrap();
+    let CacheStorageThreadResponse::KeysResult(result) = receiver.recv().unwrap() else {
+        panic!("expected Keys response");
+    };
     assert_eq!(result.unwrap(), ["https://example.com/resource"]);
 
     let (callback, receiver) = GenericCallback::new_blocking().unwrap();
@@ -550,7 +577,9 @@ fn test_storage_engine_factory_is_selected_end_to_end() {
         },
     )
     .unwrap();
-    let CacheStorageThreadResponse::DeleteCacheResult(result) = receiver.recv().unwrap();
+    let CacheStorageThreadResponse::DeleteCacheResult(result) = receiver.recv().unwrap() else {
+        panic!("expected DeleteCache response");
+    };
     assert!(result.unwrap());
 
     let other_webview = WebViewId::mock_for_testing(BrowsingContextId {
@@ -799,7 +828,7 @@ impl IndexedDbEngineFactory for RecordingIdbFactory {
     ) -> BackendResult<Box<dyn KvsEngine>> {
         self.opens.lock().unwrap().push((
             description.name.clone(),
-            description.origin.ascii_serialization(),
+            description.origin.ascii_serialization().into_owned(),
             created,
         ));
         Ok(Box::new(RecordingIdbEngine {
@@ -846,10 +875,9 @@ fn test_indexeddb_engine_factory_serves_the_connection() {
     // type from the `servo_base` one the cache storage message above uses and has no blocking
     // constructor, so the reply is handed back over a plain channel.
     let (reply_sender, receiver) = mpsc::channel();
-    let callback =
-        ProfiledCallback::new(profile_time::Profiler::create(&None, None), move |reply| {
-            let _ = reply_sender.send(reply.expect("the open reply did not survive the channel"));
-        })
+    let callback = ProfiledCallback::new(move |reply| {
+        let _ = reply_sender.send(reply.expect("the open reply did not survive the channel"));
+    })
         .expect("failed to build the open callback");
     GenericSend::send(
         &public_storage_threads,
