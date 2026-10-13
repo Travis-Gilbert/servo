@@ -175,41 +175,15 @@ struct HighlightTraversalState {
 }
 
 impl InspectorHighlight {
-    fn register_fragment_of_highlighted_dom_node(
-        &mut self,
-        builder: &DisplayListBuilder,
-        traversal_state: &TraversalState,
-        fragment: &Arc<BoxFragment>,
-    ) {
-        let spatial_id = builder.spatial_id(traversal_state.spatial_id);
-        let clip_chain_id = builder.clip_chain_id(traversal_state.clip_id);
-        let state = self.state.get_or_insert_with(|| HighlightTraversalState {
-            content_box: Rect::zero(),
-            spatial_id,
-            clip_chain_id,
-            maybe_box_fragment: Some(fragment.clone()),
-        });
-
-        // We only need to highlight the first `SpatialId`. Typically this will include the bottommost
-        // fragment for a node, which generally surrounds the entire content.
-        if spatial_id != state.spatial_id {
-            return;
+    fn for_node(node: OpaqueNode) -> Self {
+        Self {
+            tag: Tag {
+                node,
+                // TODO: Support highlighting pseudo-elements.
+                pseudo_element_chain: Default::default(),
+            },
+            state: None,
         }
-
-        if clip_chain_id != ClipChainId::INVALID && state.clip_chain_id != ClipChainId::INVALID {
-            debug_assert_eq!(
-                clip_chain_id, state.clip_chain_id,
-                "Fragments of the same node must either have no clip chain or the same one"
-            );
-        }
-
-        state.maybe_box_fragment = Some(fragment.clone());
-        state.content_box = state.content_box.union(
-            &fragment
-                .base
-                .rect()
-                .translate(traversal_state.origin.to_vector()),
-        );
     }
 }
 

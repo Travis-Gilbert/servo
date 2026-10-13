@@ -41,6 +41,4 @@ pub enum ConstellationToEmbedderMsg {
     /// The history state has changed.
     HistoryChanged(WebViewId, Vec<ServoUrl>, usize),
     RandomPipelineClosure(WebViewId),
-    /// A `WebView` potentially gained focus for keyboard events.
-    /// If the boolean value is false, the `WebView` could not be focused.
 }

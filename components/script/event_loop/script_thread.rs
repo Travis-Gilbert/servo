@@ -84,6 +84,7 @@ use script_traits::{
 };
 use servo_arc::Arc as ServoArc;
 use servo_base::cross_process_instant::CrossProcessInstant;
+use servo_base::generic_channel::{GenericCallback, GenericSender};
 use servo_base::id::{
     BrowsingContextId, HistoryStateId, PipelineId, PipelineNamespace, ScriptEventLoopId, WebViewId,
 };
@@ -791,39 +792,6 @@ impl ScriptThread {
                 found.pipeline_id,
                 None,
             )
-        })
-    }
-
-    /// The worklet will use the given `ImageCache`.
-    pub(crate) fn worklet_thread_pool(image_cache: Arc<dyn ImageCache>) -> Rc<WorkletThreadPool> {
-        with_optional_script_thread(|script_thread| {
-            let script_thread = script_thread.unwrap();
-            script_thread
-                .worklet_thread_pool
-                .borrow_mut()
-                .get_or_insert_with(|| {
-                    let init = WorkletGlobalScopeInit {
-                        to_script_thread_sender: script_thread.senders.self_sender.clone(),
-                        resource_threads: script_thread.resource_threads.clone(),
-                        storage_threads: script_thread.storage_threads.clone(),
-                        mem_profiler_chan: script_thread.senders.memory_profiler_sender.clone(),
-                        time_profiler_chan: script_thread.senders.time_profiler_sender.clone(),
-                        devtools_chan: script_thread.senders.devtools_server_sender.clone(),
-                        script_to_constellation_sender: script_thread
-                            .senders
-                            .pipeline_to_constellation_sender
-                            .clone(),
-                        to_embedder_sender: script_thread
-                            .senders
-                            .pipeline_to_embedder_sender
-                            .clone(),
-                        image_cache,
-                        #[cfg(feature = "webgpu")]
-                        gpu_id_hub: script_thread.gpu_id_hub.clone(),
-                    };
-                    Rc::new(WorkletThreadPool::spawn(init))
-                })
-                .clone()
         })
     }
 

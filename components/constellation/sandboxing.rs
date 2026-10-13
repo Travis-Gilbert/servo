@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::ffi::OsStr;
+use ipc_channel::IpcError;
 use std::{env, process};
 
 #[cfg(any(
@@ -23,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use servo_config::opts::Opts;
 use servo_config::prefs::Preferences;
 
+use crate::process_manager::Process;
 use crate::event_loop::NewScriptEventLoopProcessInfo;
 use crate::serviceworker::ServiceWorkerUnprivilegedContent;
 

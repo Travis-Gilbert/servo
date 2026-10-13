@@ -33,6 +33,7 @@ use servo_constellation_traits::{
 use servo_geometry::DeviceIndependentPixel;
 use servo_url::ServoUrl;
 use style_traits::CSSPixel;
+use servo_base::generic_channel::{GenericCallback, GenericSender};
 use url::Url;
 use webrender_api::units::{DeviceIntRect, DevicePixel, DevicePoint, DeviceSize};
 

@@ -108,13 +108,13 @@ use devtools_traits::{
 use embedder_traits::resources::{self, Resource};
 use embedder_traits::user_contents::{UserContentManagerId, UserContents};
 use embedder_traits::{
+    AnimationState, EmbedderControlId, EmbedderControlResponse, EmbedderProxy, FocusSequenceNumber,
+    GenericEmbedderProxy, InputEvent, InputEventAndId, InputEventOutcome, JSValue,
     JavaScriptEvaluationError, JavaScriptEvaluationId, KeyboardEvent, MediaSessionActionType,
     MediaSessionEvent, MediaSessionPlaybackState, MouseButtonAction, MouseButtonEvent,
     NewWebViewDetails, PaintHitTestResult, Theme, ViewportDetails, WakeLockDelegate, WakeLockType,
-    AnimationState, DocumentLayoutSnapshot, DocumentLayoutSnapshotError, EmbedderControlId,
-    WebDriverCommandMsg, WebDriverLoadStatus, WebDriverScriptCommand, WebViewPoint,
-    HitTestResult, InputEvent, InputEventAndId, InputEventOutcome, JSValue,
-    EmbedderControlResponse, EmbedderProxy, FocusSequenceNumber, GenericEmbedderProxy,
+    WebDriverCommandMsg, WebDriverLoadStatus, WebDriverScriptCommand,
+    DocumentLayoutSnapshot, DocumentLayoutSnapshotError, HitTestResult, WebViewPoint,
 };
 use euclid::default::Size2D as UntypedSize2D;
 use fonts::SystemFontServiceProxy;
@@ -161,17 +161,20 @@ use servo_config::{opts, pref};
 use servo_constellation_traits::{
     AuxiliaryWebViewCreationRequest, AuxiliaryWebViewCreationResponse, ConstellationInterest,
     EmbedderToConstellationMessage, HistoryTraversalSource, IFrameLoadInfo, IFrameLoadInfoWithData,
+    IFrameSizeMsg, LoadData, LogEntry, MessagePortMsg, NavigationHistoryBehavior, PaintMetricEvent,
+    PortMessageTask, PortTransferInfo, RemoteFocusOperation, SWManagerSenders,
+    ScreenshotReadinessResponse, ScriptToConstellationMessage, ScrollStateUpdate,
+    ServiceWorkerAlgorithm, ServiceWorkerManagerFactory, ServiceWorkerMsg,
     SessionHistoryTraversalRequest, StructuredSerializedData, TargetSnapshotParams,
     TraversalDirection, UserContentManagerAction, WindowSizeType, WorkerAnimationFrameTick,
-    NavigationHistoryBehavior, PaintMetricEvent, PortMessageTask, PortTransferInfo,
-    IFrameSizeMsg, LoadData, LoadOrigin, LogEntry, MessagePortMsg, NamedBrowsingContextInfo,
-    RemoteFocusOperation, SWManagerSenders, ScreenshotReadinessResponse,
-    ServiceWorkerManagerFactory, ServiceWorkerMsg, StructuredSerializedData, TargetSnapshotParams,
-    TraversalDirection, UserContentManagerAction, WindowSizeType,
-    ScriptToConstellationMessage, ScrollStateUpdate, ServiceWorkerAlgorithm,
+    LoadOrigin, NamedBrowsingContextInfo,
 };
 use servo_url::{Host, ImmutableOrigin, ServoUrl};
 use storage_traits::StorageThreads;
+use storage_traits::cache_storage::CacheStorageThreadMessage;
+use storage_traits::client_storage::ClientStorageThreadMessage;
+use storage_traits::indexeddb::{IndexedDBThreadMsg, SyncOperation};
+use storage_traits::webstorage_thread::{WebStorageThreadMsg, WebStorageType};
 #[cfg(feature = "webgpu")]
 use webgpu::canvas_context::WebGpuExternalImageMap;
 #[cfg(feature = "webgpu")]
@@ -188,6 +191,7 @@ use crate::event_loop::EventLoop;
 use crate::pipeline::Pipeline;
 use crate::serviceworker::ServiceWorkerUnprivilegedContent;
 use crate::session_history::{NeedsToReload, SessionHistoryChange, SessionHistoryDiff};
+use crate::web_locks::WebLockRegistry;
 
 struct PendingApprovalNavigation {
     load_data: LoadData,
@@ -287,192 +291,241 @@ pub struct Constellation<STF, SWF> {
     /// to facilitate installing pipeline namespaces in threads
     /// via a per-process installer.
     namespace_receiver: RoutedReceiver<PipelineNamespaceRequest>,
+    pub(crate) namespace_ipc_sender: GenericSender<PipelineNamespaceRequest>,
 
-    pub(crate) user_contents_for_manager_id: FxHashMap<UserContentManagerId, UserContents>,
-
+    /// A [`Vec`] of all [`EventLoop`]s that have been created for this [`Constellation`].
+    /// This will be cleaned up periodically. This stores weak references so that [`EventLoop`]s
+    /// can be stopped when they are no longer used.
     event_loops: Vec<Weak<EventLoop>>,
 
     /// An IPC channel for script threads to send messages to the constellation.
     /// This is the script threads' view of `script_receiver`.
+    pub(crate) script_sender: GenericSender<(WebViewId, PipelineId, ScriptToConstellationMessage)>,
 
+    /// A channel for the constellation to receive messages from script threads.
+    /// This is the constellation's view of `script_sender`.
     script_receiver:
         Receiver<Result<(WebViewId, PipelineId, ScriptToConstellationMessage), SendError>>,
 
     /// A handle to register components for hang monitoring.
     /// None when in multiprocess mode.
+    pub(crate) background_monitor_register: Option<Box<dyn BackgroundHangMonitorRegister>>,
 
+    /// In single process mode, a join handle on the BHM worker thread.
     background_monitor_register_join_handle: Option<JoinHandle<()>>,
 
     /// When running in single-process mode, this is a channel to the shared BackgroundHangMonitor
     /// for all [`EventLoop`]s. This will be `None` in multiprocess mode.
-
     background_monitor_control_sender: Option<GenericSender<BackgroundHangMonitorControlMsg>>,
 
     /// A channel for the background hang monitor to send messages
     /// to the constellation.
     #[cfg_attr(not(feature = "multiprocess"), expect(unused))]
+    pub(crate) background_hang_monitor_sender: GenericSender<HangAlert>,
 
+    /// A channel for the constellation to receiver messages
+    /// from the background hang monitor.
     background_hang_monitor_receiver: RoutedReceiver<HangAlert>,
 
     /// A factory for creating layouts. This allows customizing the kind
     /// of layout created for a [`Constellation`] and prevents a circular crate
     /// dependency between script and layout.
+    pub(crate) layout_factory: Arc<dyn LayoutFactory>,
 
+    /// A channel for the embedder (renderer and libservo) to send messages to the [`Constellation`].
     embedder_to_constellation_receiver: Receiver<EmbedderToConstellationMessage>,
 
     /// A channel through which messages can be sent to the embedder. This is not used by the `Constellation`
     /// itself but only needed to create an `EventLoop`.
     /// Messages from the `Constellation` to the embedder are sent using the `constellation_to_embedder_proxy`
+    pub(crate) embedder_proxy: EmbedderProxy,
 
+    /// A channel through which messages can be sent to the embedder.
+    pub(crate) constellation_to_embedder_proxy: GenericEmbedderProxy<ConstellationToEmbedderMsg>,
+
+    /// A channel (the implementation of which is port-specific) for the
+    /// constellation to send messages to `Paint`.
+    pub(crate) paint_proxy: PaintProxy,
+
+    /// Bookkeeping data for all webviews in the constellation.
     webviews: FxHashMap<WebViewId, ConstellationWebView>,
 
     /// Channels for the constellation to send messages to the public
     /// resource-related threads. There are two groups of resource threads: one
     /// for public browsing, and one for private browsing.
+    pub(crate) public_resource_threads: ResourceThreads,
 
+    /// Channels for the constellation to send messages to the private
+    /// resource-related threads.  There are two groups of resource
+    /// threads: one for public browsing, and one for private
+    /// browsing.
+    pub(crate) private_resource_threads: ResourceThreads,
+
+    /// Channels for the constellation to send messages to the public
+    /// storage-related threads. There are two groups of storage threads: one
+    /// for public browsing, and one for private browsing.
+    pub(crate) public_storage_threads: StorageThreads,
+
+    /// Channels for the constellation to send messages to the private
+    /// storage-related threads.  There are two groups of storage
+    /// threads: one for public browsing, and one for private
+    /// browsing.
+    pub(crate) private_storage_threads: StorageThreads,
+
+    /// A channel for the constellation to send messages to the font
+    /// cache thread.
+    pub(crate) system_font_service: Arc<SystemFontServiceProxy>,
+
+    /// A channel for the constellation to send messages to the
+    /// devtools thread.
+    pub(crate) devtools_sender: Option<Sender<DevtoolsControlMsg>>,
+
+    /// A (potentially) IPC-based channel to the developer tools, if enabled. This allows
+    /// `EventLoop`s to send messages to then. Shared with all `EventLoop`s.
     pub script_to_devtools_callback: OnceCell<Option<GenericCallback<ScriptToDevtoolsControlMsg>>>,
 
     /// An IPC channel for the constellation to send messages to the
     /// bluetooth thread.
     #[cfg(feature = "bluetooth")]
+    pub(crate) bluetooth_ipc_sender: GenericSender<BluetoothRequest>,
 
+    /// A map of origin to sender to a Service worker manager.
     sw_managers: HashMap<ImmutableOrigin, GenericSender<ServiceWorkerMsg>>,
 
     /// Every origin's Web Locks queue and held set.
-    /// <https://w3c.github.io/web-locks/#lock-managers>
-
     web_locks: WebLockRegistry,
 
     /// A channel for the constellation to send messages to the
     /// time profiler thread.
+    pub(crate) time_profiler_chan: time::ProfilerChan,
 
+    /// A channel for the constellation to send messages to the
+    /// memory profiler thread.
+    pub(crate) mem_profiler_chan: mem::ProfilerChan,
+
+    /// WebRender related objects required by WebGPU threads
+    #[cfg(feature = "webgpu")]
     webrender_wgpu: WebRenderWGPU,
 
     /// A map of message-port Id to info.
-
     message_ports: FxHashMap<MessagePortId, MessagePortInfo>,
 
     /// A map of router-id to ipc-sender, to route messages to ports.
-
     message_port_routers: FxHashMap<MessagePortRouterId, GenericCallback<MessagePortMsg>>,
 
     /// Bookkeeping for BroadcastChannel functionnality.
-
     broadcast_channels: BroadcastChannels,
 
     /// Tracks which pipelines have registered interest in each notification category.
-
     pipeline_interests: FxHashMap<ConstellationInterest, FxHashSet<PipelineId>>,
 
     /// The set of all the pipelines in the browser.  (See the `pipeline` module
     /// for more details.)
-
     pipelines: FxHashMap<PipelineId, Pipeline>,
 
     worker_animation_frame_providers: FxHashMap<WorkerId, WorkerAnimationFrameProvider>,
 
     /// The set of all the browsing contexts in the browser.
-
     browsing_contexts: FxHashMap<BrowsingContextId, BrowsingContext>,
 
     /// A user agent holds a a set of browsing context groups.
     ///
     /// <https://html.spec.whatwg.org/multipage/#browsing-context-group-set>
-
     browsing_context_group_set: FxHashMap<BrowsingContextGroupId, BrowsingContextGroup>,
 
     /// The Id counter for BrowsingContextGroup.
-
     browsing_context_group_next_id: u32,
 
     /// Pipeline IDs are namespaced in order to avoid name collisions,
     /// and the namespaces are allocated by the constellation.
-
     next_pipeline_namespace_id: Cell<PipelineNamespaceId>,
 
     /// A [`GenericSender`] to notify navigation events to webdriver.
-
     webdriver_load_status_sender: Option<(GenericSender<WebDriverLoadStatus>, PipelineId)>,
 
     /// Are we shutting down?
-
     shutting_down: bool,
 
     /// Have we seen any warnings? Hopefully always empty!
     /// The buffer contains `(thread_name, reason)` entries.
-
     handled_warnings: VecDeque<(Option<String>, String)>,
 
     /// The random number generator and probability for closing pipelines.
     /// This is for testing the hardening of the constellation.
-
     random_pipeline_closure: Option<(SmallRng, f32)>,
 
-    /// Pipelines selected by the random hardening hook. The marker survives
-    /// until their ordinary exit notification reaches the constellation, at
-    /// which point the embedder gets a distinct recovery signal.
-
+    /// Pipelines selected by the random hardening hook, awaiting ordinary exit notification.
     random_pipeline_closures: FxHashSet<PipelineId>,
 
     /// Phantom data that keeps the Rust type system happy.
-
     phantom: PhantomData<(STF, SWF)>,
 
     /// Entry point to create and get channels to a WebGLThread.
     #[cfg(feature = "webgl")]
+    pub(crate) webgl_threads: Option<servo_canvas_traits::webgl::WebGLThreads>,
 
+    /// The XR device registry
+    pub(crate) webxr_registry: Option<webxr_api::Registry>,
+
+    /// Lazily initialized channels for canvas paint thread.
     canvas: OnceCell<(Sender<ConstellationCanvasMsg>, GenericSender<CanvasMsg>)>,
 
     /// Navigation requests from script awaiting approval from the embedder.
-
     pending_approval_navigations: PendingApprovalNavigations,
 
     /// Bitmask which indicates which combination of mouse buttons are
     /// currently being pressed.
-
     pressed_mouse_buttons: MouseButtons,
 
     /// The currently activated keyboard modifiers.
-
     active_keyboard_modifiers: Modifiers,
 
     /// If True, exits on thread failure instead of displaying about:failure
-
     hard_fail: bool,
 
     /// Pipeline ID of the active media session.
-
     active_media_session: Option<PipelineId>,
 
     /// Aggregate screen wake lock count across all webviews. The provider is notified
     /// only when this transitions 0→1 (acquire) or N→0 (release).
-
     screen_wake_lock_count: u32,
 
     /// Provider for OS-level screen wake lock acquisition and release.
-
     wake_lock_provider: Box<dyn WakeLockDelegate>,
 
     /// The image bytes associated with the BrokenImageIcon embedder resource.
     /// Read during startup and provided to image caches that are created
     /// on an as-needed basis, rather than retrieving it every time.
     #[cfg(feature = "multiprocess")]
+    pub(crate) broken_image_icon_data: Vec<u8>,
 
+    /// The process manager.
+    #[cfg(feature = "multiprocess")]
+    pub(crate) process_manager: crate::process_manager::ProcessManager,
+
+    /// The async runtime.
     async_runtime: Box<dyn AsyncRuntime>,
 
     /// A vector of [`JoinHandle`]s used to ensure full termination of threaded [`EventLoop`]s
     /// which are runnning in the same process.
-
     event_loop_join_handles: Vec<JoinHandle<()>>,
 
     /// A list of URLs that can access privileged internal APIs.
+    pub(crate) privileged_urls: Vec<ServoUrl>,
 
+    /// The [`ImageCacheFactory`] to use for all `ScriptThread`s when we are running in
+    /// single-process mode. In multi-process mode, each process will create its own
+    /// [`ImageCacheFactoryImpl`].
+    pub(crate) image_cache_factory: Arc<ImageCacheFactoryImpl>,
 
+    /// A map from `UserContentManagerId` to the `UserContents` for that manager.
+    /// Multiple `WebView`s can share the same `UserContentManager` and any mutations
+    /// to the `UserContents` need to be forwared to all the `ScriptThread`s that host
+    /// the relevant `WebView`.
+    pub(crate) user_contents_for_manager_id: FxHashMap<UserContentManagerId, UserContents>,
+
+    /// Target names awaiting creation of their browsing contexts.
     pending_browsing_context_names: HashMap<BrowsingContextId, String>,
-
-    /// Pending screenshot readiness requests. These are collected until the screenshot is
-    /// ready to take place, at which point the Constellation informs the renderer that it
-    /// can start the process of taking the screenshot.
 }
 
 /// State needed to construct a constellation.
@@ -3706,6 +3759,7 @@ where
             load_data,
             opener_webview_id,
             opener_pipeline_id,
+            noopener,
             response_sender,
         } = load_info;
 

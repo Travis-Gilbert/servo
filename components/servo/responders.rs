@@ -117,23 +117,28 @@ pub(crate) struct AutomaticResponder<T> {
     default_response: Option<T>,
 }
 
-impl<T> AutomaticResponder<T> {
-    pub(crate) fn send(&mut self, response: T) -> SendResult {
-        let result = self.response_sender.send(response);
-        self.response_sent = true;
-        result
+impl<T: Serialize + Send + 'static> AutomaticResponder<T> {
+    pub(crate) fn new(response_sender: GenericSender<T>, default_response: T) -> Self {
+        Self {
+            response_sender: Box::new(response_sender),
+            response_sent: false,
+            default_response: Some(default_response),
+        }
     }
 }
 
-impl<T> AutomaticResponder<T> {
-    pub(crate) fn send(&mut self, response: T) -> SendResult {
-        let result = self.response_sender.send(response);
-        self.response_sent = true;
-        result
+impl<T: Send + 'static> AutomaticResponder<T> {
+    pub(crate) fn new_same_process(
+        response_sender: Box<dyn AbstractSender<Message = T>>,
+        default_response: T,
+    ) -> Self {
+        Self {
+            response_sender,
+            response_sent: false,
+            default_response: Some(default_response),
+        }
     }
-}
 
-impl<T> AutomaticResponder<T> {
     pub(crate) fn send(&mut self, response: T) -> SendResult {
         let result = self.response_sender.send(response);
         self.response_sent = true;

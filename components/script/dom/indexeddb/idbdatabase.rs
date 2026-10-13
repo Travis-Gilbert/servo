@@ -59,6 +59,7 @@ pub(crate) enum UpgradeTransactionClear {
     AlreadyCleared,
 }
 
+#[derive(Debug)]
 pub(crate) enum UpgradeTransactionClearError {
     Missing {
         requested: u64,
@@ -200,7 +201,7 @@ impl IDBDatabase {
             requested,
         );
 
-        match result {
+        match &result {
             Ok(UpgradeTransactionClear::Cleared) => {
                 self.upgrade_transaction.set(None);
                 self.last_cleared_upgrade_transaction.set(Some(requested));

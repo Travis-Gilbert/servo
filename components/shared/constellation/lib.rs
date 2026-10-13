@@ -17,9 +17,6 @@ use std::fmt;
 use accesskit::ActionRequest;
 use embedder_traits::user_contents::{
     UserContentManagerId, UserScript, UserScriptId, UserStyleSheet, UserStyleSheetId,
-    ViewportDetails, WebDriverCommandMsg, WebViewPoint,
-    DocumentLayoutSnapshot, DocumentLayoutSnapshotError, EmbedderControlId,
-    EmbedderControlResponse, HitTestResult, InputEventAndId, JavaScriptEvaluationId,
 };
 use embedder_traits::{
     MediaSessionActionType, NewWebViewDetails, PaintHitTestResult, Theme, TraversalId, UrlRequest,

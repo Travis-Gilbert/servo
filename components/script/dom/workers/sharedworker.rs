@@ -17,6 +17,7 @@ use net_traits::pub_domains::reg_suffix;
 use net_traits::request::{CredentialsMode, Referrer};
 use script_bindings::reflector::reflect_dom_object_with_proto;
 use servo_base::generic_channel;
+use servo_base::id::PipelineId;
 use servo_constellation_traits::{MessagePortImpl, WorkerScriptLoadOrigin};
 use servo_url::{Host, ImmutableOrigin, ServoUrl};
 use uuid::Uuid;
@@ -152,6 +153,7 @@ impl SharedWorkerRegistryEntry {
         }
     }
 }
+#[derive(Clone)]
 struct SharedWorkerRegistration {
     id: Uuid,
     worker_type: WorkerType,

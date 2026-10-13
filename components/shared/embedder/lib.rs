@@ -1053,6 +1053,7 @@ pub enum JSValue {
     Object(HashMap<String, JSValue>),
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct DocumentLayoutRect {
     /// Horizontal coordinate in the document coordinate space.
     pub x: i32,
@@ -1064,6 +1065,7 @@ pub struct DocumentLayoutRect {
     pub height: i32,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct DocumentLayoutComputedStyle {
     /// Computed `display` value.
     pub display: Option<String>,
@@ -1087,6 +1089,7 @@ pub struct DocumentLayoutComputedStyle {
     pub font_size: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct DocumentLayoutSnapshotNode {
     /// Document-stable, non-pointer element handle.
     pub handle: String,
@@ -1131,7 +1134,7 @@ pub struct DocumentLayoutSnapshotNode {
     pub source: DocumentLayoutSnapshotNodeSource,
 }
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub enum DocumentLayoutSnapshotNodeSource {
     /// Ordinary element in the document tree.
     #[default]
@@ -1142,6 +1145,7 @@ pub enum DocumentLayoutSnapshotNodeSource {
     CanvasFallback,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct DocumentLayoutViewport {
     /// Physical viewport width.
     pub width: u32,
@@ -1149,13 +1153,14 @@ pub struct DocumentLayoutViewport {
     pub height: u32,
 }
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub enum DocumentLayoutSnapshotSource {
     /// Projected from Servo's live fragment and stacking-context trees.
     #[default]
     FragmentTree,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct DocumentLayoutSnapshot {
     /// Active document URL.
     pub url: String,
@@ -1171,6 +1176,7 @@ pub struct DocumentLayoutSnapshot {
     pub source: DocumentLayoutSnapshotSource,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub enum DocumentLayoutSnapshotError {
     /// The requested webview does not currently have an active document.
     WebViewNotReady,
@@ -1180,6 +1186,7 @@ pub enum DocumentLayoutSnapshotError {
     InternalError,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum HitTestResult {
     /// The topmost event-receiving element at the point, as its document-stable handle.
     Handle(String),

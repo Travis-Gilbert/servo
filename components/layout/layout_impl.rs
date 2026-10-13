@@ -85,6 +85,10 @@ use webrender_api::units::{DevicePixel, LayoutVector2D};
 
 use crate::accessibility::{AccessibilityContext, AccessibilityDamageMap, AccessibilityTree};
 use crate::context::{CachedImageOrError, ImageResolver, LayoutContext};
+use crate::display_list::{
+    DisplayListBuilder, HitTest, PaintTimingHandler, StackingContextTree,
+    build_document_layout_snapshot_projection,
+};
 use crate::dom::NodeExt;
 use crate::query::{
     BoxAreaInclusion, find_character_offset_in_fragment_descendants, get_the_text_steps,
@@ -986,48 +990,74 @@ impl LayoutThread {
         rooted_nodes: Option<FxHashSet<OpaqueNode>>,
         pending_accessibility_actions: &mut Vec<AccessibilityActionRequest>,
         reflow_statistics: &mut ReflowStatistics,
-
     ) -> bool {
-        let mut stacking_context_tree = self.stacking_context_tree.borrow_mut();
-        let Some(stacking_context_tree) = stacking_context_tree.as_mut() else {
+        let Some(damage) = accessibility_damage else {
+            return false;
+        };
+        if !self.needs_accessibility_update() && damage.is_empty() {
+            return false;
+        }
+
+        let mut accessibility_tree = self.accessibility_tree.borrow_mut();
+        let Some(accessibility_tree) = accessibility_tree.as_mut() else {
             return false;
         };
 
-        if let Some(offset) = stacking_context_tree
-            .paint_info
-            .scroll_tree
-            .set_scroll_offset_for_node_with_external_scroll_id(
-                external_scroll_id,
-                offset,
-                ScrollType::Script,
-            )
-        {
-            self.paint_api.scroll_node_by_delta(
-                self.webview_id,
-                self.id.into(),
-                offset,
-                external_scroll_id,
-            );
+        let accessibility_tree = &mut *accessibility_tree;
 
-            if self.accessibility_active() &&
-                let Some(accessibility_tree) = self.accessibility_tree.borrow_mut().as_mut()
-            {
-                accessibility_tree.add_pending_scroll_update(external_scroll_id, offset);
+        // Check for the stacking context tree before draining any state out of `reflow_request`, so
+        // that we don't discard accessibility damage if it is missing. In practice it is always
+        // present here, since we only reach this method for an `UpdateTheRendering` reflow.
+        let stacking_context_tree = self.stacking_context_tree.borrow();
+        let Some(stacking_context_tree) = stacking_context_tree.as_ref() else {
+            return false;
+        };
+        debug_assert!(!self.need_new_stacking_context_tree.get());
 
-                // Ensure the scroll updates are applied in the accessibility tree and sent to the
-                // embedder, even if there are no other changes which affect the accessibility tree.
-                self.set_force_accessibility_update();
-            }
-            true
-        } else {
-            false
+        let accessibility_context = AccessibilityContext {
+            layout_thread: self,
+            stacking_context_tree,
+        };
+
+        let action_requests = self.pending_accessibility_actions.take();
+
+        let (tree_update, counters) = accessibility_tree.update_tree(
+            root_element,
+            damage,
+            action_requests,
+            accessibility_context,
+            rooted_nodes,
+        );
+        if let Some(tree_update) = tree_update {
+            // FIXME: Handle send error. Could have a method on accessibility tree to
+            // finalise after sending, removing accessibility damage? On fail, retain damage
+            // for next reflow, as well as retaining document.needs_accessibility_update.
+            let _ = self
+                .embedder_chan
+                .send(EmbedderMsg::AccessibilityTreeUpdate(
+                    self.webview_id,
+                    tree_update,
+                    accessibility_tree.embedder_epoch(),
+                ));
         }
+
+        reflow_statistics.nodes_updated_from_dom = counters.nodes_updated_from_dom;
+        reflow_statistics.nodes_updated_from_tree = counters.nodes_updated_from_tree;
+        reflow_statistics.nodes_updated_bounds = counters.nodes_updated_bounds;
+        reflow_statistics.nodes_in_tree_update = counters.nodes_in_tree_update;
+
+        self.force_accessibility_update.set(false);
+
+        *pending_accessibility_actions = accessibility_tree.take_pending_actions();
+
+        true
     }
 
-    /// Returns profiling information which is passed to the time profiler.
-
+    /// The high-level routine that performs layout.
+    #[servo_tracing::instrument(
+        skip_all,
+        fields(goal = tracing::field::debug(&reflow_request.reflow_goal))
     )]
-
     fn handle_reflow(&mut self, mut reflow_request: ReflowRequest) -> Option<ReflowResult> {
         self.maybe_print_reflow_event(&reflow_request);
 
@@ -1511,18 +1541,138 @@ impl LayoutThread {
     /// Build the display list for the current layout and send it to the renderer. If no display
     /// list is built, returns false.
     #[servo_tracing::instrument(name = "Display List Construction", skip_all)]
-
     fn build_display_list(
         &self,
         reflow_request: &ReflowRequest,
         image_resolver: &Arc<ImageResolver>,
         reflow_statistics: &mut ReflowStatistics,
+    ) -> bool {
+        if !ReflowPhases::necessary(&reflow_request.reflow_goal)
+            .contains(ReflowPhases::DisplayListConstruction)
+        {
+            return false;
+        }
+        let Some(fragment_tree) = &*self.fragment_tree.borrow() else {
+            return false;
+        };
+        let mut stacking_context_tree = self.stacking_context_tree.borrow_mut();
+        let Some(stacking_context_tree) = stacking_context_tree.as_mut() else {
+            return false;
+        };
+
+        // If a non-display-list-generating reflow updated layout in a previous refow, we
+        // cannot skip display list generation here the next time a display list is
+        // requested.
+        if !self.need_new_display_list.get() {
+            return false;
+        }
+
+        // TODO: Eventually this should be set when `paint_info` is created, but that requires
+        // ensuring that the Epoch is passed to any method that can creates `StackingContextTree`.
+        stacking_context_tree.paint_info.epoch = reflow_request.epoch;
+
+        let mut paint_timing_handler = self.paint_timing_handler.borrow_mut();
+        // This ensures that we only create the PaintTimingHandler once per layout thread.
+        let paint_timing_handler = match paint_timing_handler.as_mut() {
+            Some(paint_timing_handler) => paint_timing_handler,
+            None => {
+                *paint_timing_handler = Some(PaintTimingHandler::new(
+                    stacking_context_tree
+                        .paint_info
+                        .viewport_details
+                        .layout_size(),
+                ));
+                paint_timing_handler.as_mut().unwrap()
+            },
+        };
+
+        let built_display_list = DisplayListBuilder::build(
+            stacking_context_tree,
+            fragment_tree,
+            image_resolver.clone(),
+            self.device().device_pixel_ratio(),
+            reflow_request.highlighted_dom_node,
+            &self.debug,
+            paint_timing_handler,
+            reflow_statistics,
+            reflow_request.frame_focused,
+        );
+
+        stacking_context_tree.paint_info.paint_timing_info = reflow_request.paint_timing_info;
+        stacking_context_tree.paint_info.paint_timing_report = paint_timing_handler
+            .mark_paint_timing(
+                reflow_request.paint_timing_eligible,
+                reflow_request.halt_lcp,
+            );
+
+        if let Some(lcp_candidate) = paint_timing_handler.largest_contentful_paint_candidate() {
+            stacking_context_tree.paint_info.lcp_candidate =
+                Some((lcp_candidate.id, lcp_candidate.area));
+        } else {
+            stacking_context_tree.paint_info.lcp_candidate = None;
+        }
+
+        self.paint_api.send_display_list(
+            self.webview_id,
+            &stacking_context_tree.paint_info,
+            built_display_list,
+        );
+
+        let (keys, instance_keys) = self
+            .font_context
+            .collect_unused_webrender_resources(false /* all */);
+        self.paint_api
+            .remove_unused_font_resources(self.webview_id.into(), keys, instance_keys);
+        self.last_display_list_was_empty.set(false);
+        self.have_ever_generated_display_list.set(true);
+        self.need_new_display_list.set(false);
+        self.previously_highlighted_dom_node
+            .set(reflow_request.highlighted_dom_node);
+        true
+    }
 
     fn set_scroll_offset_from_script(
         &self,
         external_scroll_id: ExternalScrollId,
         offset: LayoutVector2D,
+    ) -> bool {
+        let mut stacking_context_tree = self.stacking_context_tree.borrow_mut();
+        let Some(stacking_context_tree) = stacking_context_tree.as_mut() else {
+            return false;
+        };
 
+        if let Some(offset) = stacking_context_tree
+            .paint_info
+            .scroll_tree
+            .set_scroll_offset_for_node_with_external_scroll_id(
+                external_scroll_id,
+                offset,
+                ScrollType::Script,
+            )
+        {
+            self.paint_api.scroll_node_by_delta(
+                self.webview_id,
+                self.id.into(),
+                offset,
+                external_scroll_id,
+            );
+
+            if self.accessibility_active() &&
+                let Some(accessibility_tree) = self.accessibility_tree.borrow_mut().as_mut()
+            {
+                accessibility_tree.add_pending_scroll_update(external_scroll_id, offset);
+
+                // Ensure the scroll updates are applied in the accessibility tree and sent to the
+                // embedder, even if there are no other changes which affect the accessibility tree.
+                self.set_force_accessibility_update();
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns profiling information which is passed to the time profiler.
     fn profiler_metadata(&self) -> Option<TimerMetadata> {
         Some(TimerMetadata {
             url: self.url.to_string(),

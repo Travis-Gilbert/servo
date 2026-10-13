@@ -17,8 +17,8 @@ use crate::dom::lockmanager::LockManager;
 use crate::dom::navigator::hardware_concurrency;
 use crate::dom::navigatorinfo;
 use crate::dom::permissions::Permissions;
+use crate::dom::storage::storagemanager::StorageManager;
 #[cfg(feature = "webgpu")]
-use crate::dom::storagemanager::StorageManager;
 use crate::dom::webgpu::gpu::GPU;
 use crate::dom::workerglobalscope::WorkerGlobalScope;
 

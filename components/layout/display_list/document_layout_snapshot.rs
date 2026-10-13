@@ -62,11 +62,10 @@ fn collect_fragment(
         return;
     }
 
+    let Some(computed) = computed_style_for_fragment(fragment) else {
+        return;
+    };
     let index = *node_indices.entry(tag.node).or_insert_with(|| {
-        let computed = fragment
-            .base()
-            .map(|base| computed_style(&base.style()))
-            .unwrap_or_default();
         let index = nodes.len();
         nodes.push(DocumentLayoutSnapshotProjectionNode {
             node: tag.node.into(),
@@ -75,7 +74,7 @@ fn collect_fragment(
             scroll_rect: None,
             paint_order: None,
             stacking_context: None,
-            computed,
+            computed: computed.clone(),
             visible: false,
             scrollable: false,
         });
@@ -122,6 +121,25 @@ fn collect_fragment(
     };
     if !node.scrollable {
         node.scroll_rect = None;
+    }
+}
+
+fn computed_style_for_fragment(
+    fragment: &Fragment,
+) -> Option<DocumentLayoutSnapshotComputedStyle> {
+    match fragment {
+        Fragment::LayoutRoot(fragment) => {
+            let inner_box_fragment = fragment.inner_box_fragment();
+            Some(computed_style(&inner_box_fragment.style()))
+        },
+        Fragment::Box(fragment) | Fragment::Float(fragment) => {
+            Some(computed_style(&fragment.style()))
+        },
+        Fragment::Text(fragment) => Some(computed_style(&fragment.style())),
+        Fragment::AbsoluteOrFixedPositionedPlaceholder(_) => None,
+        Fragment::Positioning(fragment) => Some(computed_style(&fragment.style.borrow())),
+        Fragment::Image(fragment) => Some(computed_style(&fragment.style.borrow())),
+        Fragment::IFrame(fragment) => Some(computed_style(&fragment.style.borrow())),
     }
 }
 

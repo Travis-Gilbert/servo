@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::{io, mem, str};
 
 use base64::Engine as _;

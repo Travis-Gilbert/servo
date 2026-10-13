@@ -11,12 +11,15 @@ use js::conversions::{ToJSValConvertible, jsstr_to_string};
 use js::jsapi::{
     ClippedTime, IsArrayBufferObject, IsDetachedArrayBufferObject, JS_GetArrayBufferViewBuffer,
     JS_GetStringLength, JS_IsArrayBufferViewObject, NewArrayObject1, PropertyKey,
+    JSPROP_ENUMERATE,
 };
 use js::jsval::{DoubleValue, ObjectValue, UndefinedValue};
 use js::rust::wrappers2::{
-    GetArrayLength, IsArrayObject, JS_HasOwnPropertyById, JS_IndexToId, JS_IsIdentifier,
-    JS_NewObject, NewDateObject, ObjectIsDate, SameValue,
+    GetArrayLength, IsArrayObject, JS_DefinePropertyById2, JS_GetPropertyById,
+    JS_HasOwnPropertyById, JS_IndexToId, JS_IsIdentifier, JS_NewObject, JS_StringToId,
+    NewDateObject, ObjectIsDate, SameValue,
 };
+use js::rust::{HandleId, HandleObject, HandleValue, MutableHandleId, MutableHandleValue};
 use js::typedarray::{ArrayBuffer, ArrayBufferU8, ArrayBufferView};
 use servo_base::generic_channel::SendError;
 use storage_traits::indexeddb::{BackendError, IndexedDBKeyRange, IndexedDBKeyType};
@@ -28,6 +31,7 @@ use crate::dom::bindings::codegen::UnionTypes::StringOrStringSequence as StrOrSt
 use crate::dom::bindings::conversions::{get_property_jsval, root_from_handlevalue};
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::str::DOMString;
+use crate::dom::bindings::utils::define_dictionary_property;
 use crate::dom::blob::Blob;
 use crate::dom::file::File;
 use crate::dom::idbkeyrange::IDBKeyRange;
@@ -545,56 +549,65 @@ pub(crate) enum EvaluationResult {
     Failure,
 }
 
+#[expect(unsafe_code)]
 fn key_path_identifier_key(
     cx: &mut JSContext,
     identifier: &str,
     id: MutableHandleId,
 ) -> Result<(), Error> {
     rooted!(&in(cx) let mut value = UndefinedValue());
-    identifier.safe_to_jsval(cx, value.handle_mut());
+    identifier.to_jsval(cx, value.handle_mut());
     rooted!(&in(cx) let string = value.to_string());
 
-    if unsafe { !JS_StringToId(cx, string.handle(), id) } {
+    // SAFETY: Both the source string and destination id are rooted handles in this realm.
+    if !unsafe { JS_StringToId(cx, string.handle(), id) } {
         return Err(Error::JSFailed);
     }
     Ok(())
 }
 
+#[expect(unsafe_code)]
 fn has_own_property_by_id(
     cx: &mut JSContext,
     object: HandleObject,
     id: HandleId,
 ) -> Result<bool, Error> {
     let mut found = false;
-    if unsafe { !JS_HasOwnPropertyById(cx, object, id, &mut found) } {
+    // SAFETY: The object and property key are rooted handles for this realm.
+    if !unsafe { JS_HasOwnPropertyById(cx, object, id, &mut found) } {
         return Err(Error::JSFailed);
     }
     Ok(found)
 }
 
+#[expect(unsafe_code)]
 fn get_property_by_id(
     cx: &mut JSContext,
     object: HandleObject,
     id: HandleId,
     rval: MutableHandleValue,
 ) -> Result<(), Error> {
-    if unsafe { !JS_GetPropertyById(cx, object, id, rval) } {
+    // SAFETY: The object, key and result are rooted handles for this realm.
+    if !unsafe { JS_GetPropertyById(cx, object, id, rval) } {
         return Err(Error::JSFailed);
     }
     Ok(())
 }
 
+#[expect(unsafe_code)]
 fn define_property_by_id(
     cx: &mut JSContext,
     object: HandleObject,
     id: HandleId,
     value: HandleValue,
 ) -> Result<(), Error> {
-    if unsafe { !JS_DefinePropertyById2(cx, object, id, value, JSPROP_ENUMERATE as u32) } {
+    // SAFETY: The object, key and value are rooted handles for this realm.
+    if !unsafe { JS_DefinePropertyById2(cx, object, id, value, JSPROP_ENUMERATE as u32) } {
         return Err(Error::JSFailed);
     }
     Ok(())
 }
+#[expect(unsafe_code)]
 pub(crate) fn evaluate_key_path_on_value(
     cx: &mut JSContext,
     value: HandleValue,

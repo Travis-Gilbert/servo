@@ -4,7 +4,6 @@
 
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::rc::Rc;
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
@@ -13,6 +12,7 @@ use js::realm::CurrentRealm;
 use js::rust::HandleValue;
 use js::rust::wrappers2::{JS_ClearPendingException, JS_GetPendingException};
 use script_bindings::cell::DomRefCell;
+use script_bindings::callback::{RootedCallback, TracedCallback};
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 use servo_base::generic_channel::GenericCallback;
 use servo_constellation_traits::{
@@ -35,7 +35,7 @@ use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::lockmanager::lock::Lock;
-use crate::dom::promise::Promise;
+use crate::dom::promise::{Promise, RootedPromise, TracedPromise};
 use crate::dom::promisenativehandler::{Callback, PromiseNativeHandler};
 use crate::dom::sharedworkerglobalscope::SharedWorkerGlobalScope;
 use crate::dom::window::Window;
@@ -47,11 +47,11 @@ use crate::realms::enter_auto_realm;
 #[derive(JSTraceable, MallocSizeOf)]
 struct PendingRequest {
     /// The promise `request()` returned.
-    #[conditional_malloc_size_of]
-    promise: Rc<Promise>,
+    #[ignore_malloc_size_of = "promise is traced separately"]
+    promise: TracedPromise,
     /// <https://w3c.github.io/web-locks/#lock-request-callback>
-    #[conditional_malloc_size_of]
-    callback: Rc<LockGrantedCallback>,
+    #[ignore_malloc_size_of = "callback is traced separately"]
+    callback: TracedCallback<LockGrantedCallback>,
     name: DOMString,
     mode: LockMode,
 }
@@ -61,8 +61,8 @@ struct PendingRequest {
 #[derive(JSTraceable, MallocSizeOf)]
 struct HeldLock {
     /// <https://w3c.github.io/web-locks/#lock-released-promise>
-    #[conditional_malloc_size_of]
-    promise: Rc<Promise>,
+    #[ignore_malloc_size_of = "promise is traced separately"]
+    promise: TracedPromise,
 }
 
 /// The abort algorithm `request()` adds to its `signal`.
@@ -97,7 +97,7 @@ pub(crate) struct LockManager {
     held: DomRefCell<HashMap<u64, HeldLock>>,
     /// `query()` promises awaiting a snapshot.
     #[ignore_malloc_size_of = "promises"]
-    queries: DomRefCell<HashMap<u64, Rc<Promise>>>,
+    queries: DomRefCell<HashMap<u64, TracedPromise>>,
     /// Handler of constellation responses, created on first use.
     #[no_trace]
     result_handler: DomRefCell<Option<GenericCallback<WebLockResponse>>>,
@@ -186,8 +186,8 @@ impl LockManager {
         realm: &mut CurrentRealm,
         name: DOMString,
         options: &LockOptions,
-        callback: Rc<LockGrantedCallback>,
-    ) -> Rc<Promise> {
+        callback: RootedCallback<LockGrantedCallback>,
+    ) -> RootedPromise {
         let global = self.global();
         let promise = Promise::new_in_realm(realm);
 
@@ -289,8 +289,8 @@ impl LockManager {
         self.pending.borrow_mut().insert(
             request_id,
             PendingRequest {
-                promise: promise.clone(),
-                callback,
+                promise: promise.to_traced(),
+                callback: callback.to_traced(),
                 name: name.clone(),
                 mode,
             },
@@ -339,6 +339,7 @@ impl LockManager {
         let Some(request) = self.pending.borrow_mut().remove(&request_id) else {
             return;
         };
+        let promise = request.promise.root(cx);
         // Step 1. Remove request from queue, and process the lock request queue.
         self.send(WebLockMessage::Abort {
             origin: self.global().origin().immutable().clone(),
@@ -346,7 +347,7 @@ impl LockManager {
             request_id,
         });
         // Step 2. Reject promise with signal's abort reason.
-        request.promise.reject(cx, reason);
+        promise.reject(cx, reason);
     }
 
     fn handle_response(&self, cx: &mut JSContext, response: WebLockResponse) {
@@ -383,7 +384,7 @@ impl LockManager {
         self.held.borrow_mut().insert(
             request_id,
             HeldLock {
-                promise: request.promise,
+                promise: request.promise.clone(),
             },
         );
         let lock = Lock::new(cx, &global, request.name, request.mode);
@@ -409,8 +410,9 @@ impl LockManager {
         // Step 6.1.1. Let r be the result of invoking callback with null as
         // the only argument. If an exception was thrown, reject promise with
         // the exception; otherwise resolve promise with r.
+        let promise = request.promise.root(cx);
         let result = self.invoke_callback(cx, &global, &request.callback, None);
-        request.promise.resolve_native(cx, &result);
+        promise.resolve_native(cx, &result);
     }
 
     /// Step 5.1 of <https://w3c.github.io/web-locks/#request-a-lock>: another
@@ -420,7 +422,8 @@ impl LockManager {
         let Some(held) = self.held.borrow_mut().remove(&request_id) else {
             return;
         };
-        held.promise.reject_error(
+        let promise = held.promise.root(cx);
+        promise.reject_error(
             cx,
             Error::Abort(Some("The lock was stolen by another request.".to_string())),
         );
@@ -437,6 +440,7 @@ impl LockManager {
         let Some(promise) = self.queries.borrow_mut().remove(&request_id) else {
             return;
         };
+        let promise = promise.root(cx);
         let snapshot = LockManagerSnapshot {
             held: Some(held.into_iter().map(to_lock_info).collect()),
             pending: Some(pending.into_iter().map(to_lock_info).collect()),
@@ -450,10 +454,10 @@ impl LockManager {
         &self,
         cx: &mut JSContext,
         global: &GlobalScope,
-        callback: &LockGrantedCallback,
+        callback: &TracedCallback<LockGrantedCallback>,
         lock: Option<&Lock>,
-    ) -> Rc<Promise> {
-        match callback.Call__(cx, lock, ExceptionHandling::Rethrow) {
+    ) -> RootedPromise {
+        match callback.root(cx).Call__(cx, lock, ExceptionHandling::Rethrow) {
             Ok(promise) => promise,
             Err(_) => {
                 rooted!(&in(cx) let mut exception = UndefinedValue());
@@ -471,7 +475,7 @@ impl LockManager {
         &self,
         cx: &mut JSContext,
         global: &GlobalScope,
-        waiting: &Rc<Promise>,
+        waiting: &RootedPromise,
         request_id: u64,
     ) {
         rooted!(&in(cx) let mut fulfillment_handler = Some(WaitingPromiseSettledHandler {
@@ -508,15 +512,16 @@ impl LockManager {
         let Some(held) = self.held.borrow_mut().remove(&request_id) else {
             return;
         };
+        let promise = held.promise.root(cx);
         self.send(WebLockMessage::Release {
             origin: self.global().origin().immutable().clone(),
             client_id: self.client_id.clone(),
             request_id,
         });
         if fulfilled {
-            held.promise.resolve_native(cx, &value);
+            promise.resolve_native(cx, &value);
         } else {
-            held.promise.reject_native(cx, &value);
+            promise.reject_native(cx, &value);
         }
     }
 }
@@ -527,8 +532,8 @@ impl LockManagerMethods<crate::DomTypeHolder> for LockManager {
         &self,
         realm: &mut CurrentRealm,
         name: DOMString,
-        callback: Rc<LockGrantedCallback>,
-    ) -> Rc<Promise> {
+        callback: RootedCallback<LockGrantedCallback>,
+    ) -> RootedPromise {
         self.request_with_options(realm, name, &LockOptions::empty(), callback)
     }
 
@@ -538,13 +543,13 @@ impl LockManagerMethods<crate::DomTypeHolder> for LockManager {
         realm: &mut CurrentRealm,
         name: DOMString,
         options: &LockOptions,
-        callback: Rc<LockGrantedCallback>,
-    ) -> Rc<Promise> {
+        callback: RootedCallback<LockGrantedCallback>,
+    ) -> RootedPromise {
         self.request_with_options(realm, name, options, callback)
     }
 
     /// <https://w3c.github.io/web-locks/#dom-lockmanager-query>
-    fn Query(&self, realm: &mut CurrentRealm) -> Rc<Promise> {
+    fn Query(&self, realm: &mut CurrentRealm) -> RootedPromise {
         let global = self.global();
         // Step 3. Let promise be a new promise.
         let promise = Promise::new_in_realm(realm);
@@ -581,7 +586,7 @@ impl LockManagerMethods<crate::DomTypeHolder> for LockManager {
         let result_handler = self.get_or_setup_result_handler();
         self.queries
             .borrow_mut()
-            .insert(request_id, promise.clone());
+            .insert(request_id, promise.to_traced());
         let sent = self.send(WebLockMessage::Query {
             origin,
             request_id,

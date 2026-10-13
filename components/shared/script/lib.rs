@@ -21,7 +21,7 @@ use embedder_traits::{
     JavaScriptEvaluationId, MediaSessionActionType, MouseButton, PaintHitTestResult,
     ScriptToEmbedderChan, Theme, ViewportDetails, WebDriverScriptCommand,
     EmbedderControlResponse, FocusSequenceNumber, HitTestResult, InputEventAndId,
-    Theme, ViewportDetails, WebDriverScriptCommand, WebViewPoint,
+    WebViewPoint,
     DocumentLayoutSnapshot, DocumentLayoutSnapshotError, EmbedderControlId,
 };
 use euclid::{Scale, Size2D};

@@ -54,7 +54,7 @@ use script::JSEngineSetup;
 use script::ServiceWorkerManager;
 #[cfg(feature = "multiprocess")]
 use servo_background_hang_monitor::HangMonitorRegister;
-use servo_base::generic_channel::{GenericCallback, GenericSender, RoutedReceiver, SendError};
+use servo_base::generic_channel::{GenericCallback, RoutedReceiver, SendError};
 pub use servo_base::id::WebViewId;
 use servo_base::id::{EMBEDDER_PIPELINE_NAMESPACE_ID, PipelineNamespace};
 #[cfg(feature = "bluetooth")]
@@ -93,6 +93,7 @@ use servo_media::ServoMedia;
 use servo_media::player::context::GlContext;
 use servo_wakelock::DefaultWakeLockDelegate;
 use storage::new_storage_threads;
+use storage_traits::{StorageEngines, StorageThreads};
 #[cfg(feature = "multiprocess")]
 use style::global_style_data::StyleThreadPool;
 #[cfg(feature = "webxr")]
@@ -115,17 +116,44 @@ use crate::webview_delegate::{
 
 #[cfg(feature = "media-gstreamer")]
 mod media_platform {
+    use servo_media_gstreamer::GStreamerBackend;
+
     use super::ServoMedia;
+
+    #[cfg(any(windows, target_os = "macos"))]
     pub fn init() {
-        ServoMedia::init::<servo_media_dummy::DummyBackend>();
+        ServoMedia::init_with_backend(|| {
+            let mut plugin_dir = std::env::current_exe().unwrap();
+            plugin_dir.pop();
+
+            if cfg!(target_os = "macos") {
+                plugin_dir.push("lib");
+            }
+
+            let plugin_list = crate::gstreamer_plugins::gstreamer_plugins();
+            match GStreamerBackend::init_with_plugins(plugin_dir, &plugin_list) {
+                Ok(b) => b,
+                Err(e) => {
+                    log::error!("Error initializing GStreamer: {:?}", e);
+                    std::process::exit(1);
+                },
+            }
+        });
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    pub fn init() {
+        ServoMedia::init::<GStreamerBackend>();
     }
 }
 
-#[cfg(all(not(feature = "media-gstreamer"), not(target_env = "ohos")))]
+#[cfg(all(not(feature = "media-gstreamer"), target_env = "ohos"))]
 mod media_platform {
+    use servo_media_ohos::OhosBackend;
+
     use super::ServoMedia;
     pub fn init() {
-        ServoMedia::init::<servo_media_dummy::DummyBackend>();
+        ServoMedia::init::<OhosBackend>();
     }
 }
 

@@ -229,6 +229,7 @@ pub struct DocumentLayoutSnapshotProjectionNode {
 pub struct DocumentLayoutSnapshotProjection {
     pub nodes: Vec<DocumentLayoutSnapshotProjectionNode>,
 }
+#[derive(Debug)]
 pub enum PendingImageState {
     Unrequested(ServoUrl),
     PendingResponse,

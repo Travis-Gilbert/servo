@@ -49,6 +49,7 @@ use crate::dom::csp::{GlobalCspReporting, Violation};
 use crate::dom::gamepad::Gamepad;
 use crate::dom::geolocation::Geolocation;
 use crate::dom::globalscope::GlobalScope;
+use crate::dom::lockmanager::LockManager;
 use crate::dom::mediadevices::MediaDevices;
 use crate::dom::mediasession::MediaSession;
 use crate::dom::mimetypearray::MimeTypeArray;

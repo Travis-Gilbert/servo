@@ -15,22 +15,26 @@ use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object};
 use storage_traits::indexeddb::{
     AsyncOperation, AsyncReadOnlyOperation, IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord,
-    KvsOperationContext, KvsOperationTarget,
-    AsyncOperation, AsyncReadOnlyOperation, KvsOperationContext, KvsOperationTarget, RecordsShape,
+    KvsOperationContext, KvsOperationTarget, RecordsShape,
 };
 
 use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::{
     IDBCursorDirection, IDBCursorMethods,
 };
+use crate::dom::bindings::codegen::Bindings::IDBTransactionBinding::{
+    IDBTransactionMethods, IDBTransactionMode,
+};
 use crate::dom::bindings::codegen::UnionTypes::IDBObjectStoreOrIDBIndex;
-use crate::dom::bindings::error::{Error, ErrorResult};
+use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
+use crate::dom::bindings::str::DOMString;
 use crate::dom::bindings::structuredclone;
 use crate::dom::bindings::trace::RootedTraceableBox;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::indexeddb::idbindex::IDBIndex;
 use crate::dom::indexeddb::idbobjectstore::IDBObjectStore;
+use crate::dom::indexeddb::idbrequest::{IDBRequest, RecordsParam, RequestSource};
 use crate::dom::indexeddb::idbtransaction::IDBTransaction;
 use crate::dom::indexeddb::key::{convert_value_to_key, key_type_to_jsval};
 
@@ -53,6 +57,7 @@ impl ObjectStoreOrIndex {
         }
     }
 }
+#[dom_struct]
 pub(crate) struct IDBCursor {
     reflector_: Reflector,
 
@@ -91,124 +96,49 @@ pub(crate) struct IDBCursor {
 }
 
 impl IDBCursor {
+    /// The object store or index this cursor was opened on.
     pub(crate) fn source(&self) -> &ObjectStoreOrIndex {
         &self.source
     }
 
-    fn check_transaction_and_source(&self) -> Fallible<()> {
-        // If this's transaction's state is not active, throw a "TransactionInactiveError"
-        // DOMException.
-        if !self.transaction.is_active() || !self.transaction.is_usable() {
-            return Err(Error::TransactionInactive(Some(
-                "The cursor cannot iterate because its transaction is not active or usable"
-                    .to_owned(),
-            )));
-        }
-
-        // If this's source or effective object store has been deleted, throw an
-        // "InvalidStateError" DOMException.
-        let store = self.effective_object_store();
-        if !self.transaction.Db().object_store_exists(&store.get_name()) {
-            return Err(Error::InvalidState(Some(
-                "The cursor's effective object store has been deleted".to_owned(),
-            )));
-        }
-        if let ObjectStoreOrIndex::Index(index) = &self.source &&
-            !store.has_index(&index.Name())
-        {
-            return Err(Error::InvalidState(Some(
-                "The cursor's source index has been deleted".to_owned(),
-            )));
-        }
-        Ok(())
-    }
-
-    /// The preconditions `update` and `delete` share: steps 2 through 6 of both algorithms,
-    /// in the order their exceptions are observable in.
-    ///
-    /// Kept separate from `check_transaction_and_source` because the read-only check falls
-    /// between the inactive check and the deleted check, and the three iteration methods have
-    /// no read-only check at all.
-
-    fn check_writable(&self) -> Fallible<()> {
-        // Step 2. If transaction's state is not active, throw a "TransactionInactiveError"
-        // DOMException.
-        if !self.transaction.is_active() || !self.transaction.is_usable() {
-            return Err(Error::TransactionInactive(Some(
-                "The cursor cannot modify records because its transaction is not active or usable"
-                    .to_owned(),
-            )));
-        }
-
-        // Step 3. If transaction is a read-only transaction, throw a "ReadOnlyError"
-        // DOMException.
-        if let IDBTransactionMode::Readonly = self.transaction.get_mode() {
-            return Err(Error::ReadOnly(Some(
-                "The cursor cannot modify records in a read-only transaction".to_owned(),
-            )));
-        }
-
-        // Step 4. If this's source or effective object store has been deleted, throw an
-        // "InvalidStateError" DOMException.
-        let store = self.effective_object_store();
-        if !self.transaction.Db().object_store_exists(&store.get_name()) {
-            return Err(Error::InvalidState(Some(
-                "The cursor's effective object store has been deleted".to_owned(),
-            )));
-        }
-        if let ObjectStoreOrIndex::Index(index) = &self.source &&
-            !store.has_index(&index.Name())
-        {
-            return Err(Error::InvalidState(Some(
-                "The cursor's source index has been deleted".to_owned(),
-            )));
-        }
-
-        // Step 5. If this's got value flag is false, throw an "InvalidStateError" DOMException.
-        self.check_got_value()?;
-
-        // Step 6. If this's key only flag is true, throw an "InvalidStateError" DOMException.
-        if self.key_only {
-            return Err(Error::InvalidState(Some(
-                "A key-only cursor has no value to write".to_owned(),
-            )));
-        }
-
-        Ok(())
-    }
-
-    /// If this's got value flag is false, throw an "InvalidStateError" DOMException.
-    ///
-    /// The flag is unset while a previous iteration is outstanding, so this is what refuses a
-    /// second `continue` before the first one's success event has fired.
-        };
-        let key_range = self.range.clone();
-
-        // Run the steps to asynchronously execute a request with this as source and the steps
-        // to iterate a cursor as operation, reusing request.
-        IDBRequest::execute_async_with_context(
-            cx,
-            &self.effective_object_store(),
-            self.operation_context(),
-            |callback| {
-                AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
-                    callback,
-                    key_range,
-                    count: None,
-                    shape: RecordsShape::WithValues,
-                })
-            },
-            Some(request),
-            Some(RecordsParam::Cursor(iteration_param)),
-        )
-        .map(|_| ())
-    }
+    #[cfg_attr(crown, expect(crown::unrooted_must_root))]
+    pub(crate) fn new_inherited(
+        transaction: &IDBTransaction,
+        direction: IDBCursorDirection,
+        got_value: bool,
+        source: ObjectStoreOrIndex,
+        range: IndexedDBKeyRange,
+        key_only: bool,
+    ) -> IDBCursor {
+        IDBCursor {
+            reflector_: Reflector::new(),
+            transaction: Dom::from_ref(transaction),
+            range,
+            source,
+            direction,
+            position: DomRefCell::new(None),
+            key: DomRefCell::new(None),
+            cached_key: DomRefCell::new(None),
+            cached_primary_key: DomRefCell::new(None),
+            value: Heap::default(),
+            got_value: Cell::new(got_value),
+            object_store_position: DomRefCell::new(None),
+            key_only,
+            request: Default::default(),
         }
     }
 
     #[cfg_attr(crown, expect(crown::unrooted_must_root))]
     #[allow(clippy::too_many_arguments)]
-
+    pub(crate) fn new(
+        cx: &mut JSContext,
+        global: &GlobalScope,
+        transaction: &IDBTransaction,
+        direction: IDBCursorDirection,
+        got_value: bool,
+        source: ObjectStoreOrIndex,
+        range: IndexedDBKeyRange,
+        key_only: bool,
     ) -> DomRoot<IDBCursor> {
         reflect_dom_object(
             cx,
@@ -251,6 +181,32 @@ impl IDBCursor {
         }
     }
 
+    pub(crate) fn set_request(&self, request: &IDBRequest) {
+        self.request.set(Some(request));
+    }
+
+    pub(crate) fn value(&self, mut out: MutableHandleValue) {
+        out.set(self.value.get());
+    }
+
+    /// <https://www.w3.org/TR/IndexedDB-3/#cursor-effective-key>
+    pub(crate) fn effective_key(&self) -> Option<IndexedDBKeyType> {
+        match &self.source {
+            ObjectStoreOrIndex::ObjectStore(_) => self.position.borrow().clone(),
+            ObjectStoreOrIndex::Index(_) => self.object_store_position.borrow().clone(),
+        }
+    }
+
+    /// <https://www.w3.org/TR/IndexedDB-3/#cursor-effective-object-store>
+    fn effective_object_store(&self) -> DomRoot<IDBObjectStore> {
+        match &self.source {
+            ObjectStoreOrIndex::ObjectStore(store) => store.as_rooted(),
+            ObjectStoreOrIndex::Index(index) => index.object_store(),
+        }
+    }
+
+    /// The backend must range over the same records the cursor was opened on, so an index
+    /// cursor keeps naming its index on every subsequent iteration, not only on the first.
     fn operation_context(&self) -> KvsOperationContext {
         match &self.source {
             ObjectStoreOrIndex::ObjectStore(_) => KvsOperationContext::default(),
@@ -263,17 +219,54 @@ impl IDBCursor {
         }
     }
 
+    pub(crate) fn check_transaction_active(&self) -> ErrorResult {
+        if !self.transaction.is_active() || !self.transaction.is_usable() {
+            return Err(Error::TransactionInactive(Some(
+                "Transaction is not active".to_owned(),
+            )));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn verify_not_deleted(&self) -> ErrorResult {
+        let store = self.effective_object_store();
+        if !self.transaction.Db().object_store_exists(&store.get_name()) {
+            return Err(Error::InvalidState(Some(
+                "The cursor's effective object store has been deleted".to_owned(),
+            )));
+        }
+        if let ObjectStoreOrIndex::Index(index) = &self.source &&
+            !store.has_index(&DOMString::from(index.index_name()))
+        {
+            return Err(Error::InvalidState(Some(
+                "The cursor's source index has been deleted".to_owned(),
+            )));
+        }
+        Ok(())
+    }
+
+    /// The preconditions `update` and `delete` share: steps 2 through 6 of both algorithms,
+    /// in the order their exceptions are observable in.
+    ///
+    /// Kept separate from `check_transaction_active` because the read-only check falls
+    /// between the inactive check and the deleted check, and the three iteration methods have
+    /// no read-only check at all.
     fn check_writable(&self) -> Fallible<()> {
         // Step 2. If transaction's state is not active, throw a "TransactionInactiveError"
         // DOMException.
         if !self.transaction.is_active() || !self.transaction.is_usable() {
-            return Err(Error::TransactionInactive(None));
+            return Err(Error::TransactionInactive(Some(
+                "The cursor cannot modify records because its transaction is not active or usable"
+                    .to_owned(),
+            )));
         }
 
         // Step 3. If transaction is a read-only transaction, throw a "ReadOnlyError"
         // DOMException.
         if let IDBTransactionMode::Readonly = self.transaction.get_mode() {
-            return Err(Error::ReadOnly(None));
+            return Err(Error::ReadOnly(Some(
+                "The cursor cannot modify records in a read-only transaction".to_owned(),
+            )));
         }
 
         // Step 4. If this's source or effective object store has been deleted, throw an
@@ -285,7 +278,7 @@ impl IDBCursor {
             )));
         }
         if let ObjectStoreOrIndex::Index(index) = &self.source &&
-            !store.has_index(&index.Name())
+            !store.has_index(&DOMString::from(index.index_name()))
         {
             return Err(Error::InvalidState(Some(
                 "The cursor's source index has been deleted".to_owned(),
@@ -305,6 +298,27 @@ impl IDBCursor {
         Ok(())
     }
 
+    /// If this's got value flag is false, throw an "InvalidStateError" DOMException.
+    ///
+    /// The flag is unset while a previous iteration is outstanding, so this is what refuses a
+    /// second `continue` before the first one's success event has fired.
+    fn check_got_value(&self) -> Fallible<()> {
+        if !self.got_value.get() {
+            return Err(Error::InvalidState(Some(
+                "The cursor is already iterating".to_owned(),
+            )));
+        }
+        Ok(())
+    }
+
+    /// The tail the three iteration methods share: unset the got value flag, reopen the
+    /// cursor's one request, and run another iterate operation against it.
+    fn run_iteration(
+        &self,
+        cx: &mut JSContext,
+        key: Option<IndexedDBKeyType>,
+        primary_key: Option<IndexedDBKeyType>,
+        count: Option<u32>,
     ) -> Fallible<()> {
         // Unset this's got value flag.
         self.got_value.set(false);
@@ -333,6 +347,8 @@ impl IDBCursor {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
                     callback,
                     key_range,
+                    count: None,
+                    shape: RecordsShape::WithValues,
                 })
             },
             Some(request),
@@ -454,7 +470,7 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
         let request = self.Request();
 
         // Step 9: Unset the request's done flag on request.
-        request.unset_done_flag();
+        request.set_ready_state_pending();
 
         // Step 10: Run the steps to asynchronously execute a request with the cursor's source as
         // source, the steps to iterate a cursor as operation and request, using the current Realm
@@ -475,10 +491,16 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
                     callback,
                     key_range: range,
+                    count: None,
+                    shape: if self.key_only {
+                        RecordsShape::KeysOnly
+                    } else {
+                        RecordsShape::WithValues
+                    },
                 })
             },
             Some(request),
-            Some(iteration_param),
+            Some(RecordsParam::Cursor(iteration_param)),
         )?;
 
         Ok(())
@@ -546,7 +568,7 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
         let request = self.Request();
 
         // Step 8: Unset the request's done flag on request.
-        request.unset_done_flag();
+        request.set_ready_state_pending();
 
         // Step 9: Run the steps to asynchronously execute a request with the cursor's source as
         // source, the steps to iterate a cursor as operation and request, using the current Realm
@@ -567,10 +589,16 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
                     callback,
                     key_range: range,
+                    count: None,
+                    shape: if self.key_only {
+                        RecordsShape::KeysOnly
+                    } else {
+                        RecordsShape::WithValues
+                    },
                 })
             },
             Some(request),
-            Some(iteration_param),
+            Some(RecordsParam::Cursor(iteration_param)),
         )?;
 
         Ok(())
@@ -690,7 +718,7 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
         let request = self.Request();
 
         // Step 19: Unset the request's done flag on request.
-        request.unset_done_flag();
+        request.set_ready_state_pending();
 
         // Step 20: Run the steps to asynchronously execute a request with the cursor's source as
         // source, the steps to iterate a cursor as operation and request, using the current Realm
@@ -711,10 +739,16 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
                     callback,
                     key_range: range,
+                    count: None,
+                    shape: if self.key_only {
+                        RecordsShape::KeysOnly
+                    } else {
+                        RecordsShape::WithValues
+                    },
                 })
             },
             Some(request),
-            Some(iteration_param),
+            Some(RecordsParam::Cursor(iteration_param)),
         )?;
 
         Ok(())

@@ -11,6 +11,7 @@ use servo_base::id::{BrowsingContextId, PipelineId, WebViewId};
 use servo_constellation_traits::ScriptToConstellationMessage;
 
 use crate::dom::bindings::trace::HashMapTracedValues;
+use crate::dom::bindings::str::DOMString;
 use crate::dom::html::htmliframeelement::HTMLIFrameElement;
 use crate::dom::node::NodeTraits;
 use crate::dom::types::{GlobalScope, Window};

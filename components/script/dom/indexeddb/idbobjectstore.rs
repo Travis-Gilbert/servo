@@ -7,7 +7,10 @@ use dom_struct::dom_struct;
 use js::context::JSContext;
 use js::conversions::ToJSValConvertible;
 use js::gc::MutableHandleValue;
+use js::jsapi::Heap;
+use js::jsval::{JSVal, NullValue};
 use js::rust::HandleValue;
+use js::rust::wrappers2::JS_ClearPendingException;
 use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericBindings::IDBObjectStoreBinding::IDBIndexParameters;
 use script_bindings::codegen::GenericUnionTypes::StringOrStringSequence;
@@ -22,7 +25,9 @@ use storage_traits::indexeddb::{
 
 use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::IDBCursorDirection;
 use crate::dom::bindings::codegen::Bindings::IDBDatabaseBinding::IDBObjectStoreParameters;
-use crate::dom::bindings::codegen::Bindings::IDBObjectStoreBinding::IDBGetAllOptions;
+use crate::dom::bindings::codegen::Bindings::IDBObjectStoreBinding::{
+    IDBGetAllOptions, IDBObjectStoreMethods,
+};
 use crate::dom::bindings::codegen::Bindings::IDBTransactionBinding::{
     IDBTransactionMethods, IDBTransactionMode,
 };
@@ -40,7 +45,9 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::indexeddb::idbcursor::{IDBCursor, IterationParam, ObjectStoreOrIndex};
 use crate::dom::indexeddb::idbcursorwithvalue::IDBCursorWithValue;
 use crate::dom::indexeddb::idbindex::IDBIndex;
-use crate::dom::indexeddb::idbrequest::{GetAllKind, GetAllRequest, IDBRequest, RequestSource};
+use crate::dom::indexeddb::idbrequest::{
+    BackfillHalf, GetAllKind, GetAllRequest, IDBRequest, RecordsParam, RequestSource,
+};
 use crate::dom::indexeddb::idbtransaction::IDBTransaction;
 use crate::dom::indexeddb::key::{
     ExtractionResult, can_inject_key_into_value, convert_value_to_key, convert_value_to_key_range,
@@ -108,6 +115,7 @@ enum RecordKeyReach {
     /// did not evaluate to a valid key, so the record earns no entry in this index.
     Dropped,
 }
+#[dom_struct]
 pub struct IDBObjectStore {
     reflector_: Reflector,
     name: DomRefCell<DOMString>,
@@ -1220,7 +1228,7 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
     fn GetAllRecords(
         &self,
         cx: &mut JSContext,
-        options: RootedTraceableBox<IDBGetAllOptions>,
+        options: &IDBGetAllOptions,
     ) -> Fallible<DomRoot<IDBRequest>> {
         // Step 1. Let transaction be this's transaction.
         // Step 2. Let store be this's object store.
@@ -1232,7 +1240,7 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
         self.check_transaction_active()?;
 
         // Steps 6 to 9. Resolve the range, the direction and the count the read may apply.
-        let request = GetAllRequest::from_options(cx, GetAllKind::Records, &options)?;
+        let request = GetAllRequest::from_options(cx, GetAllKind::Records, options)?;
 
         // Step 10 to 13. Run retrieve multiple records from an object store as the operation of
         // an asynchronously executed request.

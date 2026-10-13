@@ -12,7 +12,7 @@ use profile_traits::generic_channel::channel;
 use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericUnionTypes::StringOrStringSequence;
 use script_bindings::reflector::reflect_dom_object_with_cx;
-use servo_base::generic_channel::{GenericSend, GenericSender};
+use servo_base::generic_channel::{GenericSend, GenericSender, SendError};
 use servo_base::id::ScriptEventLoopId;
 use storage_traits::indexeddb::{
     BackendError, IndexedDBIndex, IndexedDBThreadMsg, IndexedDBTxnMode, KeyPath, SyncOperation,
@@ -42,7 +42,7 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::indexeddb::idbdatabase::IDBDatabase;
 use crate::dom::indexeddb::idbobjectstore::{IDBObjectStore, IDBObjectStoreAbortState};
 use crate::dom::indexeddb::idbrequest::IDBRequest;
-use crate::indexeddb::{map_backend_error_to_dom_error, reply_lost};
+use crate::dom::indexeddb::key::{map_backend_error_to_dom_error, reply_lost};
 
 #[dom_struct]
 pub struct IDBTransaction {

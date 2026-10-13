@@ -436,6 +436,7 @@ impl PartialEq for Job {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub enum WebLockMode {
     /// <https://w3c.github.io/web-locks/#dom-lockmode-shared>
     Shared,
@@ -443,6 +444,7 @@ pub enum WebLockMode {
     Exclusive,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct WebLockInfo {
     /// <https://w3c.github.io/web-locks/#dom-lockinfo-name>
     pub name: String,
@@ -452,6 +454,7 @@ pub struct WebLockInfo {
     pub client_id: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum WebLockMessage {
     /// <https://w3c.github.io/web-locks/#request-a-lock>
     Request {
@@ -495,6 +498,7 @@ pub enum WebLockMessage {
     },
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum WebLockResponse {
     /// The request became grantable and is now a held lock.
     Granted { request_id: u64 },
@@ -534,6 +538,7 @@ pub struct AuxiliaryWebViewCreationRequest {
     pub response_sender: GenericSender<Option<AuxiliaryWebViewCreationResponse>>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
 pub struct NamedBrowsingContextInfo {
     /// The browsing context whose target name matched.
     pub browsing_context_id: BrowsingContextId,
@@ -542,6 +547,7 @@ pub struct NamedBrowsingContextInfo {
     /// The pipeline of that browsing context's current session history entry.
     pub pipeline_id: PipelineId,
 }
+#[derive(Debug, Deserialize, Serialize)]
 pub struct AuxiliaryWebViewCreationResponse {
     /// The new webview ID.
     pub new_webview_id: WebViewId,

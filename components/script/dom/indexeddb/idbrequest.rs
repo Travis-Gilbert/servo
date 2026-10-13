@@ -14,7 +14,7 @@ use profile_traits::generic_callback::GenericCallback;
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{DomObject, reflect_dom_object_with_cx};
 use serde::{Deserialize, Serialize};
-use servo_base::generic_channel::GenericSend;
+use servo_base::generic_channel::{GenericSend, SendError};
 use storage_traits::indexeddb::{
     AsyncOperation, AsyncReadOnlyOperation, BackendError, BackendResult, BackfillIndexResult,
     IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord, IndexedDBThreadMsg, IndexedDBTxnMode,
@@ -46,7 +46,7 @@ use crate::dom::indexeddb::idbindex::IDBIndex;
 use crate::dom::indexeddb::idbobjectstore::IDBObjectStore;
 use crate::dom::indexeddb::idbrecord::IDBRecord;
 use crate::dom::indexeddb::idbtransaction::IDBTransaction;
-use crate::indexeddb::{
+use crate::dom::indexeddb::key::{
     convert_value_to_key_range, is_potentially_valid_key_range, key_type_to_jsval, reply_lost,
 };
 use crate::realms::enter_auto_realm;
@@ -78,6 +78,7 @@ impl RequestSource {
         }
     }
 }
+#[derive(Clone)]
 pub(crate) enum GetAllKind {
     /// `getAll`: the stored value of each record.
     Values,
@@ -494,7 +495,7 @@ impl RequestListener {
                             return;
                         }
                     }
-                    array.safe_to_jsval(cx, answer.handle_mut());
+                    array.to_jsval(cx, answer.handle_mut());
                 },
                 IdbResult::Record(record) => {
                     // The store is rooted and the borrow released before anything below can
@@ -545,7 +546,7 @@ impl RequestListener {
                             return;
                         };
                     }
-                    values.safe_to_jsval(cx, answer.handle_mut());
+                    values.to_jsval(cx, answer.handle_mut());
                 },
                 IdbResult::Count(count) => {
                     answer.handle_mut().set(DoubleValue(count as f64));
@@ -646,7 +647,7 @@ impl RequestListener {
                                 return;
                             }
                         }
-                        array.safe_to_jsval(cx, answer.handle_mut());
+                        array.to_jsval(cx, answer.handle_mut());
                     },
                     Some(RecordsParam::IndexBackfill {
                         store_name,

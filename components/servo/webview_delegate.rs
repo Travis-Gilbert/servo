@@ -701,16 +701,6 @@ impl SimpleDialog {
     }
 }
 
-impl SimpleDialog {
-    fn id(&self) -> EmbedderControlId {
-        match self {
-            SimpleDialog::Alert(alert_dialog) => alert_dialog.id,
-            SimpleDialog::Confirm(confirm_dialog) => confirm_dialog.id,
-            SimpleDialog::Prompt(prompt_dialog) => prompt_dialog.id,
-        }
-    }
-}
-
 impl From<SimpleDialogRequest> for SimpleDialog {
     fn from(simple_dialog_request: SimpleDialogRequest) -> Self {
         match simple_dialog_request {

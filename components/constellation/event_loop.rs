@@ -63,10 +63,9 @@ impl Drop for EventLoop {
 }
 
 impl EventLoop {
-    pub(crate) fn send_message_to_background_hang_monitor(
-        &self,
-        message: &BackgroundHangMonitorControlMsg,
-
+    pub(crate) fn spawn<STF: ScriptThreadFactory, SWF: ServiceWorkerManagerFactory>(
+        constellation: &mut Constellation<STF, SWF>,
+        is_private: bool,
     ) -> Result<Rc<Self>, SendError> {
         let (script_chan, script_port) =
             servo_base::generic_channel::channel().expect("Pipeline script chan");
@@ -132,7 +131,6 @@ impl EventLoop {
     fn spawn_in_thread<STF: ScriptThreadFactory, SWF: ServiceWorkerManagerFactory>(
         constellation: &mut Constellation<STF, SWF>,
         initial_script_state: InitialScriptState,
-
     ) -> Self {
         let script_chan = initial_script_state.constellation_to_script_sender.clone();
         let id = initial_script_state.id;
@@ -157,11 +155,9 @@ impl EventLoop {
     }
 
     #[cfg(feature = "multiprocess")]
-
     fn spawn_in_process<STF: ScriptThreadFactory, SWF: ServiceWorkerManagerFactory>(
         constellation: &mut Constellation<STF, SWF>,
         initial_script_state: InitialScriptState,
-
     ) -> Result<Self, SendError> {
         let script_chan = initial_script_state.constellation_to_script_sender.clone();
         let id = initial_script_state.id;
@@ -180,6 +176,7 @@ impl EventLoop {
                 opts: (*opts::get()).clone(),
                 prefs: Box::new(prefs::get().clone()),
                 broken_image_icon_data: constellation.broken_image_icon_data.clone(),
+                system_memory_reporter_name: None,
             }),
         )?;
 
@@ -196,54 +193,26 @@ impl EventLoop {
         })
     }
 
+    pub(crate) fn id(&self) -> ScriptEventLoopId {
+        self.id
+    }
+
+    /// Send a message to the event loop.
     pub fn send(&self, msg: ScriptThreadMessage) -> Result<(), SendError> {
         self.script_chan.send(msg)
     }
 
     /// If this is [`EventLoop`] is in another process, send a message to its `BackgroundHangMonitor`,
     /// otherwise do nothing.
-
+    pub(crate) fn send_message_to_background_hang_monitor(
+        &self,
+        message: &BackgroundHangMonitorControlMsg,
     ) {
         if let Some(background_hang_monitor_sender) = &self.background_hang_monitor_sender &&
             let Err(error) = background_hang_monitor_sender.send(message.clone())
         {
             error!("Could not send message ({message:?}) to BHM: {error}");
         }
-    }
-
-    ) -> Result<Self, IpcError> {
-        let script_chan = initial_script_state.constellation_to_script_sender.clone();
-        let id = initial_script_state.id;
-
-        let (background_hand_monitor_sender, backgrond_hand_monitor_receiver) =
-            generic_channel::channel().expect("Sampler chan");
-        let (lifeline_sender, lifeline_receiver) =
-            generic_channel::channel().expect("Failed to create lifeline channel");
-
-        let process = spawn_multiprocess(UnprivilegedContent::ScriptEventLoop(
-            NewScriptEventLoopProcessInfo {
-                initial_script_state,
-                constellation_to_bhm_receiver: backgrond_hand_monitor_receiver,
-                bhm_to_constellation_sender: constellation.background_hang_monitor_sender.clone(),
-                lifeline_sender,
-                opts: (*opts::get()).clone(),
-                prefs: Box::new(prefs::get().clone()),
-                broken_image_icon_data: constellation.broken_image_icon_data.clone(),
-                system_memory_reporter_name: None,
-            },
-        ))?;
-
-        let crossbeam_receiver = lifeline_receiver.route_preserving_errors();
-        constellation
-            .process_manager
-            .add(crossbeam_receiver, process);
-
-        Ok(Self {
-            script_chan,
-            id,
-            background_hang_monitor_sender: Some(background_hand_monitor_sender),
-            dont_send_or_sync: PhantomData,
-        })
     }
 }
 
