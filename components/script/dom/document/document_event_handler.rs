@@ -146,6 +146,9 @@ impl ClickCountingInfo {
 pub(crate) struct DocumentEventHandler {
     /// The [`Window`] element for this [`DocumentEventHandler`].
     window: Dom<Window>,
+    /// Live range occupied by the current contenteditable composition. Input and
+    /// textarea retain their own composition handling.
+    editable_composition: DomRefCell<Option<(Dom<Node>, Dom<crate::dom::range::Range>, String)>>,
     /// Pending input events, to be handled at the next rendering opportunity.
     #[no_trace]
     #[ignore_malloc_size_of = "InputEvent contains data from outside crates"]
@@ -215,6 +218,7 @@ impl DocumentEventHandler {
     pub(crate) fn new(window: &Window) -> Self {
         Self {
             window: Dom::from_ref(window),
+            editable_composition: Default::default(),
             pending_input_events: Default::default(),
             mouse_move_event_index: Default::default(),
             coalesced_mouse_move_event_ids: Default::default(),
@@ -941,6 +945,9 @@ impl DocumentEventHandler {
         // matter if the target is not a node.
         let document = self.window.Document();
         if mouse_button_event.action == MouseButtonAction::Down {
+            if !matches!(hit_test_result.node.find_click_focusable_area(cx), FocusableArea::Viewport) {
+                document.focus_handler().note_focus_input_modality(false);
+            }
             document
                 .focus_handler()
                 .set_sequential_focus_navigation_starting_point(&hit_test_result.node);
@@ -1367,6 +1374,9 @@ impl DocumentEventHandler {
         // For touch devices (which don't support hover), fire pointerover/pointerenter
         // <https://w3c.github.io/pointerevents/#mapping-for-devices-that-do-not-support-hover>
         if matches!(event.event_type, TouchEventType::Down) {
+            if !matches!(hit_test_result.node.find_click_focusable_area(cx), FocusableArea::Viewport) {
+                self.window.Document().focus_handler().note_focus_input_modality(false);
+            }
             // Fire pointerover
             let pointer_over = pointer_touch.to_pointer_event(
                 cx,
@@ -1610,6 +1620,12 @@ impl DocumentEventHandler {
         cx: &mut JSContext,
         keyboard_event: EmbedderKeyboardEvent,
     ) -> InputEventResult {
+        if keyboard_event.event.state == KeyState::Down
+            && !keyboard_event.event.modifiers.intersects(Modifiers::CONTROL | Modifiers::ALT | Modifiers::META)
+            && !matches!(keyboard_event.event.key, Key::Named(NamedKey::Shift | NamedKey::Control | NamedKey::Alt | NamedKey::Meta))
+        {
+            self.window.Document().focus_handler().note_focus_input_modality(true);
+        }
         let target = &self.target_for_events_following_focus();
         let keyevent = KeyboardEvent::new_with_platform_keyboard_event(
             cx,
@@ -1661,6 +1677,7 @@ impl DocumentEventHandler {
         let document = self.window.Document();
         let composition_event = match event {
             ImeEvent::Dismissed => {
+                self.editable_composition.borrow_mut().take();
                 document.focus_handler().focus(cx, &FocusableArea::Viewport);
                 return Default::default();
             },
@@ -1677,7 +1694,31 @@ impl DocumentEventHandler {
             return Default::default();
         };
 
-        let cancelable = composition_event.state == keyboard_types::CompositionState::Start;
+        let state = composition_event.state;
+        let data = composition_event.data.clone();
+        if state == keyboard_types::CompositionState::End {
+            let changed = self
+                .editable_composition
+                .borrow()
+                .as_ref()
+                .is_some_and(|(_, _, previous)| previous != &data);
+            if changed {
+                let update = CompositionEvent::new(
+                    cx,
+                    &self.window,
+                    atom!("compositionupdate"),
+                    true,
+                    false,
+                    Some(&self.window),
+                    0,
+                    DOMString::from(data.as_str()),
+                );
+                update.upcast::<Event>().set_composed(true);
+                update.upcast::<Event>().fire(cx, focused_element.upcast());
+            }
+            self.update_editable_composition(cx, focused_element.upcast(), &data, false);
+        }
+        let cancelable = state == keyboard_types::CompositionState::Start;
         let event = CompositionEvent::new(
             cx,
             &self.window,
@@ -1690,8 +1731,156 @@ impl DocumentEventHandler {
         );
 
         let event = event.upcast::<Event>();
+        event.set_composed(true);
         event.fire(cx, focused_element.upcast());
+        match state {
+            keyboard_types::CompositionState::Start => {
+                self.editable_composition.borrow_mut().take();
+                if !event.DefaultPrevented()
+                    && let Some(selection) = document.selection()
+                    && let Some(range) = selection.active_range(cx)
+                    && let Some(host) = range.start_container().editing_host_of()
+                    && range.end_container().editing_host_of().as_ref() == Some(&host)
+                    && focused_element.upcast::<Node>().editing_host_of().as_ref() == Some(&host)
+                {
+                    use script_bindings::codegen::GenericBindings::RangeBinding::RangeMethods;
+                    let range = range.CloneRange(cx);
+                    *self.editable_composition.borrow_mut() =
+                        Some((Dom::from_ref(&*host), Dom::from_ref(&*range), String::new()));
+                }
+            },
+            keyboard_types::CompositionState::Update => {
+                self.update_editable_composition(cx, focused_element.upcast(), &data, true)
+            },
+            keyboard_types::CompositionState::End => {
+                self.editable_composition.borrow_mut().take();
+            },
+        }
         event.flags().into()
+    }
+
+    /// Replace the previous preedit, rather than appending every update. The
+    /// existing editing command performs the DOM edit; this path supplies IME
+    /// beforeinput/input events instead of execCommand's non-composing events.
+    fn update_editable_composition(
+        &self,
+        cx: &mut JSContext,
+        focused: &Node,
+        data: &str,
+        force_update: bool,
+    ) {
+        use crate::dom::execcommand::basecommand::CommandName;
+        use crate::dom::inputevent::InputEvent as DomInputEvent;
+        use script_bindings::codegen::GenericBindings::RangeBinding::RangeMethods;
+        use script_bindings::codegen::GenericBindings::SelectionBinding::SelectionMethods;
+        let Some((host, range, previous)) =
+            self.editable_composition
+                .borrow()
+                .as_ref()
+                .map(|(host, range, data)| {
+                    (
+                        DomRoot::from_ref(&**host),
+                        DomRoot::from_ref(&**range),
+                        data.clone(),
+                    )
+                })
+        else {
+            return;
+        };
+        if !host.is_connected()
+            || focused.editing_host_of().as_ref() != Some(&host)
+            || range.start_container().editing_host_of().as_ref() != Some(&host)
+            || range.end_container().editing_host_of().as_ref() != Some(&host)
+        {
+            self.editable_composition.borrow_mut().take();
+            return;
+        }
+        if previous == data && !force_update {
+            return;
+        }
+        let document = self.window.Document();
+        let Some(selection) = document.selection() else {
+            return;
+        };
+        let before = DomInputEvent::new(
+            cx,
+            &self.window,
+            None,
+            atom!("beforeinput"),
+            true,
+            false,
+            Some(&self.window),
+            0,
+            Some(DOMString::from(data)),
+            true,
+            DOMString::from_static("insertCompositionText"),
+        );
+        let before_range = crate::dom::staticrange::StaticRange::new(
+            cx,
+            &document,
+            &range.start_container(),
+            range.start_offset(),
+            &range.end_container(),
+            range.end_offset(),
+        );
+        before.set_target_ranges(&[before_range]);
+        before.upcast::<Event>().set_trusted(true);
+        before.upcast::<Event>().set_composed(true);
+        before.upcast::<Event>().fire(cx, host.upcast());
+        // A listener can move focus or detach the editing host.
+        if !host.is_connected()
+            || range.start_container().editing_host_of().as_ref() != Some(&host)
+            || document
+                .focus_handler()
+                .focused_area()
+                .element()
+                .and_then(|element| element.upcast::<Node>().editing_host_of())
+                .as_ref()
+                != Some(&host)
+        {
+            self.editable_composition.borrow_mut().take();
+            return;
+        }
+        if selection
+            .SetBaseAndExtent(
+                cx,
+                &range.start_container(),
+                range.start_offset(),
+                &range.end_container(),
+                range.end_offset(),
+            )
+            .is_err()
+        {
+            return;
+        }
+        range.Collapse(cx.no_gc(), true);
+        if !CommandName::InsertText.execute(cx, &document, &selection, DOMString::from(data)) {
+            return;
+        }
+        if let Some(active) = selection.active_range(cx) {
+            let _ = range.SetEnd(cx, &active.end_container(), active.end_offset());
+        }
+        *self.editable_composition.borrow_mut() = Some((
+            Dom::from_ref(&*host),
+            Dom::from_ref(&*range),
+            data.to_owned(),
+        ));
+        let input = DomInputEvent::new(
+            cx,
+            &self.window,
+            None,
+            atom!("input"),
+            true,
+            false,
+            Some(&self.window),
+            0,
+            Some(DOMString::from(data)),
+            true,
+            DOMString::from_static("insertCompositionText"),
+        );
+        input.upcast::<Event>().set_trusted(true);
+        input.upcast::<Event>().set_composed(true);
+        input.upcast::<Event>().fire(cx, host.upcast());
     }
 
     fn handle_wheel_event(
@@ -2372,6 +2561,7 @@ impl DocumentEventHandler {
         cx: &mut JSContext,
         element: &Element,
     ) {
+        self.window.Document().focus_handler().note_focus_input_modality(true);
         element
             .upcast::<Node>()
             .run_the_focusing_steps(cx, None, FocusTrigger::Other);

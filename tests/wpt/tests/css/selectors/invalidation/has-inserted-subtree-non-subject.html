@@ -1,0 +1,28 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Attribute invalidation in an appended subtree of a sibling of a non-subject :has anchor</title>
+<link rel="help" href="https://drafts.csswg.org/selectors/#relational">
+<script src="/resources/testharness.js"></script>
+<script src="/resources/testharnessreport.js"></script>
+<style>
+#subject { color: grey; }
+div:has(~ div .test) + #subject { color: purple; }
+</style>
+<main><div id="previous"></div><div id="subject"></div><div id="next"><div id="child"></div></div></main>
+<script>
+test(() => {
+ const subject = document.querySelector('#subject');
+ const color = () => getComputedStyle(subject).color;
+ assert_equals(color(), 'rgb(128, 128, 128)');
+ const tree = document.createElement('div');
+ tree.innerHTML = '<div id="changed" class="test"></div>';
+ document.querySelector('#child').after(tree);
+ assert_equals(color(), 'rgb(128, 0, 128)', 'insert subtree');
+ tree.firstChild.classList.remove('test');
+ assert_equals(color(), 'rgb(128, 128, 128)', 'remove descendant class');
+ tree.firstChild.classList.add('test');
+ assert_equals(color(), 'rgb(128, 0, 128)', 'restore descendant class');
+ tree.remove();
+ assert_equals(color(), 'rgb(128, 128, 128)', 'remove subtree');
+}, 'A newly appended subtree retains the relative-selector search path');
+</script>

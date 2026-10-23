@@ -1,0 +1,117 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Native contenteditable caret and word selection</title>
+<link rel="help" href="https://w3c.github.io/selection-api/">
+<link rel="stylesheet" href="/fonts/ahem.css">
+<script src="/resources/testharness.js"></script>
+<script src="/resources/testharnessreport.js"></script>
+<script src="/resources/testdriver.js"></script>
+<script src="/resources/testdriver-actions.js"></script>
+<script src="/resources/testdriver-vendor.js"></script>
+<div id="editor" contenteditable style="font:20px/30px monospace; width:400px"></div>
+<script>
+const editor = document.getElementById('editor');
+const selection = getSelection();
+async function key(value) { await new test_driver.Actions().keyDown(value).keyUp(value).send(); }
+function setup(html, offset) {
+  editor.innerHTML = html;
+  editor.focus();
+  selection.collapse(editor.firstChild, offset);
+}
+promise_test(async () => {
+  setup('ab<strong>cd</strong>ef', 1);
+  await key('\uE014');
+  assert_equals(selection.focusNode, editor.firstChild);
+  assert_equals(selection.focusOffset, 2);
+  await key('\uE014');
+  assert_equals(selection.focusNode, editor.querySelector('strong').firstChild);
+  assert_equals(selection.focusOffset, 1, 'formatting boundary is not an extra character');
+  await new test_driver.Actions().keyDown('\uE008').keyDown('\uE014').keyUp('\uE014').keyUp('\uE008').send();
+  assert_equals(selection.toString(), 'd', 'Shift extends selection');
+  await key('\uE012');
+  assert_true(selection.isCollapsed);
+  assert_equals(selection.focusOffset, 1, 'Left collapses at start');
+}, 'Arrow and Shift-arrow movement across inline formatting');
+promise_test(async () => {
+  setup('a👩‍💻e\u0301z', 1);
+  await key('\uE014');
+  assert_equals(selection.focusOffset, 6, 'emoji ZWJ sequence');
+  await key('\uE014');
+  assert_equals(selection.focusOffset, 8, 'combining sequence');
+  await key('\uE012');
+  assert_equals(selection.focusOffset, 6);
+}, 'Arrow movement uses grapheme boundaries');
+promise_test(async t => {
+  t.add_cleanup(() => { editor.style.fontFamily = 'monospace'; });
+  editor.style.fontFamily = 'Ahem';
+  await document.fonts.load('20px Ahem');
+  setup('first line<br>second line', 2);
+  await key('\uE015');
+  assert_equals(selection.focusNode, editor.lastChild);
+  assert_equals(selection.focusOffset, 2, 'Down preserves the rendered inline position');
+  await key('\uE013');
+  assert_equals(selection.focusNode, editor.firstChild);
+  assert_equals(selection.focusOffset, 2);
+  editor.style.fontFamily = 'monospace';
+}, 'Up and Down preserve the column across rendered lines');
+promise_test(async () => {
+  setup('hello <strong>world</strong> again', 0);
+  await new test_driver.Actions()
+    .pointerMove(0, 0, {origin: editor.querySelector('strong')})
+    .pointerDown().pointerUp().pointerDown().pointerUp().send();
+  assert_equals(selection.toString(), 'world');
+}, 'Double-click selects a word in an inline formatting element');
+promise_test(async () => {
+  setup('abc', 1);
+  const cancel = event => event.preventDefault();
+  editor.addEventListener('keydown', cancel);
+  try { await key('\uE014'); assert_equals(selection.focusOffset, 1); }
+  finally { editor.removeEventListener('keydown', cancel); }
+}, 'Canceled keydown does not move the caret');
+promise_test(async () => {
+  setup('hel<strong>lo</strong> world', 0);
+  await new test_driver.Actions()
+    .pointerMove(0, 0, {origin: editor.querySelector('strong')})
+    .pointerDown().pointerUp().pointerDown().pointerUp().send();
+  assert_equals(selection.toString(), 'hello');
+}, 'Double-click word selection crosses an inline formatting boundary');
+promise_test(async t => {
+  editor.style.fontFamily = 'Ahem';
+  editor.style.width = '100px';
+  t.add_cleanup(() => { editor.style.fontFamily = 'monospace'; editor.style.width = '400px'; editor.style.overflowWrap = ''; });
+  await document.fonts.load('20px Ahem');
+  setup('ABCDE FGHIJ', 2);
+  const range = document.createRange();
+  range.selectNodeContents(editor);
+  assert_equals(range.getClientRects().length, 2, 'fixture has two rendered lines');
+  await key('\uE015');
+  assert_equals(selection.focusOffset, 8, 'Down crosses a soft wrap');
+  await key('\uE013');
+  assert_equals(selection.focusOffset, 2, 'Up returns to the original rendered column');
+}, 'Vertical movement follows soft-wrapped lines');
+promise_test(async t => {
+  const paragraph = document.createElement('p');
+  paragraph.innerHTML = 'Hello, <strong>world</strong>!';
+  document.body.append(paragraph);
+  t.add_cleanup(() => paragraph.remove());
+  await new test_driver.Actions()
+    .pointerMove(0, 0, {origin: paragraph.querySelector('strong')})
+    .pointerDown().pointerUp().pointerDown().pointerUp().send();
+  assert_equals(selection.toString(), 'world', 'punctuation is not part of the selected word');
+}, 'Double-click selects a word in non-editable document text');
+promise_test(async t => {
+  editor.style.fontFamily = 'Ahem';
+  t.add_cleanup(() => { editor.style.fontFamily = 'monospace'; });
+  await document.fonts.load('20px Ahem');
+  setup('abcdef<br>ab<br>abcdef', 4);
+  await key('\uE015');
+  assert_equals(selection.focusOffset, 2, 'Short line clamps the caret');
+  await key('\uE015');
+  assert_equals(selection.focusNode, editor.lastChild);
+  assert_equals(selection.focusOffset, 4, 'Original column survives the short line');
+  await key('\uE013');
+  await key('\uE013');
+  assert_equals(selection.focusNode, editor.firstChild);
+  assert_equals(selection.focusOffset, 4);
+}, 'Vertical navigation remembers the column across a short line');
+</script>

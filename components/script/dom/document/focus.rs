@@ -24,7 +24,7 @@ use servo_constellation_traits::{
 use crate::dom::bindings::root::MutNullableDom;
 use crate::dom::focusevent::FocusEventType;
 use crate::dom::node::focus::{FocusNavigationScopeOwner, FocusTrigger};
-use crate::dom::types::{Element, EventTarget, FocusEvent, HTMLElement, HTMLIFrameElement, Window};
+use crate::dom::types::{Element, EventTarget, FocusEvent, HTMLElement, HTMLIFrameElement, HTMLInputElement, HTMLTextAreaElement, Window};
 use crate::dom::{Document, Event, EventBubbles, EventCancelable, Node, NodeTraits};
 use crate::realms::enter_auto_realm;
 
@@ -159,6 +159,8 @@ pub(crate) struct DocumentFocusHandler {
     ///
     /// <https://html.spec.whatwg.org/multipage/#focused-area-of-the-document>
     focused_area: DomRefCell<FocusableArea>,
+    /// Whether the last input modality calls for a visible keyboard focus indicator.
+    keyboard_focus_indicator: Cell<bool>,
     /// The last sequence number sent to the constellation.
     #[no_trace]
     focus_sequence: Cell<FocusSequenceNumber>,
@@ -175,6 +177,7 @@ impl DocumentFocusHandler {
         Self {
             window: Dom::from_ref(window),
             focused_area: Default::default(),
+            keyboard_focus_indicator: Cell::new(true),
             focus_sequence: Cell::new(FocusSequenceNumber::default()),
             has_focus: Cell::new(has_focus),
             sequential_focus_navigation_starting_point: Default::default(),
@@ -192,6 +195,32 @@ impl DocumentFocusHandler {
     /// Return the element that currently has focus. If `None` is returned the viewport itself has focus.
     pub(crate) fn focused_area(&self) -> Ref<'_, FocusableArea> {
         self.focused_area.borrow()
+    }
+
+    /// <https://drafts.csswg.org/selectors/#the-focus-visible-pseudo>
+    /// Update before dispatch so keyboard listeners (including canceled keydown)
+    /// observe the new state. Pointer input only changes the policy for subsequent
+    /// focus changes; it does not hide a ring merely by clicking elsewhere.
+    pub(crate) fn note_focus_input_modality(&self, keyboard: bool) {
+        self.keyboard_focus_indicator.set(keyboard);
+        if keyboard {
+            if let Some(element) = self.focused_area.borrow().element() {
+                element.set_focus_visible_state(true);
+            }
+        }
+    }
+
+    pub(crate) fn refresh_focus_visible_state(&self) {
+        if let Some(element) = self.focused_area.borrow().element() {
+            element.set_focus_visible_state(self.should_indicate_focus(element));
+        }
+    }
+
+    fn should_indicate_focus(&self, element: &Element) -> bool {
+        self.keyboard_focus_indicator.get()
+            || element.is::<HTMLTextAreaElement>()
+            || element.downcast::<HTMLInputElement>().is_some_and(|input| !input.is_nontypeable())
+            || element.upcast::<Node>().is_editable_or_editing_host()
     }
 
     /// Set the element that currently has focus and update the focus state for both the previously
@@ -226,9 +255,11 @@ impl DocumentFocusHandler {
 
         if let Some(previously_focused_element) = self.focused_area.borrow().element() {
             recursively_set_focus_status(previously_focused_element, false);
+            previously_focused_element.set_focus_visible_state(false);
         }
         if let Some(newly_focused_element) = new_focusable_area.element() {
             recursively_set_focus_status(newly_focused_element, true);
+            newly_focused_element.set_focus_visible_state(self.should_indicate_focus(newly_focused_element));
         }
 
         *self.focused_area.borrow_mut() = new_focusable_area;

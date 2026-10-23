@@ -316,6 +316,9 @@ impl<'a> ShapingQueue<'a> {
                 &mut text_run.items[entry.index_in_text_run]
             {
                 text_segment.shaped_text = Some(shaped_text.clone());
+                text_segment.shaped_character_start = runs
+                    .first()
+                    .map(|run| self.character_range.start + run.character_offset());
                 text_segment.runs = runs;
                 text_segment.break_at_start = break_at_start;
             }

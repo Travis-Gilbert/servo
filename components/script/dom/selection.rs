@@ -82,6 +82,9 @@ pub(crate) struct Selection {
     /// Whether or not this [`Selection`] needs to remark DOM nodes with selection flags
     /// after a change to its underlying [`Range`].
     visible_selection_dirty: Cell<bool>,
+    /// Visual line affinity and the preferred inline coordinate for vertical moves.
+    /// DOM offsets alone cannot distinguish the two sides of a soft line break.
+    caret_navigation_position: Cell<Option<(Option<f32>, f32)>>,
 }
 
 impl Selection {
@@ -95,6 +98,7 @@ impl Selection {
             direction: Cell::new(Direction::Directionless),
             has_scheduled_selectionchange_event: Cell::new(false),
             visible_selection_dirty: Cell::new(false),
+            caret_navigation_position: Cell::new(None),
         }
     }
 
@@ -104,6 +108,14 @@ impl Selection {
             Box::new(Selection::new_inherited(document)),
             &*document.global(),
         )
+    }
+
+    pub(crate) fn caret_navigation_position(&self) -> Option<(Option<f32>, f32)> {
+        self.caret_navigation_position.get()
+    }
+
+    pub(crate) fn remember_caret_navigation_position(&self, x: Option<f32>, y: f32) {
+        self.caret_navigation_position.set(Some((x, y)));
     }
 
     pub(crate) fn visible_selection_dirty(&self) -> bool {
@@ -276,6 +288,7 @@ impl Selection {
     }
 
     fn selection_boundaries_changed(&self) {
+        self.caret_navigation_position.set(None);
         self.set_visible_selection_dirty();
         self.queue_selectionchange_task();
 

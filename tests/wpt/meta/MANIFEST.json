@@ -1169497,6 +1169497,13 @@
        {}
       ]
      ],
+     "fontface-canvas-metrics-and-pixels.html": [
+      "7171f455d3dfaae8d4f238a32148d018c15f0a31",
+      [
+       null,
+       {}
+      ]
+     ],
      "fontface-css-connected-descriptors.html": [
       "ee29a7419cd198d8c9210b2b38d63d425efd658a",
       [
@@ -1192261,6 +1192268,13 @@
         {}
        ]
       ],
+      "overflow-wrap-emergency-geometry.html": [
+       "f24df66f9261c029267ee9916f463bec3e09e5c2",
+       [
+        null,
+        {}
+       ]
+      ],
       "word-wrap-alias.html": [
        "b22faef4deedebfbed7100eaa623428860b64543",
        [
@@ -1206746,6 +1206760,13 @@
        {}
       ]
      ],
+     "range-partial-text-geometry.html": [
+      "2ac1530aa68a5f93044170b3f66a382d5f18e8b5",
+      [
+       null,
+       {}
+      ]
+     ],
      "resize-event-on-initial-layout-001.html": [
       "dc2f04bcced73dffc16d0c439ea029469da2017d",
       [
@@ -1209920,6 +1209941,13 @@
         {}
        ]
       ],
+      "has-inserted-subtree-non-subject.html": [
+       "c54f429c194ca7469ef3b5da6fe3dcd069ef169a",
+       [
+        null,
+        {}
+       ]
+      ],
       "has-invalidation-after-removing-non-first-element.html": [
        "482f07b8af616cf90def93180af6a1e30437c188",
        [
@@ -1209941,6 +1209969,13 @@
         {}
        ]
       ],
+      "has-mutation-before-detach.html": [
+       "85bc426fad5f1abdd68ac3cb6f4e51b4072624d2",
+       [
+        null,
+        {}
+       ]
+      ],
       "has-pseudo-element-subject-child-mutation.html": [
        "2ded66f3f38a1f04c9374e972d355791cbd0b04f",
        [
@@ -1209950,6 +1209985,13 @@
       ],
       "has-pseudoclass-only.html": [
        "49b2263e31ee186a63277870d36eddf5865d1d7e",
+       [
+        null,
+        {}
+       ]
+      ],
+      "has-shadow-and-moves.html": [
+       "25813be5c3e14a13624d6f042b85a644d483085b",
        [
         null,
         {}
@@ -1209971,6 +1210013,13 @@
       ],
       "has-side-effect.html": [
        "0ea0dee993f71d98471d66adb42b0aa91b1e8dd6",
+       [
+        null,
+        {}
+       ]
+      ],
+      "has-text-empty-mutations.html": [
+       "c615bbf0c0a90c205a8fa6a81b30bf94fcafd498",
        [
         null,
         {}
@@ -1221385,6 +1221434,15 @@
        {
         "testdriver": true,
         "timeout": "long"
+       }
+      ]
+     ],
+     "contenteditable-native-navigation.html": [
+      "dcaadbc93d5a2f3d2a67d5e2d32994966c833b8d",
+      [
+       null,
+       {
+        "testdriver": true
        }
       ]
      ],
@@ -1279527,6 +1279585,13 @@
          {}
         ]
        ],
+       "2d.text.measure.empty-font-bounds.html": [
+        "f71578ae45823b814ee3939eabaed9d941336b06",
+        [
+         null,
+         {}
+        ]
+       ],
        "2d.text.measure.fillTextCluster-options.tentative.html": [
         "b05c9827433d703d4279e0f14aaac8d84c90c1db",
         [
@@ -1300159,6 +1300224,13 @@
        ],
        "dataset-set.html": [
         "fca91347d4a4f3bb2c61d98ba49fbb9194013f10",
+        [
+         null,
+         {}
+        ]
+       ],
+       "dataset-svg.html": [
+        "a1a23b50e71606c56aa121983ba891ce099f96b6",
         [
          null,
          {}
@@ -1335343,8 +1335415,26 @@
     ]
    },
    "input-events": {
+    "contenteditable-composition-commit.html": [
+     "1c115f05363adf4e308f16efe1ce4dd1c9ad4d3e",
+     [
+      null,
+      {
+       "testdriver": true
+      }
+     ]
+    ],
     "contenteditable-insertfrompaste-type-inputevent-data.html": [
      "7c8880f13e39d929657bf6c33863033584d65434",
+     [
+      null,
+      {
+       "testdriver": true
+      }
+     ]
+    ],
+    "contenteditable-switch-host-typing.html": [
+     "d927815889c178876694b4e2b403d7e30927838a",
      [
       null,
       {

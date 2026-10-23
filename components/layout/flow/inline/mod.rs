@@ -92,6 +92,7 @@ use construct::InlineFormattingContextBuilder;
 use fonts::{FontMetrics, FontRef, ShapedTextSlice};
 use icu_locale_core::LanguageIdentifier;
 use icu_properties::props::{EnumeratedProperty, LineBreak as ICULineBreak};
+use icu_segmenter::GraphemeClusterSegmenter;
 use icu_segmenter::options::{LineBreakOptions, LineBreakStrictness, LineBreakWordOption};
 use inline_box::{InlineBox, InlineBoxContainerState, InlineBoxIdentifier, InlineBoxes};
 use layout_api::LayoutNode;
@@ -102,7 +103,7 @@ use line::{
 use malloc_size_of_derive::MallocSizeOf;
 use script::layout_dom::ServoLayoutNode;
 use servo_arc::Arc as ServoArc;
-use servo_base::text::{Utf8CodeUnits, Utf32CodeUnits};
+use servo_base::text::{AssumeUnder4GB, Utf8CodeUnits, Utf32CodeUnits};
 use style::Zero;
 use style::computed_values::line_break::T as LineBreak;
 use style::computed_values::text_wrap_mode::T as TextWrapMode;
@@ -111,7 +112,7 @@ use style::computed_values::word_break::T as WordBreak;
 use style::context::{QuirksMode, SharedStyleContext};
 use style::properties::ComputedValues;
 use style::properties::style_structs::InheritedText;
-use style::values::computed::BaselineShift;
+use style::values::computed::{BaselineShift, OverflowWrap};
 use style::values::generics::box_::BaselineShiftKeyword;
 use style::values::generics::font::LineHeight;
 use style::values::specified::box_::BaselineSource;
@@ -163,6 +164,7 @@ pub(crate) struct InlineFormattingContext {
     /// The text content of this inline formatting context.
     #[conditional_malloc_size_of]
     text_content: Arc<OnceLock<String>>,
+    grapheme_boundaries: OnceLock<Vec<Utf32CodeUnits>>,
 
     /// The [`SharedInlineStyles`] for the root of this [`InlineFormattingContext`] that are used to
     /// share styles with all [`TextRun`] children.
@@ -677,6 +679,8 @@ impl LineBlockSizes {
 /// Items accumulate here until we reach a soft line break opportunity during processing
 /// of inline content or we reach the end of the formatting context.
 struct UnbreakableSegmentUnderConstruction {
+    /// Fallback breaks within an otherwise unbreakable word: item index and advance.
+    emergency_breaks: Vec<(usize, Au)>,
     /// The size of this unbreakable segment in both dimension.
     inline_size: Au,
 
@@ -707,6 +711,7 @@ struct UnbreakableSegmentUnderConstruction {
 impl UnbreakableSegmentUnderConstruction {
     fn new() -> Self {
         Self {
+            emergency_breaks: Vec::new(),
             inline_size: Au::zero(),
             max_block_size: LineBlockSizes {
                 line_height: Au::zero(),
@@ -723,6 +728,7 @@ impl UnbreakableSegmentUnderConstruction {
 
     /// Reset this segment after its contents have been committed to a line.
     fn reset(&mut self) {
+        self.emergency_breaks.clear();
         assert!(self.line_items.is_empty()); // Preserve allocated memory.
         self.inline_size = Au::zero();
         self.max_block_size = LineBlockSizes::zero();
@@ -761,6 +767,9 @@ impl UnbreakableSegmentUnderConstruction {
             }
         }
         self.inline_size -= whitespace_trimmed;
+        for (_, advance) in &mut self.emergency_breaks {
+            *advance -= whitespace_trimmed;
+        }
     }
 
     /// Whether this is segment is phantom. If false, its line box won't be phantom.
@@ -1797,6 +1806,74 @@ impl InlineFormattingContextLayout<'_> {
         )
     }
 
+    fn note_emergency_wrap_opportunity(&mut self, character_offset: Utf32CodeUnits) {
+        if self.ifc.grapheme_boundaries().binary_search(&character_offset).is_err() {
+            return;
+        }
+        let segment = &mut self.current_line_segment;
+        if segment.has_content {
+            segment.emergency_breaks.push((segment.line_items.len(), segment.inline_size));
+        }
+    }
+
+    /// Only fall back to grapheme boundaries after normal line-breaking has moved
+    /// the word to an empty line and it still overflows. Ordinary word boundaries
+    /// thus retain priority over overflow-wrap opportunities.
+    fn break_overflowing_word(&mut self) {
+        if self.current_line_segment.emergency_breaks.is_empty() {
+            return;
+        }
+        let available = self.current_line.placement_among_floats.get()
+            .map_or(self.containing_block().size.inline, |placement| placement.size.inline)
+            - self.current_line.inline_position;
+        if self.current_line_segment.inline_size - self.current_line_segment.trailing_whitespace_size <= available {
+            return;
+        }
+        let segment = &mut self.current_line_segment;
+        let breaks = mem::take(&mut segment.emergency_breaks);
+        let mut items = mem::take(&mut segment.line_items).into_iter();
+        let total_size = segment.inline_size;
+        let block_size = segment.max_block_size.clone();
+        let trailing_whitespace = segment.trailing_whitespace_size;
+        let depth = segment.inline_box_hierarchy_depth;
+        segment.reset();
+        let mut consumed_items = 0;
+        let mut consumed_size = Au::zero();
+        let mut next_break = 0;
+        loop {
+            let available = self.current_line.placement_among_floats.get()
+                .map_or(self.containing_block().size.inline, |placement| placement.size.inline)
+                - self.current_line.inline_position;
+            if total_size - consumed_size - trailing_whitespace <= available || next_break == breaks.len() {
+                let segment = &mut self.current_line_segment;
+                segment.line_items.extend(items);
+                segment.inline_size += total_size - consumed_size;
+                segment.max_block_size.max_assign(&block_size);
+                segment.trailing_whitespace_size = trailing_whitespace;
+                segment.has_content = true;
+                segment.inline_box_hierarchy_depth = depth;
+                return;
+            }
+            // Consume each candidate and line item once, even for very long words.
+            let mut chosen = next_break;
+            while chosen + 1 < breaks.len() && breaks[chosen + 1].1 - consumed_size <= available {
+                chosen += 1;
+            }
+            let (index, advance) = breaks[chosen];
+            let segment = &mut self.current_line_segment;
+            segment.line_items.extend(items.by_ref().take(index - consumed_items));
+            segment.inline_size += advance - consumed_size;
+            segment.max_block_size.max_assign(&block_size);
+            segment.has_content = true;
+            segment.inline_box_hierarchy_depth = depth;
+            self.commit_current_segment_to_line();
+            self.process_line_break(false, false);
+            consumed_items = index;
+            consumed_size = advance;
+            next_break = chosen + 1;
+        }
+    }
+
     /// Process a soft wrap opportunity. This will either commit the current unbreakable
     /// segment to the current line, if it fits within the containing block and float
     /// placement boundaries, or do a line break and then commit the segment.
@@ -1813,6 +1890,7 @@ impl InlineFormattingContextLayout<'_> {
                 false, /* for_block_level */
             );
         }
+        self.break_overflowing_word();
         self.commit_current_segment_to_line();
     }
 
@@ -1864,7 +1942,25 @@ impl InlineFormattingContextLayout<'_> {
             assert!(!will_break);
         }
 
-        self.current_line.line_items.extend(segment_items);
+        // Emergency break candidates are individual shaped clusters while finding
+        // line boundaries. Coalesce adjacent pieces again before fragment creation.
+        for item in segment_items {
+            if let LineItem::TextRun(id, ref text) = item {
+                if let Some(LineItem::TextRun(previous_id, previous)) = self.current_line.line_items.last_mut() {
+                    if *previous_id == id
+                        && Arc::ptr_eq(&previous.text_fragment_run_data, &text.text_fragment_run_data)
+                        && previous.info == text.info
+                        && previous.character_range_in_dom_node.end == text.character_range_in_dom_node.start
+                        && !previous.is_empty_for_text_cursor && !text.is_empty_for_text_cursor
+                    {
+                        previous.text.extend(text.text.iter().cloned());
+                        previous.character_range_in_dom_node.end = text.character_range_in_dom_node.end;
+                        continue;
+                    }
+                }
+            }
+            self.current_line.line_items.push(item);
+        }
         self.current_line.has_content |= self.current_line_segment.has_content;
         self.current_line.has_inline_pbm |= self.current_line_segment.has_inline_pbm;
 
@@ -2029,6 +2125,7 @@ impl InlineFormattingContext {
 
         InlineFormattingContext {
             text_content: builder.text_content_slot,
+            grapheme_boundaries: OnceLock::new(),
             inline_items: builder.inline_items,
             inline_boxes: builder.inline_boxes,
             shared_inline_styles,
@@ -2039,6 +2136,19 @@ impl InlineFormattingContext {
             has_right_to_left_content,
             tab_size_multiplier: Default::default(),
         }
+    }
+
+    fn grapheme_boundaries(&self) -> &[Utf32CodeUnits] {
+        self.grapheme_boundaries.get_or_init(|| {
+            let text = self.text_content();
+            let mut previous_byte = 0;
+            let mut characters = Utf32CodeUnits(0);
+            GraphemeClusterSegmenter::new().segment_str(text).map(|byte| {
+                characters += Utf32CodeUnits::length_of(AssumeUnder4GB, &text[previous_byte..byte]);
+                previous_byte = byte;
+                characters
+            }).collect()
+        })
     }
 
     pub(crate) fn text_content(&self) -> &str {
@@ -2940,7 +3050,7 @@ impl<'layout_data> ContentSizesComputation<'layout_data> {
                             self.process_preserved_tab(&parent_style, inline_formatting_context)
                         },
                         TextRunItem::TextSegment(segment) => {
-                            self.process_text_segment(&parent_style, segment)
+                            self.process_text_segment(&parent_style, segment, inline_formatting_context)
                         },
                     }
                 }
@@ -3003,6 +3113,7 @@ impl<'layout_data> ContentSizesComputation<'layout_data> {
         &mut self,
         parent_style: &AtomicRef<'_, ServoArc<ComputedValues>>,
         segment: &TextRunSegment,
+        inline_formatting_context: &InlineFormattingContext,
     ) {
         let style_text = parent_style.get_inherited_text();
         let can_wrap = style_text.text_wrap_mode == TextWrapMode::Wrap;
@@ -3011,7 +3122,10 @@ impl<'layout_data> ContentSizesComputation<'layout_data> {
         // linebreaks after atomics as in layout.
         let break_at_start = segment.break_at_start && self.had_content_yet_for_min_content;
 
+        let mut character_start = segment.shaped_character_start.unwrap_or(segment.character_range.start);
         for (run_index, run) in segment.runs.iter().enumerate() {
+            let run_start = character_start;
+            character_start += run.character_count();
             // Break before each unbreakable run in this TextRun, except the first unless the
             // linebreaker was set to break before the first run.
             if can_wrap && (run_index != 0 || break_at_start) {
@@ -3045,7 +3159,19 @@ impl<'layout_data> ContentSizesComputation<'layout_data> {
             }
 
             self.commit_pending_whitespace();
-            self.add_inline_size(advance);
+            if can_wrap && style_text.overflow_wrap == OverflowWrap::Anywhere && !run.is_whitespace() {
+                let boundaries = inline_formatting_context.grapheme_boundaries();
+                let mut chunk_end = run_start;
+                for chunk in TextRunSegment::emergency_slices(run, boundaries, run_start) {
+                    chunk_end += chunk.character_count();
+                    self.add_inline_size(chunk.total_advance());
+                    if boundaries.binary_search(&chunk_end).is_ok() {
+                        self.line_break_opportunity();
+                    }
+                }
+            } else {
+                self.add_inline_size(advance);
+            }
 
             // Typically whitespace glyphs are placed in a separate store,
             // but for `white-space: break-spaces` we place the first whitespace

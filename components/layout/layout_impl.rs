@@ -263,6 +263,60 @@ impl Drop for LayoutThread {
 }
 
 impl Layout for LayoutThread {
+    fn invalidate_relative_selectors_for_dom_mutation(
+        &self,
+        node: TrustedNodeAddress,
+        inserted: bool,
+    ) -> bool {
+        with_layout_state(|| {
+            let node = unsafe { ServoLayoutNode::new(&node) };
+            let Some(element) = node.as_element() else {
+                return false;
+            };
+            crate::relative_selectors::invalidate_mutation(
+                unsafe { element.dangerous_style_element() },
+                &self.stylist,
+                inserted,
+            )
+        })
+    }
+    fn invalidate_relative_selector_snapshots(
+        &self,
+        snapshots: Vec<(TrustedNodeAddress, style::selector_parser::Snapshot)>,
+    ) {
+        with_layout_state(|| {
+            let mut map = SnapshotMap::new();
+            let mut setter = SnapshotSetter {
+                elements_with_snapshot: Vec::new(),
+            };
+            for (node, snapshot) in snapshots {
+                let element = unsafe { ServoLayoutNode::new(&node).as_element().unwrap() };
+                element.set_has_snapshot();
+                map.insert(element.as_node().opaque(), snapshot);
+                setter.elements_with_snapshot.push(element);
+            }
+            for element in &setter.elements_with_snapshot {
+                crate::relative_selectors::invalidate_snapshot(
+                    unsafe { element.dangerous_style_element() },
+                    &self.stylist,
+                    &map,
+                );
+            }
+        });
+    }
+
+    fn invalidate_relative_selectors_for_content_change(&self, node: TrustedNodeAddress) -> bool {
+        with_layout_state(|| {
+            let node = unsafe { ServoLayoutNode::new(&node) };
+            let Some(element) = node.as_element() else {
+                return false;
+            };
+            crate::relative_selectors::invalidate_empty(
+                unsafe { element.dangerous_style_element() },
+                &self.stylist,
+            )
+        })
+    }
     fn device(&self) -> &Device {
         self.stylist.device()
     }
@@ -454,6 +508,23 @@ impl Layout for LayoutThread {
             ))
         })
         .unwrap_or_default()
+    }
+
+    fn query_text_range_rects(
+        &self,
+        ranges: &[(TrustedNodeAddress, std::ops::Range<Utf32CodeUnits>)],
+    ) -> Vec<CSSPixelRectVec> {
+        with_layout_state(|| {
+            let tree = self.stacking_context_tree.borrow();
+            let Some(tree) = tree.as_ref() else {
+                return vec![vec![]; ranges.len()];
+            };
+            let ranges: Vec<_> = ranges
+                .iter()
+                .map(|(node, range)| (unsafe { ServoLayoutNode::new(node) }, range.clone()))
+                .collect();
+            crate::query::text_range_rects(tree, &ranges)
+        })
     }
 
     #[servo_tracing::instrument(skip_all)]
@@ -1278,6 +1349,18 @@ impl LayoutThread {
             .invalidation_set
             .process_style(dangerous_root_element, Some(&snapshot_map));
 
+        let relative_invalidation =
+            pref!(layout_css_has_selector_enabled) && !snapshot_map.is_empty();
+        if relative_invalidation {
+            for element in &_snapshot_setter.elements_with_snapshot {
+                crate::relative_selectors::invalidate_snapshot(
+                    unsafe { element.dangerous_style_element() },
+                    &self.stylist,
+                    &snapshot_map,
+                );
+            }
+        }
+
         if self.previously_highlighted_dom_node.get() != reflow_request.highlighted_dom_node {
             // Need to manually force layout to build a new display list regardless of whether the box tree
             // changed or not.
@@ -1320,6 +1403,13 @@ impl LayoutThread {
                     .as_element()
                     .unwrap()
                     .dangerous_style_element()
+            };
+
+            let original_dirty_root = if relative_invalidation {
+                crate::relative_selectors::mark_path_to_root(original_dirty_root);
+                dangerous_root_element
+            } else {
+                original_dirty_root
             };
 
             recalc_style_traversal = RecalcStyle::new(&layout_context);
@@ -1975,22 +2065,23 @@ impl SnapshotSetter<'_> {
         for (element, restyle) in restyles {
             let element = unsafe { ServoLayoutNode::new(&element).as_element().unwrap() };
 
+            // Unstyled descendants (including display:none subtrees) can still
+            // affect a styled :has() anchor. Keep their snapshots for that pass.
+            if let Some(s) = restyle.snapshot {
+                element.set_has_snapshot();
+                snapshot_map.insert(element.as_node().opaque(), s);
+            }
+
             // If we haven't styled this node yet, we don't need to track a
             // restyle.
             let Some(mut style_data) = element
                 .style_data()
                 .map(|data| data.element_data.borrow_mut())
             else {
-                element.unset_snapshot_flags();
                 continue;
             };
 
             debug!("Noting restyle for {:?}: {:?}", element, style_data);
-            if let Some(s) = restyle.snapshot {
-                element.set_has_snapshot();
-                snapshot_map.insert(element.as_node().opaque(), s);
-            }
-
             // Stash the data on the element for processing by the style system.
             style_data.hint.insert(restyle.hint);
             style_data.damage = restyle.damage;

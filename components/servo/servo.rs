@@ -54,6 +54,8 @@ use script::JSEngineSetup;
 use script::ServiceWorkerManager;
 #[cfg(feature = "multiprocess")]
 use servo_background_hang_monitor::HangMonitorRegister;
+#[cfg(feature = "bluetooth")]
+use servo_base::generic_channel::GenericSender;
 use servo_base::generic_channel::{GenericCallback, RoutedReceiver, SendError};
 pub use servo_base::id::WebViewId;
 use servo_base::id::{EMBEDDER_PIPELINE_NAMESPACE_ID, PipelineNamespace};

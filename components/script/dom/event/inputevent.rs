@@ -12,16 +12,22 @@ use servo_base::text::Utf32CodeUnitsOrNodeOffset;
 use style::Atom;
 use style_traits::CSSPixel;
 
+use crate::dom::abstractrange::AbstractRange;
+use crate::dom::bindings::codegen::Bindings::EventBinding::EventMethods;
 use crate::dom::bindings::codegen::Bindings::InputEventBinding::{self, InputEventMethods};
 use crate::dom::bindings::codegen::Bindings::UIEventBinding::UIEvent_Binding::UIEventMethods;
 use crate::dom::bindings::error::Fallible;
-use crate::dom::bindings::root::DomRoot;
+use crate::dom::bindings::inheritance::Castable;
+use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::datatransfer::DataTransfer;
+use crate::dom::event::Event;
+use crate::dom::eventtarget::EventTarget;
 use crate::dom::node::Node;
 use crate::dom::staticrange::StaticRange;
 use crate::dom::uievent::UIEvent;
 use crate::dom::window::Window;
+use script_bindings::cell::DomRefCell;
 
 #[dom_struct]
 pub(crate) struct InputEvent {
@@ -29,9 +35,15 @@ pub(crate) struct InputEvent {
     data: Option<DOMString>,
     is_composing: bool,
     input_type: DOMString,
+    target_ranges: DomRefCell<Vec<Dom<StaticRange>>>,
 }
 
 impl InputEvent {
+    pub(crate) fn set_target_ranges(&self, ranges: &[DomRoot<StaticRange>]) {
+        *self.target_ranges.borrow_mut() =
+            ranges.iter().map(|range| Dom::from_ref(&**range)).collect();
+    }
+
     #[expect(clippy::too_many_arguments)]
     pub(crate) fn new(
         cx: &mut JSContext,
@@ -53,6 +65,7 @@ impl InputEvent {
                 data,
                 is_composing,
                 input_type,
+                target_ranges: Default::default(),
             }),
             window,
             proto,
@@ -86,6 +99,10 @@ impl InputEventMethods<crate::DomTypeHolder> for InputEvent {
             init.isComposing,
             init.inputType.clone(),
         );
+        event.set_target_ranges(&init.targetRanges);
+        event
+            .upcast::<Event>()
+            .set_composed(init.parent.parent.composed);
         Ok(event)
     }
 
@@ -112,8 +129,28 @@ impl InputEventMethods<crate::DomTypeHolder> for InputEvent {
 
     /// <https://w3c.github.io/input-events/#dom-inputevent-gettargetranges>
     fn GetTargetRanges(&self) -> Vec<DomRoot<StaticRange>> {
-        // TODO: Populate targetRanges for contenteditable
-        Vec::new()
+        let current_target = self
+            .upcast::<Event>()
+            .GetCurrentTarget()
+            .or_else(|| self.upcast::<Event>().GetTarget());
+        self.target_ranges
+            .borrow()
+            .iter()
+            .filter(|range| {
+                // A composed event must not expose shadow-tree endpoints to listeners
+                // outside that tree. Reuse the DOM event retargeting algorithm.
+                current_target.as_ref().is_none_or(|target| {
+                    let range = range.upcast::<AbstractRange>();
+                    [range.start().node().get(), range.end().node().get()]
+                        .iter()
+                        .all(|node| {
+                            let endpoint = node.upcast::<EventTarget>();
+                            &*endpoint.retarget(target) == endpoint
+                        })
+                })
+            })
+            .map(|range| DomRoot::from_ref(&**range))
+            .collect()
     }
 
     /// <https://dom.spec.whatwg.org/#dom-event-istrusted>

@@ -1007,6 +1007,27 @@ impl Document {
         self.dirty_root.take()
     }
 
+    /// Stylo's relative-selector invalidator marks paths above the usual dirty
+    /// root. Preserve the old dirty path, then traverse those paths from the root.
+    pub(crate) fn expand_dirty_root_for_relative_selectors(&self, no_gc: &NoGC) {
+        if let Some(old_root) = self.dirty_root.get() {
+            for ancestor in old_root
+                .upcast::<Node>()
+                .inclusive_ancestors_in_flat_tree_unrooted(no_gc)
+            {
+                if ancestor.is::<Element>() {
+                    ancestor.set_flag(NodeFlags::HAS_DIRTY_DESCENDANTS, true);
+                }
+            }
+        }
+        let root = self.GetDocumentElement();
+        if let Some(root) = root.as_ref() {
+            root.upcast::<Node>()
+                .set_flag(NodeFlags::HAS_DIRTY_DESCENDANTS, true);
+        }
+        self.set_dirty_root(no_gc, root.as_deref());
+    }
+
     #[inline]
     pub(crate) fn loader(&self) -> Ref<'_, DocumentLoader> {
         self.loader.borrow()
@@ -1335,6 +1356,16 @@ impl Document {
     pub(crate) fn content_and_heritage_changed(&self, no_gc: &NoGC, node: &Node) {
         if node.is::<Document>() {
             self.document_element_changed();
+        }
+
+        if servo_config::pref!(layout_css_has_selector_enabled)
+            && node.is_connected()
+            && self
+                .window()
+                .layout()
+                .invalidate_relative_selectors_for_content_change(node.to_trusted_node_address())
+        {
+            self.expand_dirty_root_for_relative_selectors(no_gc);
         }
 
         // TODO: A change to the children of a node only affects style when dealing with
@@ -4619,6 +4650,33 @@ impl Document {
 
     pub(crate) fn get_element_by_id(&self, no_gc: &NoGC, id: &Atom) -> Option<DomRoot<Element>> {
         self.id_map.get(no_gc, self.upcast(), id)
+    }
+
+    /// Flush relative-selector invalidations while the old ancestry still exists.
+    /// Keep the snapshots for normal style invalidation after a move/reinsertion.
+    pub(crate) fn invalidate_relative_snapshots_before_detach(&self, no_gc: &NoGC, subtree: &Node) {
+        let snapshots: Vec<_> = {
+            let pending = self.pending_restyles.borrow();
+            subtree
+                .traverse_preorder_non_rooting(no_gc, ShadowIncluding::No)
+                .filter_map(|node| {
+                    let element = node.downcast::<Element>()?;
+                    let restyle = pending.get(&Dom::from_ref(&*element))?;
+                    restyle
+                        .0
+                        .snapshot
+                        .as_ref()
+                        .map(|snapshot| (node.to_trusted_node_address(), snapshot.clone()))
+                })
+                .collect()
+        };
+        if snapshots.is_empty() {
+            return;
+        }
+        self.window()
+            .layout()
+            .invalidate_relative_selector_snapshots(snapshots);
+        self.expand_dirty_root_for_relative_selectors(no_gc);
     }
 
     pub(crate) fn ensure_pending_restyle(&self, el: &Element) -> RefMut<'_, PendingRestyle> {

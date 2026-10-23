@@ -2243,6 +2243,11 @@ impl Handler {
                     self.send_blocking_input_event_to_embedder(InputEvent::Ime(
                         ImeEvent::Composition(event),
                     ));
+                    // Composition bypasses dispatch_actions, so drain its input
+                    // acknowledgement here before replying to Element Send Keys.
+                    self.wait_for_input_event_handled().map_err(|error| {
+                        WebDriverError::new(error, "Composition event was not handled")
+                    })?;
                 },
             }
         }

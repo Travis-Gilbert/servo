@@ -1,0 +1,38 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>:has() invalidation respects tree scope and moving subtrees</title>
+<link rel="help" href="https://drafts.csswg.org/selectors/#relational">
+<script src="/resources/testharness.js"></script>
+<script src="/resources/testharnessreport.js"></script>
+<style>.subject {color:red} .subject:has([data-match]) {color:green}</style>
+<div id="host" class="subject"></div>
+<div id="from" class="subject"><section><span data-match></span></section></div>
+<div id="to" class="subject"></div>
+<script>
+const red = 'rgb(255, 0, 0)', green = 'rgb(0, 128, 0)';
+test(() => {
+  const host = document.querySelector('#host');
+  const root = host.attachShadow({mode:'open'});
+  root.innerHTML = '<style>.inner {color:red} .inner:has([data-match]) {color:green}</style><div class="inner"><section><span></span></section></div>';
+  const inner = root.querySelector('.inner'), span = root.querySelector('span');
+  assert_equals(getComputedStyle(inner).color, red);
+  span.setAttribute('data-match', '');
+  assert_equals(getComputedStyle(inner).color, green, 'shadow-local subject invalidates');
+  assert_equals(getComputedStyle(host).color, red, 'outer selector does not cross shadow root');
+  span.removeAttribute('data-match');
+  assert_equals(getComputedStyle(inner).color, red);
+}, 'Attribute invalidation stays in the selector tree scope');
+test(() => {
+  const from = document.querySelector('#from'), to = document.querySelector('#to');
+  const tree = from.firstChild;
+  assert_equals(getComputedStyle(from).color, green);
+  assert_equals(getComputedStyle(to).color, red);
+  to.append(tree);
+  assert_equals(getComputedStyle(from).color, red, 'old ancestry invalidates');
+  assert_equals(getComputedStyle(to).color, green, 'new ancestry invalidates');
+  tree.firstChild.removeAttribute('data-match');
+  from.append(tree);
+  assert_equals(getComputedStyle(from).color, red);
+  assert_equals(getComputedStyle(to).color, red, 'snapshot invalidates before move');
+}, 'Moving a matching subtree invalidates both old and new ancestors');
+</script>

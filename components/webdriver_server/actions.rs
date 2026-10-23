@@ -319,7 +319,7 @@ impl Handler {
         }
     }
 
-    fn wait_for_input_event_handled(&mut self) -> Result<(), ErrorStatus> {
+    pub(crate) fn wait_for_input_event_handled(&mut self) -> Result<(), ErrorStatus> {
         let pending_receivers = std::mem::take(&mut self.pending_input_event_receivers);
 
         for receiver in pending_receivers {

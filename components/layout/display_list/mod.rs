@@ -78,7 +78,7 @@ mod document_layout_snapshot;
 mod gradient;
 mod hit_test;
 mod paint_timing_handler;
-mod paint_traversal;
+pub(crate) mod paint_traversal;
 mod stacking_context;
 
 pub(crate) use document_layout_snapshot::build_document_layout_snapshot_projection;

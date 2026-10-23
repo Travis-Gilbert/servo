@@ -275,6 +275,7 @@ impl DocumentExecCommandSupport for Document {
         let Some((command, mut selection)) = self.check_support_and_enabled(cx, &command_id) else {
             return false;
         };
+        let input_data = matches!(command, CommandName::InsertText).then(|| value.clone());
         // Step 4. If command is not in the Miscellaneous commands section:
         let affected_editing_host = if !is_command_listed_in_miscellaneous_section(command) {
             // Step 4.1. Let affected editing host be the editing host that is an inclusive ancestor
@@ -300,11 +301,24 @@ impl DocumentExecCommandSupport for Document {
                 true,
                 Some(window),
                 0,
-                None,
+                input_data.clone(),
                 false,
-                DOMString::new(),
+                mapped_value_of_command(command),
             );
+            if matches!(command, CommandName::InsertText) {
+                let range = selection.active_range(cx).expect("Enabled insertion has a range");
+                let target_range = crate::dom::staticrange::StaticRange::new(
+                    cx,
+                    self,
+                    &range.start_container(),
+                    range.start_offset(),
+                    &range.end_container(),
+                    range.end_offset(),
+                );
+                event.set_target_ranges(&[target_range]);
+            }
             let event = event.upcast::<Event>();
+            event.set_composed(true);
             // Step 4.3. If the value returned by the previous step is false, return false.
             if !event.fire(cx, affected_editing_host.upcast()) {
                 return false;
@@ -353,11 +367,12 @@ impl DocumentExecCommandSupport for Document {
                 false,
                 Some(window),
                 0,
-                None,
+                input_data,
                 false,
                 mapped_value_of_command(command),
             );
             let event = event.upcast::<Event>();
+            event.set_composed(true);
             event.set_trusted(true);
             event.fire(cx, affected_editing_host.upcast());
         }

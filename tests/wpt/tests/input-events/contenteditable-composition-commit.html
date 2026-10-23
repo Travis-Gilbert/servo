@@ -1,0 +1,47 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Composed text reaches contenteditable with composition input events</title>
+<link rel="help" href="https://w3c.github.io/input-events/#events-composition-input-events">
+<script src="/resources/testharness.js"></script>
+<script src="/resources/testharnessreport.js"></script>
+<script src="/resources/testdriver.js"></script>
+<script src="/resources/testdriver-vendor.js"></script>
+<div id="editor" contenteditable>abc</div>
+<script>
+// WebDriver Element Send Keys delivers multi-codepoint grapheme clusters using
+// composition events (https://w3c.github.io/webdriver/#dispatch-actions-for-a-string).
+const editor = document.getElementById('editor');
+function reset() { editor.textContent='abc';editor.focus();getSelection().collapse(editor.firstChild,1); }
+promise_test(async t => {
+  reset();
+  const events=[];
+  for (const type of ['compositionstart','compositionupdate','beforeinput','input','compositionend']) {
+    const listener = e => events.push({type:e.type,data:e.data,inputType:e.inputType,isComposing:e.isComposing,trusted:e.isTrusted,cancelable:e.cancelable,text:editor.textContent,ranges:e.getTargetRanges?.().length});
+    editor.addEventListener(type,listener);
+    t.add_cleanup(() => editor.removeEventListener(type,listener));
+  }
+  await test_driver.send_keys(editor,'e\u0301');
+  assert_equals(editor.textContent,'ae\u0301bc');
+  assert_equals(getSelection().focusOffset,3);
+  assert_array_equals(events.map(e=>e.type),['compositionstart','compositionupdate','beforeinput','input','compositionend']);
+  const before=events.find(e=>e.type==='beforeinput'),input=events.find(e=>e.type==='input');
+  assert_equals(before.text,'abc');
+  assert_equals(input.text,'ae\u0301bc');
+  for (const event of [before,input]) {
+    assert_equals(event.inputType,'insertCompositionText');
+    assert_equals(event.data,'e\u0301');
+    assert_true(event.isComposing);
+    assert_true(event.trusted);
+    assert_false(event.cancelable);
+    assert_equals(event.ranges,event.type === 'beforeinput' ? 1 : 0);
+  }
+}, 'A composed grapheme is inserted once with trusted input events and target ranges');
+promise_test(async t => {
+  reset();
+  const cancel = e => e.preventDefault();
+  editor.addEventListener('compositionstart',cancel);
+  t.add_cleanup(() => editor.removeEventListener('compositionstart',cancel));
+  await test_driver.send_keys(editor,'e\u0301');
+  assert_equals(editor.textContent,'abc');
+}, 'Canceling compositionstart prevents insertion');
+</script>

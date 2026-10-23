@@ -1,0 +1,59 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>SVG dataset reflects data attributes with stable identity</title>
+<link rel="help" href="https://html.spec.whatwg.org/multipage/dom.html#dom-dataset">
+<script src="/resources/testharness.js"></script>
+<script src="/resources/testharnessreport.js"></script>
+<script>
+for (const tag of ["svg", "g", "path"]) {
+  const create = () => document.createElementNS("http://www.w3.org/2000/svg", tag);
+  test(() => {
+    const element = create();
+    assert_true(element.dataset instanceof DOMStringMap);
+    assert_equals(element.dataset, element.dataset);
+    assert_not_equals(element.dataset, create().dataset);
+  }, `${tag}: dataset is a per-element SameObject DOMStringMap`);
+
+  test(() => {
+    const element = create();
+    const dataset = element.dataset;
+    element.setAttribute("data-edge-id", "first");
+    assert_equals(dataset.edgeId, "first");
+    dataset.edgeId = "second";
+    assert_equals(element.getAttribute("data-edge-id"), "second");
+    element.setAttribute("data-edge-id", "third");
+    assert_equals(dataset.edgeId, "third");
+    delete dataset.edgeId;
+    assert_false(element.hasAttribute("data-edge-id"));
+    assert_false("edgeId" in dataset);
+  }, `${tag}: attribute and dataset mutations reflect in both directions`);
+
+  test(() => {
+    const element = create();
+    element.setAttribute("data-edge-id", "edge");
+    element.setAttribute("data-Upper", "ignored");
+    element.setAttribute("data-node-id", "node");
+    assert_array_equals(Object.keys(element.dataset), ["edgeId", "nodeId"]);
+    assert_equals(element.dataset.Upper, undefined);
+    element.removeAttribute("data-edge-id");
+    assert_array_equals(Object.keys(element.dataset), ["nodeId"]);
+  }, `${tag}: enumeration preserves attribute order and ignores uppercase names`);
+
+  test(() => {
+    const element = create();
+    assert_throws_dom("SyntaxError", () => { element.dataset["edge-id"] = "invalid"; });
+    assert_false(element.hasAttribute("data-edge-id"));
+    assert_throws_dom("InvalidCharacterError", () => { element.dataset["bad name"] = "invalid"; });
+  }, `${tag}: invalid dataset property names are rejected`);
+
+  test(() => {
+    const element = create();
+    element.dataset.edgeId = "source";
+    const clone = element.cloneNode(true);
+    assert_equals(clone.dataset.edgeId, "source");
+    clone.dataset.edgeId = "clone";
+    assert_equals(element.dataset.edgeId, "source");
+    assert_not_equals(clone.dataset, element.dataset);
+  }, `${tag}: cloning copies attributes without sharing the dataset`);
+}
+</script>

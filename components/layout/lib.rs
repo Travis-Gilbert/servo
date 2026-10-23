@@ -28,6 +28,7 @@ mod lists;
 mod positioned;
 mod query;
 mod quotes;
+mod relative_selectors;
 mod replaced;
 mod sizing;
 mod style_ext;

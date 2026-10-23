@@ -472,8 +472,9 @@ impl TextFragment {
         &self,
         point_in_fragment: Point2D<Au, CSSPixel>,
     ) -> bool {
-        let rect = &self.base.rect();
-        rect.min_y() <= point_in_fragment.y && rect.max_y() >= point_in_fragment.y
+        // The point has already been translated into this fragment's local
+        // coordinates. Applying its parent-relative origin again picks the wrong line.
+        Au::zero() <= point_in_fragment.y && self.base.rect().height() >= point_in_fragment.y
     }
 
     /// Find the distance between for point relative to a [`TextFragment`] for the
@@ -533,7 +534,7 @@ impl TextFragment {
         //
         // TODO: It would be nice to just return the last offset here, but <textarea>
         // does not currently make a fragment for all selection indices.
-        if point_in_fragment.y > self.base.rect().max_y() + max_vertical_offset {
+        if point_in_fragment.y > self.base.rect().height() + max_vertical_offset {
             return None;
         }
 

@@ -18,6 +18,7 @@ use style::values::specified;
 use style_traits::ParsingMode;
 use stylo_dom::ElementState;
 
+use crate::dom::attributes::domstringmap::DOMStringMap;
 use crate::dom::bindings::codegen::Bindings::HTMLOrSVGElementBinding::FocusOptions;
 use crate::dom::bindings::codegen::Bindings::SVGElementBinding::SVGElementMethods;
 use crate::dom::bindings::inheritance::Castable;
@@ -44,6 +45,7 @@ use crate::dom::window::scrolling_box::{ScrollAxisState, ScrollRequirement};
 pub(crate) struct SVGElement {
     element: Element,
     style_decl: MutNullableDom<CSSStyleDeclaration>,
+    dataset: MutNullableDom<DOMStringMap>,
 }
 
 impl SVGElement {
@@ -64,6 +66,7 @@ impl SVGElement {
         SVGElement {
             element: Element::new_inherited_with_state(state, tag_name, ns!(svg), prefix, document),
             style_decl: Default::default(),
+            dataset: Default::default(),
         }
     }
 
@@ -162,6 +165,12 @@ impl SVGElementMethods<crate::DomTypeHolder> for SVGElement {
                 CSSModificationAccess::ReadWrite,
             )
         })
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-dataset>
+    fn Dataset(&self, cx: &mut JSContext) -> DomRoot<DOMStringMap> {
+        self.dataset
+            .or_init(|| DOMStringMap::new(cx, self.upcast()))
     }
 
     // https://html.spec.whatwg.org/multipage/#globaleventhandlers

@@ -1,0 +1,33 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Canvas font bounds are independent of the measured glyph bounds</title>
+<link rel="help" href="https://html.spec.whatwg.org/multipage/canvas.html#textmetrics">
+<script src="/resources/testharness.js"></script>
+<script src="/resources/testharnessreport.js"></script>
+<link rel="stylesheet" href="/fonts/ahem.css">
+<span style="font: 50px Ahem">X</span>
+<script>
+promise_test(async () => {
+  await document.fonts.ready;
+  const context = document.createElement("canvas").getContext("2d");
+  context.font = "50px Ahem";
+  const metrics = context.measureText("");
+  assert_equals(metrics.width, 0);
+  assert_equals(metrics.fontBoundingBoxAscent, 40, "font ascent is not an empty glyph bound");
+  assert_equals(metrics.fontBoundingBoxDescent, 10, "font descent is not an empty glyph bound");
+  assert_equals(metrics.actualBoundingBoxAscent, 0, "empty text has no glyph ascent");
+  assert_equals(metrics.actualBoundingBoxDescent, 0, "empty text has no glyph descent");
+}, "Empty text retains font metrics while its actual bounds are empty");
+
+promise_test(async () => {
+  await document.fonts.ready;
+  const context = document.createElement("canvas").getContext("2d");
+  context.font = "50px Ahem";
+  context.textBaseline = "top";
+  const empty = context.measureText("");
+  const glyph = context.measureText("X");
+  assert_equals(empty.fontBoundingBoxAscent, glyph.fontBoundingBoxAscent);
+  assert_equals(empty.fontBoundingBoxDescent, glyph.fontBoundingBoxDescent);
+  assert_equals(empty.fontBoundingBoxAscent + empty.fontBoundingBoxDescent, 50);
+}, "Changing the baseline preserves font bounds independent of text");
+</script>

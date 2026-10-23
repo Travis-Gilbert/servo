@@ -319,8 +319,23 @@ pub trait LayoutFactory: Send + Sync {
 }
 
 pub trait Layout {
+    /// Invalidate relative selectors after insertion or before removal, while the
+    /// changed element is connected. Returns whether the dirty root may expand.
+    fn invalidate_relative_selectors_for_dom_mutation(
+        &self,
+        node: TrustedNodeAddress,
+        inserted: bool,
+    ) -> bool;
+
     /// Get a reference to this Layout's Stylo `Device` used to handle media queries and
     /// resolve font metrics.
+    fn invalidate_relative_selector_snapshots(
+        &self,
+        snapshots: Vec<(TrustedNodeAddress, Snapshot)>,
+    );
+
+    fn invalidate_relative_selectors_for_content_change(&self, node: TrustedNodeAddress) -> bool;
+
     fn device(&self) -> &Device;
 
     /// Set the theme on this [`Layout`]'s [`Device`]. The caller should also trigger a
@@ -412,6 +427,13 @@ pub trait Layout {
         exclude_transform_and_inline: bool,
     ) -> Option<Rect<Au, CSSPixel>>;
     fn query_box_areas(&self, node: TrustedNodeAddress, area: BoxAreaType) -> CSSPixelRectVec;
+
+    /// Text range rectangles, grouped in the same order as the requests.
+    fn query_text_range_rects(
+        &self,
+        ranges: &[(TrustedNodeAddress, std::ops::Range<Utf32CodeUnits>)],
+    ) -> Vec<CSSPixelRectVec>;
+
     fn query_client_rect(&self, node: TrustedNodeAddress) -> Rect<i32, CSSPixel>;
     fn query_current_css_zoom(&self, node: TrustedNodeAddress) -> f32;
     fn query_element_inner_outer_text(&self, node: TrustedNodeAddress) -> String;

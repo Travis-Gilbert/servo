@@ -146,7 +146,8 @@ impl Default for ServoShellPreferences {
 ))]
 pub fn default_config_dir() -> Option<PathBuf> {
     let mut config_dir = ::dirs::config_dir().unwrap();
-    config_dir.push("Servo");
+    config_dir.push("servo");
+    config_dir.push("default");
     Some(config_dir)
 }
 
@@ -155,14 +156,14 @@ pub fn default_config_dir() -> Option<PathBuf> {
 pub(crate) static DEFAULT_CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
 #[cfg(any(target_os = "android", target_env = "ohos"))]
 pub fn default_config_dir() -> Option<PathBuf> {
-    let mut config_dir = ::dirs::config_dir().unwrap();
-    config_dir.push("Servo");
-    Some(config_dir)
+    DEFAULT_CONFIG_DIR.get().cloned()
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(target_os = "macos")]
 pub fn default_config_dir() -> Option<PathBuf> {
-    let mut config_dir = ::dirs::config_dir().unwrap();
+    // FIXME: use `config_dir()` ($HOME/Library/Preferences)
+    // instead of `data_dir()` ($HOME/Library/Application Support) ?
+    let mut config_dir = ::dirs::data_dir().unwrap();
     config_dir.push("Servo");
     Some(config_dir)
 }

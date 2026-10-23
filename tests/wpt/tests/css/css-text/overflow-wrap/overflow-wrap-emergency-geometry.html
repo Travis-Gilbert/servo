@@ -1,0 +1,69 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Emergency wrapping preserves normal breaks and grapheme clusters</title>
+<link rel="help" href="https://drafts.csswg.org/css-text/#overflow-wrap-property">
+<script src="/resources/testharness.js"></script>
+<script src="/resources/testharnessreport.js"></script>
+<link rel="stylesheet" href="/fonts/ahem.css">
+<style>.sample {font:20px/30px Ahem; width:100px; overflow-wrap:break-word}</style>
+<div id="fixtures"></div>
+<script>
+function sample(html, css = '') {
+  const el = document.createElement('div');
+  el.className = 'sample'; el.style.cssText = css; el.innerHTML = html;
+  fixtures.append(el); return el;
+}
+function rects(el) {
+  const range = document.createRange(); range.selectNodeContents(el);
+  return [...range.getClientRects()].filter(r => r.width > 0 && r.height > 0);
+}
+promise_test(async () => { await document.fonts.load('20px Ahem'); }, 'Load Ahem');
+for (const wrap of ['break-word', 'anywhere']) {
+  promise_test(async t => {
+    await document.fonts.ready;
+    const el = sample('abcdefghij', `overflow-wrap:${wrap}`); t.add_cleanup(() => el.remove());
+    const rs = rects(el);
+    assert_equals(new Set(rs.map(r => r.top)).size, 2);
+    assert_true(rs.every(r => r.width <= 100));
+    assert_equals(el.offsetHeight, 60);
+  }, `${wrap} wraps an oversized word at the available width`);
+}
+promise_test(async t => {
+  await document.fonts.ready;
+  const el = sample('abcde<span></span><span></span>fghij'); t.add_cleanup(() => el.remove());
+  assert_equals(new Set(rects(el).map(r => r.top)).size, 2);
+  assert_equals(el.offsetHeight, 60);
+}, 'Emergency wrapping works across inline element boundaries');
+promise_test(async t => {
+  await document.fonts.ready;
+  const el = sample('aa bbbbb'); t.add_cleanup(() => el.remove());
+  const range = document.createRange(); range.setStart(el.firstChild, 3); range.setEnd(el.firstChild, 8);
+  const rs = [...range.getClientRects()];
+  assert_equals(rs.length, 1); assert_equals(rs[0].width, 100);
+  assert_equals(el.offsetHeight, 60);
+}, 'A word that fits a fresh line stays whole');
+for (const css of ['overflow-wrap:normal', 'white-space:nowrap']) {
+  promise_test(async t => {
+    await document.fonts.ready;
+    const el = sample('abcdefghij', css); t.add_cleanup(() => el.remove());
+    assert_equals(el.offsetHeight, 30);
+    assert_equals(rects(el)[0].width, 200);
+  }, `${css} prevents emergency wrapping`);
+}
+for (const [wrap, width] of [['anywhere', 20], ['break-word', 200]]) {
+  promise_test(async t => {
+    await document.fonts.ready;
+    const el = sample('abcdefghij', `overflow-wrap:${wrap};width:min-content`); t.add_cleanup(() => el.remove());
+    assert_equals(el.offsetWidth, width);
+  }, `${wrap} has the specified min-content contribution`);
+}
+for (const cluster of ['e\u0301', '👩‍💻']) {
+  promise_test(async t => {
+    await document.fonts.ready;
+    const el = sample(cluster + 'X', 'width:1px'); t.add_cleanup(() => el.remove());
+    const range = document.createRange(); range.setStart(el.firstChild, 0); range.setEnd(el.firstChild, cluster.length);
+    assert_less_than_equal(range.getBoundingClientRect().height, 30, 'One grapheme stays on one line');
+    assert_equals(el.offsetHeight, 60, 'Only two grapheme clusters produce two lines');
+  }, `Emergency wrapping preserves the ${cluster} grapheme cluster`);
+}
+</script>

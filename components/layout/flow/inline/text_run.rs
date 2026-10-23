@@ -25,7 +25,7 @@ use style::computed_values::white_space_collapse::T as WhiteSpaceCollapse;
 use style::font_face::FontLanguageOverride;
 use style::properties::ComputedValues;
 use style::values::computed::{
-    FontFeatureSettings, FontVariantEastAsian, FontVariantLigatures, FontVariantNumeric,
+    FontFeatureSettings, FontVariantEastAsian, FontVariantLigatures, FontVariantNumeric, OverflowWrap,
 };
 use unicode_bidi::Level;
 use unicode_script::Script;
@@ -196,6 +196,9 @@ pub(crate) struct TextRunSegment {
     /// The shaped runs within this segment.
     #[conditional_malloc_size_of]
     pub runs: Vec<Arc<ShapedTextSlice>>,
+    /// The actual start after slicing, which can advance past a cluster shared
+    /// with the preceding DOM text node.
+    pub shaped_character_start: Option<Utf32CodeUnits>,
 
     /// The shaped text that was used to produce this segment. [`Self::runs`] are slices
     /// of this shaped text.
@@ -214,6 +217,7 @@ impl TextRunSegment {
             byte_range,
             character_range,
             runs: Vec::new(),
+            shaped_character_start: None,
             break_at_start: false,
             shaped_text: None,
         }
@@ -271,7 +275,9 @@ impl TextRunSegment {
             soft_wrap_policy = SegmentStartSoftWrapPolicy::Force;
         }
 
-        let mut character_range_start = self.character_range.start;
+        let mut character_range_start = self
+            .shaped_character_start
+            .unwrap_or(self.character_range.start);
         for (run_index, run) in self.runs.iter().enumerate() {
             let new_character_range_end = character_range_start + run.character_count();
 
@@ -282,15 +288,36 @@ impl TextRunSegment {
             }
 
             let run_start = text_run.run_data.character_range_in_ifc_text.start;
-            ifc.push_glyph_store_to_unbreakable_segment(
-                run.clone(),
-                text_run,
-                &self.info,
-                character_range_start - run_start..new_character_range_end - run_start,
-            );
+            let style = text_run.inline_styles().style.borrow();
+            let emergency_wrap = style.get_inherited_text().text_wrap_mode == style::computed_values::text_wrap_mode::T::Wrap && matches!(style.get_inherited_text().overflow_wrap,
+                OverflowWrap::Anywhere | OverflowWrap::BreakWord);
+            if emergency_wrap && !run.is_whitespace() {
+                let mut chunk_start = character_range_start;
+                for chunk in Self::emergency_slices(run, ifc.ifc.grapheme_boundaries(), character_range_start) {
+                    ifc.note_emergency_wrap_opportunity(chunk_start);
+                    let chunk_end = chunk_start + chunk.character_count();
+                    ifc.push_glyph_store_to_unbreakable_segment(chunk, text_run, &self.info,
+                        chunk_start - run_start..chunk_end - run_start);
+                    chunk_start = chunk_end;
+                }
+            } else {
+                ifc.push_glyph_store_to_unbreakable_segment(
+                    run.clone(), text_run, &self.info,
+                    character_range_start - run_start..new_character_range_end - run_start,
+                );
+            }
 
             character_range_start = new_character_range_end;
         }
+    }
+
+    pub(super) fn emergency_slices(run: &ShapedTextSlice, boundaries: &[Utf32CodeUnits], start: Utf32CodeUnits) -> Vec<Arc<ShapedTextSlice>> {
+        let end = start + run.character_count();
+        if start == end { return vec![Arc::new(run.clone())]; }
+        let first = boundaries.partition_point(|offset| *offset <= start);
+        let last = boundaries.partition_point(|offset| *offset < end);
+        let offsets = boundaries[first..last].iter().copied().chain(std::iter::once(end)).map(|offset| offset - start);
+        run.slices_at_character_offsets(offsets)
     }
 
     pub(crate) fn is_compatible_with_old_shaping_result(&self, old_segment: &Self) -> bool {

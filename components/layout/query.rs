@@ -12,6 +12,7 @@ use std::sync::Arc;
 use app_units::Au;
 use bitflags::bitflags;
 use embedder_traits::UntrustedNodeAddress;
+use euclid::num::Zero;
 use euclid::{Point2D, Rect, Size2D};
 use layout_api::{
     AxesOverflow, BoxAreaType, CSSPixelRectVec, DangerousStyleElementOf, LayoutElement,
@@ -1528,4 +1529,211 @@ pub(crate) fn process_effective_overflow_query(node: ServoLayoutNode<'_>) -> Opt
             .style()
             .effective_overflow(box_fragment.base.flags),
     )
+}
+
+/// Resolve text ranges from shaped glyph clusters and the paint traversal's
+/// reference frames. Element border boxes cannot describe partial text or carets.
+pub(crate) fn text_range_rects(
+    tree: &StackingContextTree,
+    ranges: &[(ServoLayoutNode<'_>, std::ops::Range<Utf32CodeUnits>)],
+) -> Vec<CSSPixelRectVec> {
+    use crate::display_list::StackingContext;
+    use crate::display_list::paint_traversal::{
+        PaintTraversal, PaintTraversalHandler, TraversalState,
+    };
+    use crate::fragment_tree::{BoxFragmentWithStyle, TextFragment};
+    use crate::geom::PhysicalRect;
+    use servo_base::text::RangeAny;
+
+    struct TextRequest {
+        run: Arc<crate::flow::inline::text_run::SharedTextRunData>,
+        range: std::ops::Range<Utf32CodeUnits>,
+        collapsed: bool,
+    }
+    let requests: Vec<_> = ranges
+        .iter()
+        .map(|(node, range)| {
+            let inner = node.inner_layout_data()?;
+            let layout_box = inner.self_box.borrow();
+            let Some(crate::dom::LayoutBox::Text(text)) = layout_box.as_ref() else {
+                return None;
+            };
+            let run = text.borrow().run_data.clone();
+            let transformed = run.map_dom_range_to_transformed_range(RangeAny::new(
+                Some(range.start),
+                Some(range.end),
+            ));
+            if !range.is_empty() && transformed.is_empty() {
+                return None;
+            }
+            let origin = run.character_range_in_ifc_text.start;
+            Some(TextRequest {
+                run,
+                range: transformed.start + origin..transformed.end + origin,
+                collapsed: range.is_empty(),
+            })
+        })
+        .collect();
+    #[derive(Clone)]
+    struct TextRect {
+        rect: Rect<Au, CSSPixel>,
+        spatial_id: servo_base::id::ScrollTreeNodeId,
+        font_key: webrender_api::FontInstanceKey,
+    }
+    struct Collector<'a> {
+        tree: &'a StackingContextTree,
+        ranges: &'a [Option<TextRequest>],
+        rects: Vec<Vec<TextRect>>,
+    }
+    impl PaintTraversalHandler for Collector<'_> {
+        type StackingContextState = ();
+        fn visit_stacking_context(&mut self, _: &StackingContext) {}
+        fn leave_stacking_context(&mut self, _: &TraversalState, _: ()) {}
+        fn visit_box(&mut self, _: &TraversalState, _: &BoxFragmentWithStyle<'_>) {}
+        fn visit_text(
+            &mut self,
+            state: &TraversalState,
+            _: PhysicalRect<Au>,
+            fragment: &Arc<TextFragment>,
+        ) {
+            let Some(tag) = fragment.base.tag else { return };
+            if tag.pseudo_element_chain != Default::default() {
+                return;
+            }
+            for (slot, request) in self.ranges.iter().enumerate() {
+                let Some(request) = request else { continue };
+                // Shaping can share a cluster across inline/text-node boundaries.
+                // Compare IFC positions, rather than discarding the shared glyph
+                // merely because its owning fragment has a different DOM tag.
+                if !request.run.offset_map.ptr_eq(&fragment.run_data.offset_map) {
+                    continue;
+                }
+                let range = &request.range;
+                if !request.collapsed && fragment.is_empty_for_text_cursor {
+                    continue;
+                }
+                let origin = fragment.run_data.character_range_in_ifc_text.start;
+                let fragment_range = fragment.character_range_in_dom_node.start + origin
+                    ..fragment.character_range_in_dom_node.end + origin;
+                if range.end < fragment_range.start
+                    || range.start > fragment_range.end
+                    || (!request.collapsed
+                        && (range.end == fragment_range.start || range.start == fragment_range.end))
+                {
+                    continue;
+                }
+                // Traverse glyphs in logical order, retaining each cluster's complete
+                // advance even when a boundary cuts a ligature or combining sequence.
+                let mut character = fragment_range.start;
+                let mut slice_x = Au::zero();
+                let mut left: Option<Au> = None;
+                let mut right: Option<Au> = None;
+                for slice in &fragment.glyphs {
+                    let width = slice.total_advance()
+                        + fragment.justification_adjustment * slice.total_word_separators() as i32;
+                    let mut advance = Au::zero();
+                    let mut clusters: Vec<(Utf32CodeUnits, Au)> = Vec::new();
+                    let glyphs: Vec<_> = if slice.is_rtl() {
+                        slice.glyphs().rev().collect()
+                    } else {
+                        slice.glyphs().collect()
+                    };
+                    for glyph in glyphs {
+                        let width = glyph.advance()
+                            + if glyph.char_is_word_separator() {
+                                fragment.justification_adjustment
+                            } else {
+                                Au::zero()
+                            };
+                        if glyph.character_count().0 == 0 && !clusters.is_empty() {
+                            clusters.last_mut().unwrap().1 += width;
+                        } else {
+                            clusters.push((glyph.character_count(), width));
+                        }
+                    }
+                    for (count, cluster_width) in clusters {
+                        let next = character + count;
+                        let (a, b) = if slice.is_rtl() {
+                            (
+                                slice_x + width - advance - cluster_width,
+                                slice_x + width - advance,
+                            )
+                        } else {
+                            (slice_x + advance, slice_x + advance + cluster_width)
+                        };
+                        let interval = if range.is_empty()
+                            && range.start >= character
+                            && range.start <= next
+                        {
+                            let caret = if range.start == next {
+                                if slice.is_rtl() { a } else { b }
+                            } else if slice.is_rtl() {
+                                b
+                            } else {
+                                a
+                            };
+                            Some((caret, caret))
+                        } else if range.start < next && range.end > character {
+                            Some((a, b))
+                        } else {
+                            None
+                        };
+                        if let Some((a, b)) = interval {
+                            left = Some(left.map_or(a, |x| x.min(a)));
+                            right = Some(right.map_or(b, |x| x.max(b)));
+                        }
+                        character = next;
+                        advance += cluster_width;
+                    }
+                    slice_x += width;
+                }
+                let (left, right) = match (left, right) {
+                    (Some(left), Some(right)) => (left, right),
+                    _ if range.is_empty() => (slice_x, slice_x),
+                    _ => continue,
+                };
+                // Paint origins are relative to the nearest reference frame;
+                // layout-query transforms expect untransformed document coordinates.
+                let reference_origin = self
+                    .tree
+                    .paint_info
+                    .scroll_tree
+                    .reference_frame_offset(state.spatial_id)
+                    .map(Au::from_f32_px);
+                let origin = state.origin
+                    + fragment.base.rect().origin.to_vector()
+                    + reference_origin.to_vector().cast_unit();
+                let rect: Rect<Au, CSSPixel> = Rect::new(
+                    Point2D::new(origin.x + left, origin.y),
+                    Size2D::new(
+                        right - left,
+                        fragment.font_metrics.ascent + fragment.font_metrics.descent,
+                    ),
+                );
+                // A line can be split into word/space fragments for layout. Those
+                // are one text rectangle, not separate DOM range rectangles.
+                if let Some(previous) = self.rects[slot].last_mut()
+                    && previous.spatial_id == state.spatial_id
+                    && previous.font_key == fragment.font_key
+                    && previous.rect.origin.y == rect.origin.y
+                    && previous.rect.size.height == rect.size.height
+                    && (previous.rect.max_x() == rect.min_x() || previous.rect.min_x() == rect.max_x())
+                {
+                    previous.rect = previous.rect.union(&rect);
+                } else {
+                    self.rects[slot].push(TextRect { rect, spatial_id: state.spatial_id, font_key: fragment.font_key });
+                }
+            }
+        }
+    }
+    let mut collector = Collector {
+        tree,
+        ranges: &requests,
+        rects: vec![vec![]; ranges.len()],
+    };
+    PaintTraversal::traverse(&tree.root_stacking_context, &mut collector);
+    collector.rects.into_iter().map(|rects| rects.into_iter().filter_map(|piece| {
+        let transform = tree.paint_info.scroll_tree.cumulative_node_to_root_transform(piece.spatial_id);
+        transform_au_rectangle(piece.rect.cast_unit(), transform)
+    }).collect()).collect()
 }

@@ -17,6 +17,7 @@ mod editing;
 pub(crate) mod focus;
 mod iframe_collection;
 mod interactive_element_command;
+pub(crate) mod selection_navigation;
 mod tree_ordered_index_map;
 pub(crate) mod visibilitystateentry;
 pub(crate) mod websocket;

@@ -1,0 +1,59 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Range rectangles include partial text and preserve caret positions</title>
+<link rel="help" href="https://drafts.csswg.org/cssom-view/#dom-range-getclientrects">
+<link rel="stylesheet" href="/fonts/ahem.css">
+<script src="/resources/testharness.js"></script>
+<script src="/resources/testharnessreport.js"></script>
+<style>
+#text { font: 20px/30px Ahem; width: 100px; transform: translate(35px, 25px); }
+</style>
+<div id="text">ABCDE FGHIJ</div><div id="unrelated">Not selected</div>
+<script>
+promise_test(async () => {
+  await document.fonts.ready;
+  const node = document.getElementById('text').firstChild;
+  const range = document.createRange();
+  range.setStart(node, 1);
+  range.setEnd(node, 3);
+  const rects = range.getClientRects();
+  assert_equals(rects.length, 1, 'only selected text contributes');
+  assert_approx_equals(rects[0].width, 40, 0.1);
+  assert_approx_equals(rects[0].height, 20, 0.1);
+  assert_approx_equals(rects[0].left, document.getElementById('text').getBoundingClientRect().left + 20, 0.1, 'translated glyph position');
+  const left = rects[0].left;
+  const top = rects[0].top;
+  range.collapse(true);
+  const caret = range.getBoundingClientRect();
+  assert_approx_equals(caret.left, left, 0.1, 'collapsed range keeps its x position');
+  assert_approx_equals(caret.top, top, 0.1, 'collapsed range keeps its y position');
+  assert_equals(caret.width, 0);
+  assert_approx_equals(caret.height, 20, 0.1);
+  range.setEnd(node, 9);
+  assert_equals(range.getClientRects().length, 2, 'soft wrapping produces two rectangles');
+  range.setStart(document.getElementById('text'), 0);
+  range.setEnd(document.getElementById('text'), 0);
+  assert_equals(range.getClientRects().length, 0, 'collapsed element boundary is empty');
+}, 'Partial text, collapsed caret, wrapping and transforms');
+promise_test(async t => {
+  const scroller = document.createElement('div');
+  scroller.style.cssText = 'position:absolute;left:150px;top:250px;width:100px;height:40px;overflow:scroll;transform:translate(17px,23px)';
+  const text = document.createElement('div');
+  text.style.cssText = 'font:20px/30px Ahem;width:300px;height:200px;white-space:nowrap';
+  text.textContent = 'ABCDEFGHIJ';
+  scroller.append(text);
+  document.body.append(scroller);
+  t.add_cleanup(() => scroller.remove());
+  await document.fonts.ready;
+  const range = document.createRange();
+  range.setStart(text.firstChild, 1);
+  range.setEnd(text.firstChild, 3);
+  const before = range.getBoundingClientRect();
+  scroller.scrollTop = 35;
+  scroller.scrollLeft = 15;
+  const after = range.getBoundingClientRect();
+  assert_approx_equals(after.left, before.left - 15, 0.1, 'horizontal scroll offset');
+  assert_approx_equals(after.top, before.top - 35, 0.1, 'vertical scroll offset');
+  assert_approx_equals(after.left, text.getBoundingClientRect().left + 20, 0.1, 'text and element use the same viewport frame');
+}, 'Text ranges follow scrolling inside a transformed reference frame');
+</script>

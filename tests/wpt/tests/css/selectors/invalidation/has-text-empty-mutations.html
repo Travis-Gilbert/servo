@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>:has(:empty) invalidation after text mutations</title>
+<link rel="help" href="https://drafts.csswg.org/selectors/#relational">
+<script src="/resources/testharness.js"></script>
+<script src="/resources/testharnessreport.js"></script>
+<style>.subject { color: red } .subject:has(> .child:empty) { color: green }</style>
+<div class="subject"><div class="child"></div></div>
+<script>
+const subject = document.querySelector('.subject');
+const child = document.querySelector('.child');
+const color = () => getComputedStyle(subject).color;
+test(() => {
+  assert_equals(color(), 'rgb(0, 128, 0)');
+  const text = document.createTextNode('x');
+  child.append(text);
+  assert_equals(color(), 'rgb(255, 0, 0)', 'append nonempty text');
+  text.data = '';
+  assert_equals(color(), 'rgb(0, 128, 0)', 'empty existing text');
+  text.data = 'x';
+  assert_equals(color(), 'rgb(255, 0, 0)', 'fill existing text');
+  text.remove();
+  assert_equals(color(), 'rgb(0, 128, 0)', 'remove text');
+}, 'Text insertion, removal and data changes invalidate an ancestor :has(:empty)');
+</script>

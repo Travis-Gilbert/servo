@@ -1,0 +1,44 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Typing follows focus between editing hosts</title>
+<link rel="help" href="https://www.w3.org/TR/input-events-2/#interface-InputEvent">
+<script src="/resources/testharness.js"></script>
+<script src="/resources/testharnessreport.js"></script>
+<script src="/resources/testdriver.js"></script>
+<script src="/resources/testdriver-vendor.js"></script>
+<div id="first" contenteditable>first</div>
+<div id="second" contenteditable>second</div>
+<script>
+promise_test(async t => {
+  const first = document.querySelector('#first');
+  const second = document.querySelector('#second');
+  first.focus();
+  getSelection().collapse(first.firstChild, 2);
+  second.focus();
+  assert_equals(getSelection().anchorNode, second.firstChild);
+  assert_equals(getSelection().anchorOffset, 0);
+  const events = [];
+  for (const type of ['beforeinput', 'input']) {
+    second.addEventListener(type, event => events.push({
+      type, data: event.data, inputType: event.inputType,
+      composed: event.composed, ranges: event.getTargetRanges()
+    }));
+  }
+  await test_driver.send_keys(second, 'x');
+  assert_equals(first.textContent, 'first');
+  assert_equals(second.textContent, 'xsecond');
+  assert_array_equals(events.map(e => e.type), ['beforeinput', 'input']);
+  for (const event of events) {
+    assert_equals(event.data, 'x');
+    assert_equals(event.inputType, 'insertText');
+    assert_true(event.composed);
+  }
+  assert_equals(events[0].ranges.length, 1);
+  assert_equals(events[0].ranges[0].startOffset, 0);
+  assert_equals(events[0].ranges[0].endOffset, 0);
+  assert_equals(events[1].ranges.length, 0);
+  second.addEventListener('beforeinput', event => event.preventDefault(), {once: true});
+  await test_driver.send_keys(second, 'y');
+  assert_equals(second.textContent, 'xsecond', 'Canceled insertion leaves the new host unchanged');
+}, 'Focus replaces the old editing host selection and typing exposes the insertion range');
+</script>

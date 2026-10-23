@@ -62,6 +62,7 @@ servo_arc = { workspace = true }
 smallvec = { workspace = true }
 strum = { workspace = true }
 stylo = { workspace = true }
+stylo_dom = { workspace = true }
 stylo_atoms = { workspace = true }
 stylo_traits = { workspace = true }
 taffy = { workspace = true }

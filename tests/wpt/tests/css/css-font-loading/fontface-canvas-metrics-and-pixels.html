@@ -1,0 +1,31 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Canvas uses fonts loaded through FontFace for measurement and drawing</title>
+<link rel="help" href="https://drafts.csswg.org/css-font-loading/#font-face-constructor">
+<link rel="help" href="https://html.spec.whatwg.org/multipage/canvas.html#text-preparation-algorithm">
+<script src="/resources/testharness.js"></script>
+<script src="/resources/testharnessreport.js"></script>
+<script>
+for (const sourceType of ["url", "buffer"]) {
+  promise_test(async t => {
+    const family = `CanvasLoadedAhem_${sourceType}`;
+    const source = sourceType === "buffer"
+      ? await (await fetch("/fonts/Ahem.ttf")).arrayBuffer()
+      : "url(/fonts/Ahem.ttf)";
+    const face = new FontFace(family, source);
+    document.fonts.add(face);
+    t.add_cleanup(() => { document.fonts.delete(face); });
+    await face.load();
+    assert_equals(face.status, "loaded");
+    const canvas = document.createElement("canvas");
+    canvas.width = 100;
+    canvas.height = 80;
+    const context = canvas.getContext("2d");
+    context.font = `50px ${family}`;
+    assert_equals(context.measureText("X").width, 50, "Ahem glyph advance");
+    context.fillText("X", 0, 50);
+    assert_array_equals([...context.getImageData(25, 25, 1, 1).data], [0, 0, 0, 255], "inside Ahem square");
+    assert_equals(context.getImageData(55, 25, 1, 1).data[3], 0, "outside Ahem square");
+  }, `Canvas measures and draws a FontFace loaded from ${sourceType}`);
+}
+</script>

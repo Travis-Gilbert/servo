@@ -182,20 +182,19 @@ impl HTMLElement {
         let Some(selection) = document.GetSelection(cx) else {
             return;
         };
+        // Preserve a selection already inside this host, including ranges installed
+        // by Selection.collapse() rather than the host's cached live range.
+        if selection.active_range(cx).is_some_and(|active| {
+            active
+                .CommonAncestorContainer()
+                .editing_host_of()
+                .is_some_and(|host| &*host == self.upcast::<Node>())
+        }) {
+            return;
+        }
         let range = self
             .upcast::<Element>()
             .ensure_contenteditable_selection_range(cx, &document);
-        // If the current range is already associated with this contenteditable
-        // element, then we shouldn't do anything. This is important when focus
-        // is lost and regained, but selection was changed beforehand. In that
-        // case, we should maintain the selection as it were, by not creating
-        // a new range.
-        if selection
-            .active_range(cx)
-            .is_some_and(|active| active == range)
-        {
-            return;
-        }
         let node = self.upcast::<Node>();
         let mut selected_node = DomRoot::from_ref(node);
         let mut previous_eligible_node = DomRoot::from_ref(node);
@@ -264,6 +263,9 @@ impl HTMLElement {
         }
         let _ = range.SetStart(cx.no_gc(), &selected_node, selected_offset);
         let _ = range.SetEnd(cx.no_gc(), &selected_node, selected_offset);
+        // Focusing another editing host replaces the previous host's selection.
+        // AddRange alone would ignore this range while the selection is nonempty.
+        selection.RemoveAllRanges(cx.no_gc());
         selection.AddRange(cx.no_gc(), &range);
     }
 }

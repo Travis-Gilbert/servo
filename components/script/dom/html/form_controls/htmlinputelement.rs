@@ -2173,6 +2173,9 @@ impl VirtualMethods for HTMLInputElement {
                     .update_placeholder_contents(cx, self);
 
                 self.update_checked_state();
+                if self.upcast::<Element>().focus_state() {
+                    self.owner_document().focus_handler().refresh_focus_visible_state();
+                }
             },
             local_name!("value") if !self.value_dirty.get() => {
                 // This is only run when the `value` or `defaultValue` attribute is set. It

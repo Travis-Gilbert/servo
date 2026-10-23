@@ -5198,6 +5198,10 @@ impl Element {
         self.set_state(ElementState::FOCUS, value);
     }
 
+    pub(crate) fn set_focus_visible_state(&self, value: bool) {
+        self.set_state(ElementState::FOCUSRING, value);
+    }
+
     pub(crate) fn set_hover_state(&self, value: bool) {
         self.set_state(ElementState::HOVER, value);
     }

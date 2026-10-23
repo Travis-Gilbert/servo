@@ -162,18 +162,6 @@ input[type="file"]:active::file-selector-button {
   background: gainsboro;
 }
 
-button:focus,
-select:focus,
-input[type="button"]:focus,
-input[type="color"]:focus,
-input[type="range"]:focus,
-input[type="reset"]:focus,
-input[type="submit"]:focus,
-input[type="file"]:focus::file-selector-button,
-input[type="radio"]:focus {
-  outline: none;
-}
-
 button:disabled,
 select:disabled,
 input[type="button"]:disabled,

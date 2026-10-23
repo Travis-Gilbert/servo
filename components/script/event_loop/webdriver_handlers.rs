@@ -1190,7 +1190,10 @@ pub(crate) fn handle_get_element_shadow_root(
 impl Element {
     /// <https://w3c.github.io/webdriver/#dfn-keyboard-interactable>
     fn is_keyboard_interactable(&self, no_gc: &NoGC) -> bool {
-        self.is_focusable_area(no_gc) || self.is::<HTMLBodyElement>() || self.is_document_element()
+        // A focused shadow host is the document's active element even when only
+        // its shadow descendant is a focusable area. Send Keys must preserve that
+        // descendant as the keyboard target instead of rejecting the host.
+        self.focus_state() || self.is_focusable_area(no_gc) || self.is::<HTMLBodyElement>() || self.is_document_element()
     }
 }
 

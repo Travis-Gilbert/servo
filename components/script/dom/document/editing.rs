@@ -338,7 +338,9 @@ impl Document {
         // This function does not do any checks for whether or not we are actually inside an
         // editing host, since those checks are performed by exec_command_for_command_id either way.
         let (command, argument) = match editing_action {
-            EditingAction::MoveCursor(..) => return false,
+            EditingAction::MoveCursor(direction, motion, modify) => {
+                return self.move_contenteditable_cursor(cx, *direction, *motion, *modify);
+            },
             EditingAction::SelectAll | EditingAction::Clipboard(_) => {
                 unreachable!("Should have been handled before this point.")
             },

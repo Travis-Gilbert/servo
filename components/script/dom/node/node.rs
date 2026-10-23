@@ -4,6 +4,8 @@
 
 //! The core DOM types. Defines the basic DOM hierarchy as well as all the HTML elements.
 
+use script_bindings::codegen::GenericBindings::UIEventBinding::UIEventMethods;
+
 use std::cell::{Cell, LazyCell};
 use std::cmp::Ordering;
 use std::default::Default;
@@ -105,6 +107,7 @@ use crate::dom::html::htmllinkelement::HTMLLinkElement;
 use crate::dom::html::htmlslotelement::{HTMLSlotElement, Slottable};
 use crate::dom::html::htmlstyleelement::HTMLStyleElement;
 use crate::dom::inputevent::HitTestResult;
+use script_bindings::codegen::GenericBindings::MouseEventBinding::MouseEventMethods;
 use crate::dom::iterators::{
     ShadowIncluding, UnrootedAncestorIterator, UnrootedFollowingFlatTreeNodesTraversal,
     UnrootedFollowingNodeIterator, UnrootedPrecedingNodeIterator,
@@ -376,6 +379,30 @@ impl Node {
             debug_assert!(!node.get_flag(NodeFlags::HAS_DIRTY_DESCENDANTS));
             vtable_for(&node).bind_to_tree(cx, &context);
         }
+        new_child.invalidate_relative_selectors_for_dom_mutation(cx.no_gc(), true);
+    }
+
+    fn invalidate_relative_selectors_for_dom_mutation(&self, no_gc: &NoGC, inserted: bool) {
+        if !servo_config::pref!(layout_css_has_selector_enabled)
+            || !self.is_connected()
+            || !self.is::<Element>()
+        {
+            return;
+        }
+        let document = self.owner_doc();
+        if !inserted {
+            document.invalidate_relative_snapshots_before_detach(no_gc, self);
+        }
+        let expanded = document
+            .window()
+            .layout()
+            .invalidate_relative_selectors_for_dom_mutation(
+                self.to_trusted_node_address(),
+                inserted,
+            );
+        if expanded {
+            document.expand_dirty_root_for_relative_selectors(no_gc);
+        }
     }
 
     /// Clean up flags and runs steps 11-14 of remove a node.
@@ -519,6 +546,8 @@ impl Node {
     fn remove_child(&self, cx: &mut JSContext, child: &Node) {
         assert!(child.parent_node.get().as_deref() == Some(self));
 
+        child.invalidate_relative_selectors_for_dom_mutation(cx.no_gc(), false);
+
         if let Some(element) = self.downcast::<Element>() {
             element.note_dirty_descendants(cx.no_gc());
         }
@@ -558,6 +587,7 @@ impl Node {
     }
 
     fn move_child(&self, cx: &mut JSContext, child: &Node) {
+        child.invalidate_relative_selectors_for_dom_mutation(cx.no_gc(), false);
         assert!(child.parent_node.get().as_deref() == Some(self));
         self.dirty(cx.no_gc(), NodeDamage::ContentOrHeritage);
         if let Some(element) = self.downcast::<Element>() {
@@ -4648,7 +4678,18 @@ impl VirtualMethods for Node {
         else {
             return;
         };
-        selection.collapse_to_dom_position(cx, &container, offset);
+        if event.upcast::<crate::dom::uievent::UIEvent>().Detail() != 2
+            || !crate::dom::document::selection_navigation::select_word(
+                cx,
+                &selection,
+                &container,
+                offset,
+                user_select_contain_node.as_deref(),
+            )
+        {
+            selection.collapse_to_dom_position(cx, &container, offset);
+        }
+        selection.remember_caret_navigation_position(None, event.ClientY() as f32);
         document
             .event_handler()
             .install_drag_gesture(DragGesture::new(DragHandler::DocumentSelection(

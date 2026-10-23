@@ -4,7 +4,6 @@
 
 use std::cell::LazyCell;
 use std::cmp::Ordering;
-use std::iter;
 use std::rc::Rc;
 
 use app_units::Au;
@@ -370,33 +369,56 @@ impl Range {
 
     /// <https://drafts.csswg.org/cssom-view/#dom-range-getclientrects>
     fn client_rects(&self, no_gc: &NoGC) -> Vec<Rect<Au, CSSPixel>> {
-        // FIXME: For text nodes that are only partially selected, this should return the client
-        // rect of the selected part, not the whole text node.
         let start = self.start_container();
         let end = self.end_container();
-        // > The getClientRects() method, when invoked, must return an empty DOMRectList
-        // > object if the range is not in the document.
         if !start.is_connected() || !end.is_connected() {
             return vec![];
         }
-
-        // Per the spec, only Text nodes contribute rects when the range is collapsed
-        // (including when the boundary points are identical).
-        if self.collapsed() {
-            if start.is::<CharacterData>() {
-                return start.border_boxes();
-            } else {
-                return vec![];
+        // Collect in DOM order, including selected element boxes and partial text.
+        // A single layout traversal resolves all text requests in this range.
+        let mut entries = Vec::new();
+        let mut text_ranges = Vec::new();
+        for node in self
+            .CommonAncestorContainer()
+            .traverse_preorder(ShadowIncluding::No)
+        {
+            if node.is::<Element>()
+                && self.contains(no_gc, &node)
+                && !node.GetParentNode().is_some_and(|parent| {
+                    self.contains(no_gc, &parent) && !parent.border_boxes().is_empty()
+                })
+            {
+                entries.push((node.border_boxes(), None));
+            } else if let Some(text) = node.downcast::<Text>()
+                && (node == start || node == end || self.contains(no_gc, &node))
+            {
+                let value = text.upcast::<CharacterData>().Data();
+                let value = value.to_string();
+                let from = if node == start {
+                    self.start_offset()
+                } else {
+                    0
+                };
+                let to = if node == end {
+                    self.end_offset()
+                } else {
+                    node.len()
+                };
+                let from = servo_base::text::Utf16CodeUnits(from).to_utf32_code_units_in(&value);
+                let to16 = servo_base::text::Utf16CodeUnits(to);
+                let mut to = to16.to_utf32_code_units_in(&value);
+                // A boundary inside a surrogate pair selects the whole typographic unit.
+                if to.to_utf16_code_units_in(servo_base::text::AssumeUnder4GB, &value) < to16 {
+                    to += servo_base::text::Utf32CodeUnits(1);
+                }
+                entries.push((vec![], Some(text_ranges.len())));
+                text_ranges.push((node.to_trusted_node_address(), from..to));
             }
         }
-
-        let document = start.owner_doc();
-        let unrooted_end = end.as_unrooted(no_gc);
-        start
-            .following_nodes_unrooted(no_gc, document.upcast::<Node>(), ShadowIncluding::No)
-            .take_while(move |node| *node != *end)
-            .chain(iter::once(unrooted_end))
-            .flat_map(move |node| node.border_boxes())
+        let mut text_rects = start.owner_window().text_range_rects_query(&text_ranges);
+        entries
+            .into_iter()
+            .flat_map(|(rects, index)| index.map_or(rects, |i| std::mem::take(&mut text_rects[i])))
             .collect()
     }
 
@@ -1365,8 +1387,12 @@ impl RangeMethods<crate::DomTypeHolder> for Range {
         // Step 4. Otherwise, return a DOMRect object describing the smallest rectangle that includes all
         // of the rectangles in list of which the height or width is not zero.
         let bounding_rect = list
-            .into_iter()
-            .fold(euclid::Rect::zero(), |acc, rect| acc.union(&rect));
+            .iter()
+            .filter(|rect| !rect.is_empty())
+            .copied()
+            .reduce(|acc, rect| acc.union(&rect))
+            .or_else(|| list.first().copied())
+            .unwrap_or_default();
 
         DOMRect::new(
             cx,

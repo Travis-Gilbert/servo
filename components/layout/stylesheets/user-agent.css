@@ -106,15 +106,8 @@ a:link[rel~=help], a:visited[rel~=help],
 area:link[rel~=help], area:visited[rel~=help],
 link:link[rel~=help], link:visited[rel~=help] { cursor: help; }
 
-/*
- * FIXME: use `outline: auto;`
- */
-a:focus, area:focus {
-  outline: thin dotted;
-}
-
-input:focus, textarea:focus, button:focus {
-  outline: thin solid black;
+:focus-visible {
+  outline: auto 1px;
 }
 
 mark { background: Mark; color: MarkText; }

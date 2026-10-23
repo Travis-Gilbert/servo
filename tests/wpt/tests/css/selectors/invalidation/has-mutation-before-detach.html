@@ -1,0 +1,17 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>:has() snapshots are invalidated before detaching the changed subtree</title>
+<link rel="help" href="https://drafts.csswg.org/selectors/#relational">
+<script src="/resources/testharness.js"></script>
+<script src="/resources/testharnessreport.js"></script>
+<style>.subject { color:red } .subject:has(.match) { color:green }</style>
+<div class="subject"><section><div><span class="match"></span></div></section></div>
+<script>
+test(() => {
+ const subject=document.querySelector('.subject'), tree=subject.firstChild.firstChild, child=tree.firstChild;
+ assert_equals(getComputedStyle(subject).color,'rgb(0, 128, 0)');
+ child.className='';
+ tree.remove();
+ assert_equals(getComputedStyle(subject).color,'rgb(255, 0, 0)');
+}, 'Removing a matching class and its ancestor without a style flush');
+</script>

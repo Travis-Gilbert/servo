@@ -556,6 +556,7 @@ pub enum ShapedTextSliceType {
 /// duplicating the entire run.
 #[derive(Clone, Debug, MallocSizeOf)]
 pub struct ShapedTextSlice {
+    character_offset: Utf32CodeUnits,
     /// The [`ShapedText`] that this [`ShapedTextSlice`] refers to.
     #[conditional_malloc_size_of]
     shaped_text: Arc<ShapedText>,
@@ -578,6 +579,30 @@ pub struct ShapedTextSlice {
 }
 
 impl ShapedTextSlice {
+    /// Start of this slice in the shaped text, including any cluster spanning
+    /// the boundary at which the caller requested a split.
+    pub fn character_offset(&self) -> Utf32CodeUnits {
+        self.character_offset
+    }
+
+    /// Whether the glyphs run opposite to logical character order.
+    pub fn is_rtl(&self) -> bool {
+        self.shaped_text.is_rtl
+    }
+
+    /// Reuse the shaped clusters when considering emergency line breaks. Offsets
+    /// are relative to this slice; the slicer keeps multi-glyph clusters intact.
+    pub fn slices_at_character_offsets(&self, offsets: impl Iterator<Item = Utf32CodeUnits>) -> Vec<Arc<Self>> {
+        let mut slicer = ShapedTextSlicer {
+            current_glyph_offset: if self.is_rtl() { self.glyph_range.end } else { self.glyph_range.start },
+            current_character_offset: self.character_offset,
+            shaped_text: self.shaped_text.clone(),
+        };
+        offsets.filter_map(|offset| slicer.slice_until_character_offset(
+            self.character_offset + offset, self.slice_type.clone(),
+        )).collect()
+    }
+
     /// Return the number of glyphs represented by this [`ShapedTextSlice`].
     #[inline]
     pub fn glyph_count(&self) -> usize {
@@ -720,6 +745,7 @@ impl ShapedTextSlicer {
 
         self.current_glyph_offset = new_glyph_offset;
         Some(Arc::new(ShapedTextSlice {
+            character_offset: original_character_offset,
             shaped_text: self.shaped_text.clone(),
             glyph_range,
             total_advance,
