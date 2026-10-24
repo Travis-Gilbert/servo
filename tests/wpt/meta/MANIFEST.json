@@ -1305994,6 +1305994,28 @@
          {}
         ]
        ],
+       "autofocus-keyboard-input.html": [
+        "20d7b7f1453f0af15281b22c6aa144e9290926ae",
+        [
+         "html/interaction/focus/the-autofocus-attribute/autofocus-keyboard-input.html?contenteditable",
+         {
+          "testdriver": true
+         }
+        ],
+        [
+         "html/interaction/focus/the-autofocus-attribute/autofocus-keyboard-input.html?input",
+         {
+          "testdriver": true
+         }
+        ]
+       ],
+       "autofocus-lifecycle.html": [
+        "0c311302098b2c42f8ad334fbfc7c5de5f893b0d",
+        [
+         null,
+         {}
+        ]
+       ],
        "autofocus-not-processed-when-top-document-has-focused-element.html": [
         "a08d3aead7907401c2211e62555051d4cb2bd416",
         [

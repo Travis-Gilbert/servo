@@ -1,0 +1,156 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Autofocus insertion, consumption, and reentrant focus</title>
+<link rel="help" href="https://html.spec.whatwg.org/multipage/interaction.html#the-autofocus-attribute">
+<script src="/resources/testharness.js"></script>
+<script src="/resources/testharnessreport.js"></script>
+<script src="resources/utils.js"></script>
+<script>
+async function freshWindow(t) {
+  const w = window.open('/common/blank.html');
+  t.add_cleanup(() => w.close());
+  await waitForLoad(w);
+  return w;
+}
+
+promise_test(async t => {
+  const w = await freshWindow(t);
+  const first = w.document.createElement('input');
+  w.document.body.append(first);
+  first.autofocus = true;
+  await waitUntilStableAutofocusState(w);
+  assert_equals(w.document.activeElement, w.document.body,
+                'Adding the attribute to a connected control does not enqueue it');
+  const next = w.document.createElement('input');
+  next.autofocus = true;
+  w.document.body.append(next);
+  await waitUntilStableAutofocusState(w);
+  assert_equals(w.document.activeElement, next);
+}, 'Autofocus is queued on insertion, not attribute mutation');
+
+promise_test(async t => {
+  const w = await freshWindow(t);
+  w.document.body.innerHTML = '<input autofocus disabled>';
+  await waitUntilStableAutofocusState(w);
+  assert_equals(w.document.activeElement, w.document.body);
+  const next = w.document.createElement('input');
+  next.autofocus = true;
+  w.document.body.append(next);
+  await waitUntilStableAutofocusState(w);
+  assert_equals(w.document.activeElement, next);
+}, 'Discarding a disabled candidate does not consume autofocus');
+
+promise_test(async t => {
+  const w = await freshWindow(t);
+  w.document.body.innerHTML = '<input autofocus id="first"><input autofocus id="next">';
+  w.document.querySelector('#first').remove();
+  await waitUntilStableAutofocusState(w);
+  assert_equals(w.document.activeElement.id, 'next');
+}, 'Disconnected autofocus candidates are skipped');
+
+promise_test(async t => {
+  const w = await freshWindow(t);
+  w.document.body.innerHTML = '<input autofocus id="first"><input autofocus id="next">';
+  w.document.querySelector('#first').removeAttribute('autofocus');
+  await waitUntilStableAutofocusState(w);
+  assert_equals(w.document.activeElement.id, 'first');
+}, 'Removing the attribute does not remove an already queued candidate');
+
+promise_test(async t => {
+  const w = await freshWindow(t);
+  w.document.body.innerHTML = '<input autofocus>';
+  await waitUntilStableAutofocusState(w);
+  const first = w.document.querySelector('input');
+  assert_equals(w.document.activeElement, first);
+  first.blur();
+  const next = w.document.createElement('input');
+  next.autofocus = true;
+  w.document.body.append(next);
+  await waitUntilStableAutofocusState(w);
+  assert_equals(w.document.activeElement, w.document.body);
+}, 'Blurring an autofocused control does not permit another autofocus');
+
+promise_test(async t => {
+  const w = await freshWindow(t);
+  const first = w.document.createElement('input');
+  const chosen = w.document.createElement('input');
+  first.autofocus = true;
+  let focusCount = 0;
+  first.addEventListener('focus', () => {
+    ++focusCount;
+    const late = w.document.createElement('input');
+    late.autofocus = true;
+    w.document.body.append(late);
+    chosen.focus();
+  });
+  w.document.body.append(first, chosen);
+  await waitUntilStableAutofocusState(w);
+  assert_equals(focusCount, 1);
+  assert_equals(w.document.activeElement, chosen);
+  await waitUntilStableAutofocusState(w);
+  assert_equals(w.document.activeElement, chosen);
+}, 'Focus listeners can insert candidates and redirect focus without reentering autofocus');
+
+promise_test(async t => {
+  const w = await freshWindow(t);
+  const host = w.document.createElement('div');
+  const shadow = host.attachShadow({mode: 'open'});
+  shadow.innerHTML = '<input autofocus>';
+  w.document.body.append(host);
+  await waitUntilStableAutofocusState(w);
+  assert_equals(w.document.activeElement, host);
+  assert_equals(shadow.activeElement, shadow.querySelector('input'));
+}, 'An autofocus candidate in an inserted shadow tree is processed');
+promise_test(async t => {
+  const w = await freshWindow(t);
+  const host = w.document.createElement('div');
+  host.tabIndex = 0;
+  host.autofocus = true;
+  const shadow = host.attachShadow({mode: 'open'});
+  shadow.innerHTML = '<input autofocus>';
+  w.document.body.append(host);
+  await waitUntilStableAutofocusState(w);
+  assert_equals(w.document.activeElement, host);
+  assert_equals(shadow.activeElement, null);
+}, 'A focusable host is queued before its shadow-tree autofocus descendants');
+
+promise_test(async t => {
+  const w = await freshWindow(t);
+  const events = [];
+  const input = w.document.createElement('input');
+  input.autofocus = true;
+  // Use the actual viewport instead of depending on window.open sizing support.
+  input.style.marginTop = `${w.innerHeight * 2}px`;
+  input.addEventListener('focus', () => events.push('focus'));
+  w.addEventListener('scroll', () => events.push('scroll'), {once: true});
+  w.document.body.append(input);
+  await waitForAnimationFrame(w);
+  await waitForAnimationFrame(w);
+  events.push('frame');
+  assert_equals(w.document.activeElement, input);
+  assert_greater_than(w.scrollY, 0);
+  assert_array_equals(events, ['focus', 'scroll', 'frame']);
+}, 'Autofocus scrolls an offscreen control before animation callbacks');
+
+promise_test(async t => {
+  const w = await freshWindow(t);
+  const frame = w.document.createElement('iframe');
+  frame.srcdoc = '<input autofocus>';
+  w.document.body.append(frame);
+  await waitForLoad(frame);
+  await waitUntilStableAutofocusState(w);
+  assert_equals(w.document.activeElement, frame);
+  assert_equals(frame.contentDocument.activeElement.tagName, 'INPUT');
+}, 'Autofocus updates the containing frame before the next animation callback');
+
+promise_test(async t => {
+  const w = await freshWindow(t);
+  w.document.body.innerHTML = `
+    <img width="40" height="40" usemap="#map" style="visibility:hidden"
+         src="/images/green.png">
+    <map name="map"><area href="#" shape="rect" coords="0,0,40,40" autofocus></map>
+    <input autofocus>`;
+  await waitUntilStableAutofocusState(w);
+  assert_equals(w.document.activeElement.tagName, 'INPUT');
+}, 'Autofocus skips links mapped only to invisible images');
+</script>

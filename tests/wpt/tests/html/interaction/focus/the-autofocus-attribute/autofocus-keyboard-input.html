@@ -1,0 +1,32 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Typing into an autofocused editor without clicking</title>
+<meta name="variant" content="?input">
+<meta name="variant" content="?contenteditable">
+<link rel="help" href="https://html.spec.whatwg.org/multipage/interaction.html#the-autofocus-attribute">
+<script src="/resources/testharness.js"></script>
+<script src="/resources/testharnessreport.js"></script>
+<script src="/resources/testdriver.js"></script>
+<script src="/resources/testdriver-actions.js"></script>
+<script src="/resources/testdriver-vendor.js"></script>
+<script src="resources/utils.js"></script>
+<body>
+<script>
+promise_test(async () => {
+  const editable = location.search === '?contenteditable';
+  const editor = document.createElement(editable ? 'div' : 'input');
+  if (editable) editor.contentEditable = 'true';
+  editor.autofocus = true;
+  document.body.append(editor);
+  await waitUntilStableAutofocusState();
+  assert_equals(document.activeElement, editor);
+  assert_true(editor.matches(':focus-visible'));
+
+  // Send keys to the current focus, without send_keys() implicitly focusing an
+  // element and masking a broken autofocus implementation.
+  const actions = new test_driver.Actions();
+  for (const key of 'ready') actions.keyDown(key).keyUp(key);
+  await actions.send();
+  assert_equals(editable ? editor.textContent : editor.value, 'ready');
+}, 'Keyboard input reaches an autofocused editor without a click or focus() call');
+</script>

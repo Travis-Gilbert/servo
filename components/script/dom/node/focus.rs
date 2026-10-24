@@ -175,7 +175,8 @@ impl Node {
         // > ↪ If focus target is an area element with one or more shapes that are focusable areas
         // >     Return the shape corresponding to the first img element in tree order that uses the image
         // >     map to which the area element belongs.
-        // TODO: Implement this.
+        // Image map areas are classified by Element::focusable_area_kind so the
+        // focus fixup and sequential navigation paths recognize them as well.
 
         // > ↪ If focus target is an element with one or more scrollable regions that are focusable areas
         // >     Return the element's first scrollable region, according to a pre-order, depth-first

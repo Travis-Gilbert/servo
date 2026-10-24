@@ -1196,6 +1196,9 @@ impl ScriptThread {
             // https://html.spec.whatwg.org/multipage/#flush-autofocus-candidates.
             self.process_pending_input_events(cx, *pipeline_id);
 
+            // Flush document autofocus before scroll events and animation callbacks.
+            document.flush_autofocus_candidates(cx);
+
             // > 8. For each doc of docs, run the resize steps for doc. [CSSOMVIEW]
             let resized = document.window().run_the_resize_steps(cx);
 

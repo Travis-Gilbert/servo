@@ -375,6 +375,14 @@ impl VirtualMethods for HTMLAreaElement {
 }
 
 impl HTMLAreaElementMethods<crate::DomTypeHolder> for HTMLAreaElement {
+    /// <https://html.spec.whatwg.org/multipage/#dom-area-coords>
+    make_getter!(Coords, "coords");
+    make_setter!(SetCoords, "coords");
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-area-shape>
+    make_getter!(Shape, "shape");
+    make_setter!(SetShape, "shape");
+
     // https://html.spec.whatwg.org/multipage/#attr-hyperlink-target
     make_getter!(Target, "target");
 

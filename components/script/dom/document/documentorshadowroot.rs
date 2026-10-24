@@ -35,7 +35,7 @@ use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::css::stylesheetlist::StyleSheetListOwner;
 use crate::dom::customelementregistry::CustomElementRegistry;
 use crate::dom::element::Element;
-use crate::dom::node::{self, Node};
+use crate::dom::node::{self, Node, NodeTraits};
 use crate::dom::types::{CSSStyleSheet, EventTarget, ShadowRoot};
 use crate::dom::window::Window;
 
@@ -276,7 +276,8 @@ impl DocumentOrShadowRoot {
     /// <https://html.spec.whatwg.org/multipage/#dom-documentorshadowroot-activeelement-dev>
     pub(crate) fn active_element(&self, this: &Node) -> Option<DomRoot<Element>> {
         // Step 1. Let candidate be this's node document's focused area's DOM anchor.
-        let document = self.window.Document();
+        // Detached and cloned documents can share a Window with its active document.
+        let document = this.owner_document();
         let candidate = document
             .focus_handler()
             .focused_area()

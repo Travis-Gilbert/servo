@@ -371,6 +371,8 @@ bitflags! {
         /// one more rendering update possibility after this happens, so that any potential screenshot
         /// reflects the up-to-date contents.
         const FontReadyPromiseFulfilled = 1 << 2;
+        /// An inserted autofocus candidate needs processing before animation callbacks.
+        const AutofocusCandidate = 1 << 3;
     }
 }
 
@@ -430,6 +432,10 @@ pub(crate) struct Document {
     event_handler: DocumentEventHandler,
     /// A helper used to process and store data related to focus handling.
     focus_handler: DocumentFocusHandler,
+    /// <https://html.spec.whatwg.org/multipage/#autofocus-candidates>
+    autofocus_candidates: DomRefCell<VecDeque<Dom<Element>>>,
+    /// <https://html.spec.whatwg.org/multipage/#autofocus-processed-flag>
+    autofocus_processed: Cell<bool>,
     /// A helper to handle showing and hiding user interface controls in the embedding layer.
     embedder_controls: DocumentEmbedderControls,
     id_map: TreeOrderedIndexMap,
@@ -2515,6 +2521,12 @@ impl Document {
                     return;
                 }
 
+                // Establish the initial fragment target before load listeners observe
+                // :target or enqueue autofocus candidates.
+                if let Some(fragment) = document.url().fragment() {
+                    document.scroll_to_the_fragment(cx, fragment);
+                }
+
                 // Step 9.1. Update the current document readiness to "complete".
                 document.update_the_current_document_readiness(cx, DocumentReadyState::Complete);
 
@@ -2574,9 +2586,6 @@ impl Document {
                 // Step 9.13. Queue the navigation timing entry for the Document.
                 // TODO
 
-                if let Some(fragment) = document.url().fragment() {
-                    document.scroll_to_the_fragment(cx, fragment);
-                }
             }));
 
         // Step 9.
@@ -4096,6 +4105,8 @@ impl Document {
             quirks_mode: Cell::new(quirks_mode),
             event_handler: DocumentEventHandler::new(window),
             focus_handler: DocumentFocusHandler::new(window, has_focus),
+            autofocus_candidates: Default::default(),
+            autofocus_processed: Cell::new(false),
             embedder_controls: DocumentEmbedderControls::new(window),
             id_map: TreeOrderedIndexMap::id(),
             name_map: TreeOrderedIndexMap::name(),
@@ -4263,6 +4274,123 @@ impl Document {
     /// Get the [`Document`]'s [`DocumentFocusHandler`].
     pub(crate) fn focus_handler(&self) -> &DocumentFocusHandler {
         &self.focus_handler
+    }
+
+    /// Queue an inserted HTML or SVG element, without testing focusability yet.
+    /// <https://html.spec.whatwg.org/multipage/#the-autofocus-attribute>
+    pub(crate) fn queue_autofocus_candidate(&self, element: &Element) {
+        if !self.is_fully_active() ||
+            self.has_active_sandboxing_flag(
+                SandboxingFlagSet::SANDBOXED_AUTOMATIC_FEATURES_BROWSING_CONTEXT_FLAG,
+            )
+        {
+            return;
+        }
+        let Some(top) = self.window().top_level_document_if_local() else {
+            return;
+        };
+        // Permissions Policy is not implemented yet. Honor the default same-origin
+        // boundary, including intermediate ancestors, instead of letting a frame
+        // steal focus merely because it shares a script thread with its parent.
+        let mut ancestor = DomRoot::from_ref(self);
+        loop {
+            if !self.origin().same_origin(&ancestor.origin()) {
+                return;
+            }
+            if ancestor == top {
+                break;
+            }
+            let Some(parent) = ancestor.browsing_context()
+                .and_then(|context| context.parent()?.document())
+            else {
+                return;
+            };
+            ancestor = parent;
+        }
+        if top.autofocus_processed.get() {
+            return;
+        }
+        let mut candidates = top.autofocus_candidates.borrow_mut();
+        candidates.retain(|candidate| &**candidate != element);
+        candidates.push_back(Dom::from_ref(element));
+        top.add_rendering_update_reason(RenderingUpdateReason::AutofocusCandidate);
+    }
+
+    pub(crate) fn finish_autofocus(&self) {
+        self.autofocus_candidates.borrow_mut().clear();
+        self.autofocus_processed.set(true);
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#flush-autofocus-candidates>
+    pub(crate) fn flush_autofocus_candidates(&self, cx: &mut JSContext) {
+        if self.autofocus_processed.get() || self.autofocus_candidates.borrow().is_empty() {
+            return;
+        }
+        if !matches!(*self.focus_handler().focused_area(), FocusableArea::Viewport) ||
+            self.target_element.get().is_some()
+        {
+            self.finish_autofocus();
+            return;
+        }
+        loop {
+            // Never keep a queue borrow across layout, focus events, or their script.
+            let Some(element) = self.autofocus_candidates.borrow().front().map(Dom::as_rooted) else {
+                return;
+            };
+            let doc = element.owner_document();
+            if !doc.is_fully_active() ||
+                doc.window().top_level_document_if_local().as_deref() != Some(self)
+            {
+                self.autofocus_candidates.borrow_mut().pop_front();
+                continue;
+            }
+            if doc.has_a_stylesheet_that_is_blocking_scripts() {
+                return;
+            }
+            self.autofocus_candidates.borrow_mut().pop_front();
+            if doc.target_element.get().is_some() ||
+                SameoriginAncestorNavigablesIterator::new(doc.clone())
+                    .any(|ancestor| ancestor.target_element.get().is_some())
+            {
+                continue;
+            }
+            rooted!(&in(cx) let mut target = element.upcast::<Node>()
+                .get_the_focusable_area(cx, FocusTrigger::Other));
+            if target.is_none() {
+                continue;
+            }
+            let focused = target.as_ref(cx.no_gc()).as_ref()
+                .and_then(FocusableArea::element).map(DomRoot::from_ref);
+            // Set the flag before dispatch: a focus listener can insert another
+            // candidate or move focus somewhere else.
+            self.finish_autofocus();
+            // Local ancestors must already identify the focused iframe when this
+            // rendering update runs its animation callbacks. The constellation's
+            // cross-process focus notification arrives in a later task.
+            let mut frames = Vec::new();
+            let mut ancestor = doc.clone();
+            while let Some(frame) = ancestor.window().window_proxy().frame_element()
+                .map(DomRoot::from_ref)
+            {
+                ancestor = frame.owner_document();
+                frames.push(frame);
+            }
+            for frame in frames.iter().rev() {
+                frame.upcast::<Node>().run_the_focusing_steps(cx, None, FocusTrigger::Other);
+            }
+            doc.focus_handler().focus(cx, &target.take().unwrap());
+            if let Some(focused) = focused {
+                focused.scroll_into_view_with_options(
+                    cx,
+                    ScrollBehavior::Auto,
+                    ScrollAxisState::new_always_scroll_position(ScrollLogicalPosition::Center),
+                    ScrollAxisState::new_always_scroll_position(ScrollLogicalPosition::Center),
+                    None,
+                    None,
+                );
+            }
+            return;
+        }
     }
 
     /// Get the [`Document`]'s [`DocumentEmbedderControls`].

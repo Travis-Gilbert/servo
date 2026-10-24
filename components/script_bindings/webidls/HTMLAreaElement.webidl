@@ -9,10 +9,8 @@ interface HTMLAreaElement : HTMLElement {
 
   // [CEReactions]
   //         attribute DOMString alt;
-  // [CEReactions]
-  //         attribute DOMString coords;
-  // [CEReactions]
-  //         attribute DOMString shape;
+  [CEReactions] attribute DOMString coords;
+  [CEReactions] attribute DOMString shape;
   [CEReactions]
              attribute DOMString target;
   // [CEReactions]

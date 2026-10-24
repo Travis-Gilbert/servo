@@ -22,7 +22,6 @@ use crate::dom::event::{Event, EventBubbles, EventCancelable};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::html::htmlelement::HTMLElement;
 use crate::dom::htmlbuttonelement::{CommandState, HTMLButtonElement};
-use crate::dom::iterators::ShadowIncluding;
 use crate::dom::node::focus::FocusTrigger;
 use crate::dom::node::virtualmethods::VirtualMethods;
 use crate::dom::node::{Node, NodeTraits};
@@ -239,13 +238,8 @@ impl HTMLDialogElement {
             // focusing steps for element; the viewport should not be scrolled by doing this step.
             let subject_node = subject.upcast::<Node>();
             let document = subject.owner_document();
-            if document
-                .focus_handler()
-                .focused_area()
-                .dom_anchor(&document)
-                .traverse_preorder(ShadowIncluding::Yes)
-                .any(|node| &*node == subject_node) ||
-                was_modal
+            let focused_anchor = document.focus_handler().focused_area().dom_anchor(&document);
+            if subject_node.is_shadow_including_inclusive_ancestor_of(&focused_anchor) || was_modal
             {
                 element
                     .upcast::<Node>()
@@ -341,10 +335,13 @@ impl HTMLDialogElement {
             document.focus_handler().focus(cx, &control.take().unwrap());
         }
 
-        // TODO: Step 7. Let topDocument be control's node navigable's top-level traversable's active document.
-        // TODO: Step 8. If control's node document's origin is not the same as the origin of topDocument, then return.
-        // TODO: Step 9. Empty topDocument's autofocus candidates.
-        // TODO: Step 10. Set topDocument's autofocus processed flag to true.
+        // Steps 7-10: showing a dialog consumes the top document's autofocus.
+        let document = self.owner_document();
+        if let Some(top) = document.window().top_level_document_if_local() {
+            if document.origin().same_origin(&top.origin()) {
+                top.finish_autofocus();
+            }
+        }
     }
 }
 

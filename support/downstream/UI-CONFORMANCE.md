@@ -539,3 +539,88 @@ closed by this follow-up. The production Servo pin and installed app are unchang
 this is a qualified fork candidate. The existing source worktree is retained for
 the ongoing patch queue and concurrent work. REPLAY-CHECKPOINT.md is excluded
 from this task's commit and source archives.
+
+
+## Compatibility follow-up, 2026-10-24: document autofocus
+
+The user prioritized document autofocus after the broader compatibility audit.
+The baseline `autofocus-before/report.json` under
+`/Volumes/SSD Samsung/theorem-servo-compat-20261024` records 27 failed and 12
+passing assertions across 28 harness results on the previously qualified binary.
+The exposed attribute had no document queue or rendering-lifecycle processing.
+The implementation follows the HTML autofocus insertion and flushing algorithms,
+reuses the existing focusable-area/delegation and focus machinery, and processes
+candidates before scroll and animation callbacks. No dependency duplicates those
+engine-owned document lifecycle operations.
+
+The audit also found that DocumentOrShadowRoot.activeElement consulted the
+Window's active Document instead of the queried node's own Document, giving null
+for detached/cloned document bodies. The accompanying ownership fix is checked
+against the existing active-element and inactive-document tests.
+
+Related regressions required fixes in the shared focus lifecycle: image-map
+links must remain focusable during focus fixup, using the visibility of their
+mapped image; a focusable shadow host queues before its descendants; local
+iframe ancestors expose the focus chain before animation callbacks; initial
+fragment targets are established before load listeners inspect them. The area
+coords and shape IDL reflectors now use the existing attribute helpers. Dialog
+opening consumes pending document autofocus, and closing a nonmodal dialog now
+checks the correct ancestry direction before restoring focus without scrolling.
+
+The 11 lifecycle assertions and two direct keyboard-input variants fail on the
+previous binary. Keyboard tests send WebDriver key actions to current focus,
+without clicking or calling focus() or send_keys(element), so they exercise
+immediate typing in both an input and a contenteditable editor.
+
+The native acceptance fixture is prepared against the previously qualified UI
+revision 16b5f3892dadab123270fbddfb473f51b495cbcb in the isolated
+ui-source-16b5f389 directory. Its frozen dependency installation and production
+bundle build pass. The shared UI checkout is in a concurrent merge and is not
+modified. The 74 native host source files match the prior qualified host; only
+the path-patched Servo library changes. The running local backend is preserved.
+macOS reports the screen locked; the attempted native baseline logged a display
+link creation failure and could not provide a window screenshot. Its task-owned
+processes were stopped. A locked-screen run is not native UI acceptance.
+
+Candidate 5 builds both servoshell and the native Theorem host with Rust 1.97.1.
+The broad regression receipt `regression-after-5/report.json` contains 144 OK
+harnesses, 1,999 PASS assertions and two pre-existing FAIL assertions. The
+comparison against preserved baseline reports records 1,947 PASS-to-PASS,
+47 FAIL-to-PASS, three TIMEOUT-to-PASS, two FAIL-to-FAIL and no PASS regressions;
+two further existing shadow-root assertions pass without a recorded baseline.
+Both keyboard-input variants pass. WPT lint for both new test files and git diff
+--check pass. The 24 affected expectation files are refreshed for the observed
+fixes; remaining failure expectations are preserved. The final focused rerun
+(`focus-final/report.json`) exits zero: all 45 harnesses run as expected.
+
+Two distinct compatibility gaps remain visible in this suite. The upstream
+update-the-rendering test requests a 100px popup but Servo gives it a 1024x740
+viewport, so its 200px offset never needs scrolling. `popup-size-probe.json`
+records that geometry; the new test using the actual viewport proves autofocus,
+scroll, then animation-frame ordering. A control slotted into a nonmodal dialog
+still fails focus restoration. The ancestry correction fixes ordinary and
+shadow-descendant restoration while preserving focus deliberately moved outside
+the dialog. Cross-origin delegated autofocus remains limited by Servo's missing
+Permissions Policy implementation; this patch enforces the default same-origin
+ancestor boundary and the existing sandbox automatic-features restriction.
+
+Evidence and commands are under
+`/Volumes/SSD Samsung/theorem-servo-compat-20261024`; `autofocus-provenance.json`
+binds the source hashes, binaries, baseline and final receipts, UI asset digest,
+and publication commit. `servoshell-autofocus-5` and `theorem-autofocus-5` are the
+preserved candidates. The recoverable changed-source archive and patch exclude
+the concurrent REPLAY-CHECKPOINT.md edit and all private runtime environment
+files. The fork source checkout is retained for ongoing and concurrent work.
+The production Servo pin and installed app have not been promoted.
+
+Engine oracle class: live browser engine. Implementation mode: real. Evidence
+class: rebuilt-engine WPT and direct WebDriver keyboard input. Substitution
+allowed: false. Live oracle required: true. Engine behavior is verified within
+the coverage above. Native UI oracle class: live product UI. Implementation mode:
+real. Evidence class: build passed, visible acceptance blocked by the locked Mac.
+Substitution allowed: false. Live oracle required: true. Native UI qualification
+remains open; the prepared next command runs `theorem-autofocus-5` with
+THEOREM_APP_DIR pointing at ui-source-16b5f389 and THEOREM_DRIVE at
+ui-autofocus.steps.json after unlocking the Mac. The prepared standalone
+native-fixture.steps.json checks typing after autofocus separately from product
+UI assertions, and must not be presented as product UI acceptance.

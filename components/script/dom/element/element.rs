@@ -4875,6 +4875,13 @@ impl VirtualMethods for Element {
             f.bind_form_control_to_tree(cx);
         }
 
+        if self.upcast::<Node>().is_connected() &&
+            (self.is::<HTMLElement>() || self.is::<SVGElement>()) &&
+            self.has_attribute(&local_name!("autofocus"))
+        {
+            self.owner_document().queue_autofocus_candidate(self);
+        }
+
         if let Some(ref shadow_root) = self.shadow_root() {
             shadow_root.bind_to_tree(cx, context);
         }

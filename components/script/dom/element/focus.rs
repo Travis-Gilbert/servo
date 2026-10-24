@@ -7,13 +7,15 @@ use script_bindings::codegen::GenericBindings::ElementBinding::ElementMethods;
 use script_bindings::codegen::GenericBindings::ShadowRootBinding::ShadowRootMethods;
 use script_bindings::codegen::InheritTypes::{ElementTypeId, HTMLElementTypeId, NodeTypeId};
 use script_bindings::inheritance::Castable;
+use script_bindings::root::DomRoot;
 use style::computed_values::visibility::T as Visibility;
 use style::values::computed::Overflow;
 use xml5ever::local_name;
 
-use crate::dom::Node;
+use crate::dom::{Node, NodeTraits};
+use crate::dom::iterators::ShadowIncluding;
 use crate::dom::document::focus::FocusableAreaKind;
-use crate::dom::types::{Element, HTMLElement};
+use crate::dom::types::{Element, HTMLAreaElement, HTMLElement, HTMLImageElement};
 
 impl Element {
     /// <https://html.spec.whatwg.org/multipage/#focusable-area>
@@ -29,7 +31,36 @@ impl Element {
     pub(crate) fn focusable_area_kind(&self, no_gc: &NoGC) -> FocusableAreaKind {
         // Do not allow unrendered, disconnected, or disabled nodes to be focusable areas ever.
         let node: &Node = self.upcast();
-        if !node.is_connected() || !self.has_css_layout_box() || self.is_actually_disabled() {
+        if !node.is_connected() || self.is_actually_disabled() {
+            return Default::default();
+        }
+
+        // An image-map area has no CSS box of its own. Its rendered image makes
+        // it focusable; expose the area as activeElement like other browsers
+        // (https://github.com/whatwg/html/issues/5054). Classify it here so focus
+        // fixup does not immediately discard a successfully focused area.
+        if let Some(area) = self.downcast::<HTMLAreaElement>() {
+            let has_rendered_image = self.has_attribute(&local_name!("href")) &&
+                self.owner_document().upcast::<Node>()
+                    .traverse_preorder(ShadowIncluding::No)
+                    .filter_map(DomRoot::downcast::<HTMLImageElement>)
+                    .any(|image| {
+                        image.upcast::<Element>().style().is_some_and(|style| {
+                            !style.get_box().display.is_none() &&
+                                style.get_inherited_box().visibility == Visibility::Visible
+                        }) && image.areas().is_some_and(|areas| {
+                            areas.iter().any(|candidate| &**candidate == area)
+                        })
+                    });
+            return if !has_rendered_image {
+                FocusableAreaKind::empty()
+            } else if self.explicitly_set_tab_index().is_some_and(|index| index < 0) {
+                FocusableAreaKind::Click
+            } else {
+                FocusableAreaKind::Click | FocusableAreaKind::Sequential
+            };
+        }
+        if !self.has_css_layout_box() {
             return Default::default();
         }
 
