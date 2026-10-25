@@ -106,6 +106,7 @@ glib-sys = "0.22"
 glow = "0.17.0"
 gstreamer = { version = "0.25", features = ["v1_18"] }
 gstreamer-app = "0.25"
+gstreamer-mse = "0.25"
 gstreamer-audio = "0.25"
 gstreamer-base = "0.25"
 gstreamer-gl = "0.25"

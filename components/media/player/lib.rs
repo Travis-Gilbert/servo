@@ -90,13 +90,20 @@ pub enum PlayerEvent {
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub enum StreamType {
+    /// Script-fed adaptive media using Media Source Extensions.
+    Mse,
     /// No seeking is supported in the stream, such as a live stream.
     Stream,
     /// The stream is seekable.
     Seekable,
 }
 
+pub mod mse;
+
 pub trait Player: Send + MediaInstance {
+    fn connect_media_source(&self, _source: &dyn mse::MediaSource) -> Result<(), PlayerError> {
+        Err(PlayerError::SetStreamFailed)
+    }
     fn play(&self) -> Result<(), PlayerError>;
     fn pause(&self) -> Result<(), PlayerError>;
     fn paused(&self) -> bool;

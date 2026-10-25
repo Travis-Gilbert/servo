@@ -114,7 +114,7 @@ impl Backend for OhosBackend {
     ) -> std::sync::Arc<std::sync::Mutex<dyn servo_media_player::Player>> {
         // TODO: Choose different Player Impl depends on stream_type
         match stream_type {
-            StreamType::Stream => {
+            StreamType::Stream | StreamType::Mse => {
                 warn!("Stream Type currently not supported!");
             },
             StreamType::Seekable => (),

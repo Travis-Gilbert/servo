@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use layout_api::{
     DangerousStyleElement, DangerousStyleNode, LayoutDamage, LayoutElement, LayoutNode,
+    NodeRenderingType,
 };
 use script::layout_dom::ServoLayoutNode;
 use style::context::{SharedStyleContext, StyleContext};
@@ -318,10 +319,18 @@ impl<'a> ElementDamageSet<'a> {
     /// Given the damage from this element, the parent, and children, determine what action to
     /// take for this element's boxes and return the damage that should be propagated to parents.
     fn apply_damage(
-        self,
+        mut self,
         layout_context: &LayoutContext<'_>,
         layout_roots: &mut Vec<LayoutRoot<'a>>,
     ) -> LayoutDamage {
+        // Inline SVG is currently a rasterized replaced box. Updating only
+        // its fragment style would retain pixels from the old CSS paint.
+        // Nested SVG nodes have no separate box and are handled by the root.
+        if matches!(self.node.rendering_type(), NodeRenderingType::Rendered) &&
+            self.node.svg_data().is_some_and(|svg| svg.source.is_none())
+        {
+            self.on_element |= LayoutDamage::DescendantHasBoxDamage;
+        }
         let only_layout_mode_damage =
             (self.from_parent | self.on_element | self.from_children).only_layout_modes();
 

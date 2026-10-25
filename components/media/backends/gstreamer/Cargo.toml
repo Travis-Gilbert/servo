@@ -25,6 +25,7 @@ glib = { workspace = true }
 glib-sys = { workspace = true }
 gstreamer = { workspace = true }
 gstreamer-app = { workspace = true }
+gstreamer-mse = { workspace = true }
 gstreamer-audio = { workspace = true }
 gstreamer-base = { workspace = true }
 gstreamer-play = { workspace = true }

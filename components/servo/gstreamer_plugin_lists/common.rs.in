@@ -34,6 +34,7 @@
 "gstvpx",
 "gstwavparse",
 // gst-plugins-bad
+"gstmse",
 "gstaudiobuffersplit",
 "gstdtls",
 "gstid3tag",

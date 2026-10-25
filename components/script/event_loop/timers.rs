@@ -21,6 +21,7 @@ use net_traits::request::ParserMetadata;
 use rustc_hash::FxHashMap;
 use script_bindings::callback::{RootedCallback, TracedCallback};
 use script_bindings::cell::DomRefCell;
+use script_bindings::trace::RootedTraceableBox;
 use serde::{Deserialize, Serialize};
 use servo_base::id::PipelineId;
 use servo_config::pref;
@@ -348,7 +349,9 @@ impl OneshotTimers {
 
         // select timers to run to prevent firing timers
         // that were installed during fire of another timer
-        let mut timers_to_run = Vec::new();
+        // A callback can trigger GC after these timers leave the traced queue.
+        // Keep the remaining callbacks rooted until each one is invoked.
+        let mut timers_to_run = RootedTraceableBox::new(VecDeque::new());
 
         loop {
             let mut timers = self.timers.borrow_mut();
@@ -357,10 +360,10 @@ impl OneshotTimers {
                 break;
             }
 
-            timers_to_run.push(timers.pop_back().unwrap());
+            timers_to_run.push_back(timers.pop_back().unwrap());
         }
 
-        for timer in timers_to_run {
+        while let Some(timer) = timers_to_run.pop_front() {
             // Since timers can be coalesced together inside a task,
             // this loop can keep running, including after an interrupt of the JS,
             // and prevent a clean-shutdown of a JS-running thread.
@@ -798,14 +801,18 @@ fn clamp_duration(nesting_level: u32, unclamped: Duration) -> Duration {
 impl JsTimerTask {
     // see https://html.spec.whatwg.org/multipage/#timer-initialisation-steps
     fn invoke(self, cx: &mut JSContext, global: &GlobalScope, timers: &JsTimers) {
+        // The current callback, its arguments and interval continuation also
+        // have to survive allocations made while invoking JavaScript.
+        let task = RootedTraceableBox::new(self);
+
         // step 9.2 can be ignored, because we proactively prevent execution
         // of this task when its scheduled execution is canceled.
 
         // prep for step ? in nested set_timeout_or_interval calls
-        timers.nesting_level.set(self.nesting_level);
+        timers.nesting_level.set(task.nesting_level);
 
         let _guard = ScriptThread::user_interacting_guard();
-        match self.callback {
+        match task.callback {
             InternalTimerCallback::StringTimerCallback(ref code_str, ref fetch_info) => {
                 // Step 6.4. Let settings object be global's relevant settings object.
                 // Step 6. Let realm be global's relevant realm.
@@ -840,7 +847,7 @@ impl JsTimerTask {
             // Step 9.5. If handler is a Function, then invoke handler given arguments and
             // "report", and with callback this value set to thisArg.
             InternalTimerCallback::FunctionTimerCallback(ref function, ref arguments) => {
-                let arguments = self.collect_heap_args(arguments);
+                let arguments = task.collect_heap_args(arguments);
                 rooted!(&in(cx) let mut value: JSVal);
                 let _ = function.Call_(cx, global, arguments, value.handle_mut(), Report);
             },
@@ -854,10 +861,10 @@ impl JsTimerTask {
         //
         // Since we choose proactively prevent execution (see 4.1 above), we must only
         // reschedule repeating timers when they were not canceled as part of step 4.2.
-        if self.is_interval == IsInterval::Interval &&
-            timers.active_timers.borrow().contains_key(&self.handle)
+        if task.is_interval == IsInterval::Interval &&
+            timers.active_timers.borrow().contains_key(&task.handle)
         {
-            timers.initialize_and_schedule(global, self);
+            timers.initialize_and_schedule(global, *task.into_box());
         }
     }
 

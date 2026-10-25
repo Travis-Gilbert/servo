@@ -25,7 +25,6 @@ use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::bindings::str::{DOMString, USVString};
-use crate::dom::blob::Blob;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::url::urlhelper::UrlHelper;
 use crate::dom::url::urlsearchparams::URLSearchParams;
@@ -192,7 +191,12 @@ impl URLMethods<crate::DomTypeHolder> for URL {
     }
 
     /// <https://w3c.github.io/FileAPI/#dfn-createObjectURL>
-    fn CreateObjectURL(global: &GlobalScope, blob: &Blob) -> DOMString {
+    fn CreateObjectURL(global: &GlobalScope, object: crate::dom::bindings::codegen::UnionTypes::BlobOrMediaSource) -> DOMString {
+        use crate::dom::bindings::codegen::UnionTypes::BlobOrMediaSource;
+        let blob = match object {
+            BlobOrMediaSource::MediaSource(source) => return global.create_media_source_url(&source),
+            BlobOrMediaSource::Blob(blob) => blob,
+        };
         // XXX: Second field is an unicode-serialized Origin, it is a temporary workaround
         //      and should not be trusted. See issue https://github.com/servo/servo/issues/11722
         let origin = global.origin();
@@ -204,6 +208,7 @@ impl URLMethods<crate::DomTypeHolder> for URL {
 
     /// <https://w3c.github.io/FileAPI/#dfn-revokeObjectURL>
     fn RevokeObjectURL(global: &GlobalScope, url: DOMString) {
+        if global.revoke_media_source_url(&url.to_string()) { return; }
         // If the value provided for the url argument is not a Blob URL OR
         // if the value provided for the url argument does not have an entry in the Blob URL Store,
         // this method call does nothing. User agents may display a message on the error console.

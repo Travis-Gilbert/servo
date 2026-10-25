@@ -188,6 +188,7 @@ pub(crate) struct GlobalScope {
     constellation_interest_counts: RefCell<FxHashMap<ConstellationInterest, usize>>,
 
     /// The blobs managed by this global, if any.
+    media_source_urls: DomRefCell<Vec<(String, Dom<crate::dom::mediasource::MediaSource>)>>,
     blob_state: DomRefCell<HashMapTracedValues<BlobId, BlobInfo, FxBuildHasher>>,
 
     /// <https://w3c.github.io/ServiceWorker/#environment-settings-object-service-worker-registration-object-map>
@@ -409,6 +410,7 @@ impl GlobalScope {
             web_lock_client_id: DomRefCell::new(None),
             constellation_interest_counts: Default::default(),
             blob_state: Default::default(),
+            media_source_urls: Default::default(),
             eventtarget: EventTarget::new_inherited(),
             registration_map: DomRefCell::new(HashMapTracedValues::new_fx()),
             indexeddb: Default::default(),
@@ -3279,3 +3281,21 @@ impl GlobalScopeHelpers<crate::DomTypeHolder> for GlobalScope {
 }
 
 impl OwnerWindow<DomTypeHolder> for GlobalScope {}
+
+impl GlobalScope {
+    pub(crate) fn create_media_source_url(&self, source: &crate::dom::mediasource::MediaSource) -> DOMString {
+        let url = format!("blob:{}/{}", self.origin().immutable().ascii_serialization(), uuid::Uuid::new_v4());
+        self.media_source_urls.borrow_mut().push((url.clone(), Dom::from_ref(source)));
+        DOMString::from(url)
+    }
+    pub(crate) fn media_source_for_url(&self, url: &str) -> Option<DomRoot<crate::dom::mediasource::MediaSource>> {
+        self.media_source_urls.borrow().iter().find(|(key,_)| key == url)
+            .map(|(_,value)| DomRoot::from_ref(&**value))
+    }
+    pub(crate) fn revoke_media_source_url(&self, url: &str) -> bool {
+        let mut urls = self.media_source_urls.borrow_mut();
+        let previous = urls.len();
+        urls.retain(|(key,_)| key != url);
+        previous != urls.len()
+    }
+}

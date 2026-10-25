@@ -1076,6 +1076,11 @@ impl Element {
 
     pub(crate) fn style(&self) -> Option<ServoArc<ComputedValues>> {
         self.owner_window().layout_reflow(QueryMsg::StyleQuery);
+        self.style_without_reflow()
+    }
+
+    /// Read styles after layout, without recursively requesting another reflow.
+    pub(crate) fn style_without_reflow(&self) -> Option<ServoArc<ComputedValues>> {
         self.style_data
             .borrow()
             .as_ref()

@@ -13,9 +13,12 @@ use layout_api::SVGElementData;
 use servo_url::ServoUrl;
 use style::attr::AttrValue;
 use style::parser::ParserContext;
+use style::properties::{ComputedValues, LonghandId, PropertyDeclarationId};
 use style::stylesheets::Origin;
+use style::values::computed::SVGPaintKind;
+use style::values::generics::svg::SVGPaintFallback;
 use style::values::specified::LengthPercentage;
-use style_traits::ParsingMode;
+use style_traits::{ParsingMode, ToCss};
 use uuid::Uuid;
 use xml5ever::serialize::TraversalScope;
 
@@ -32,6 +35,7 @@ use crate::dom::node::virtualmethods::VirtualMethods;
 use crate::dom::node::{
     ChildrenMutation, CloneChildrenFlag, Node, NodeDamage, NodeTraits, UnbindContext,
 };
+use crate::dom::svg::svgelement::SVGElement;
 use crate::dom::svg::svggraphicselement::SVGGraphicsElement;
 
 #[dom_struct]
@@ -44,6 +48,11 @@ pub(crate) struct SVGSVGElement {
     // on each layout and must be invalidated when the subtree changes.
     #[no_trace]
     cached_serialized_data_url: AtomicRefCell<Option<Result<ServoUrl, ()>>>,
+    // The rasterizer consumes standalone SVG, so CSS paint values from the
+    // host document must accompany the markup. Also key the cache on them:
+    // changing an ancestor's class need not mutate any SVG attributes.
+    #[no_trace]
+    cached_paint_styles: AtomicRefCell<Vec<Option<String>>>,
 }
 
 impl SVGSVGElement {
@@ -56,6 +65,7 @@ impl SVGSVGElement {
             svggraphicselement: SVGGraphicsElement::new_inherited(local_name, prefix, document),
             uuid: Uuid::new_v4(),
             cached_serialized_data_url: Default::default(),
+            cached_paint_styles: Default::default(),
         }
     }
 
@@ -94,6 +104,31 @@ impl SVGSVGElement {
             return;
         }
 
+        self.invalidate_cached_serialized_subtree_and_rasterization_result(cx.no_gc());
+        let document_url = self.owner_document().url();
+        let paint_styles: Vec<_> = self
+            .upcast::<Node>()
+            .traverse_preorder(ShadowIncluding::No)
+            .map(|node| {
+                node.downcast::<SVGElement>()
+                    .and_then(|element| element.upcast::<Element>().style_without_reflow())
+                    .map(|style| svg_paint_style(&style, &document_url))
+            })
+            .collect();
+        for (node, paint) in cloned_node
+            .traverse_preorder(ShadowIncluding::No)
+            .zip(&paint_styles)
+        {
+            if let (Some(element), Some(paint)) = (node.downcast::<Element>(), paint) {
+                let inline = element.get_string_attribute(&local_name!("style"));
+                element.set_string_attribute(
+                    cx,
+                    &local_name!("style"),
+                    format!("{paint}{inline}").into(),
+                );
+            }
+        }
+        *self.cached_paint_styles.borrow_mut() = paint_styles;
         self.process_use_elements(cx, &cloned_node);
 
         let Ok(xml_source) = cloned_node.xml_serialize(TraversalScope::IncludeNode) else {
@@ -112,8 +147,8 @@ impl SVGSVGElement {
 
     fn process_use_elements(&self, cx: &mut JSContext, root_node: &Node) {
         for node in root_node.traverse_preorder(ShadowIncluding::No) {
-            if let Some(element) = node.downcast::<Element>() &&
-                element.local_name() == &local_name!("use")
+            if let Some(element) = node.downcast::<Element>()
+                && element.local_name() == &local_name!("use")
             {
                 self.process_single_use_element(cx, element, root_node)
             }
@@ -182,6 +217,79 @@ impl SVGSVGElement {
     }
 }
 
+// Reuse Stylo's computed-value serializer; do not reinterpret CSS or colors
+// in the SVG parser. Paint is inherited by descendants within the SVG tree.
+fn svg_paint_style(style: &ComputedValues, document_url: &ServoUrl) -> String {
+    const PAINT: &[LonghandId] = &[
+        LonghandId::Color,
+        LonghandId::Fill,
+        LonghandId::FillOpacity,
+        LonghandId::FillRule,
+        LonghandId::Stroke,
+        LonghandId::StrokeWidth,
+        LonghandId::StrokeLinecap,
+        LonghandId::StrokeLinejoin,
+        LonghandId::StrokeMiterlimit,
+        LonghandId::StrokeDasharray,
+        LonghandId::StrokeDashoffset,
+        LonghandId::StrokeOpacity,
+    ];
+    let mut result = String::new();
+    for &property in PAINT {
+        result.push_str(property.name());
+        result.push(':');
+        let paint = match property {
+            LonghandId::Fill => Some(&style.get_inherited_svg().fill),
+            LonghandId::Stroke => Some(&style.get_inherited_svg().stroke),
+            _ => None,
+        };
+        // Computed URLs are absolute. The standalone SVG parser needs a
+        // fragment for paint servers in this document; preserve external URLs.
+        let local = paint.and_then(|paint| {
+            let SVGPaintKind::PaintServer(url) = &paint.kind else {
+                return None;
+            };
+            let url = url.url()?;
+            let fragment = url.fragment()?;
+            (url[..url::Position::AfterQuery]
+                == document_url.as_url()[..url::Position::AfterQuery])
+                .then_some((fragment, &paint.fallback))
+        });
+        if let Some((fragment, fallback)) = local {
+            result.push_str("url(");
+            cssparser::serialize_string(&format!("#{fragment}"), &mut result).unwrap();
+            result.push(')');
+            if !matches!(fallback, SVGPaintFallback::Unset) {
+                result.push(' ');
+                result.push_str(&fallback.to_css_string());
+            }
+        } else {
+            result.push_str(
+                &style.computed_value_to_string(PropertyDeclarationId::Longhand(property)),
+            );
+        }
+        result.push_str(" !important;");
+    }
+    result
+}
+
+fn collect_svg_paint_styles(
+    node: LayoutDom<'_, Node>,
+    document_url: &ServoUrl,
+    styles: &mut Vec<Option<String>>,
+) {
+    styles.push(
+        node.downcast::<SVGElement>()
+            .and_then(|element| element.upcast::<Element>().style_data())
+            .map(|data| svg_paint_style(data.element_data.borrow().styles.primary(), document_url)),
+    );
+    let mut child = node.first_child_ref();
+    while let Some(node) = child {
+        collect_svg_paint_styles(node, document_url, styles);
+        child = node.next_sibling_ref();
+    }
+}
+
 impl<'dom> LayoutDom<'dom, SVGSVGElement> {
     pub(crate) fn data(self) -> SVGElementData<'dom> {
         let svg_id = self.unsafe_get().uuid;
@@ -189,12 +297,25 @@ impl<'dom> LayoutDom<'dom, SVGSVGElement> {
         let width = element.get_attr_for_layout(&ns!(), &local_name!("width"));
         let height = element.get_attr_for_layout(&ns!(), &local_name!("height"));
         let view_box = element.get_attr_for_layout(&ns!(), &local_name!("viewBox"));
-        SVGElementData {
-            source: self
-                .unsafe_get()
+        let mut paint_styles = Vec::new();
+        collect_svg_paint_styles(
+            self.upcast(),
+            &self
+                .upcast::<Node>()
+                .owner_doc_for_layout()
+                .url_for_layout(),
+            &mut paint_styles,
+        );
+        let source = if paint_styles == *self.unsafe_get().cached_paint_styles.borrow() {
+            self.unsafe_get()
                 .cached_serialized_data_url
                 .borrow()
-                .clone(),
+                .clone()
+        } else {
+            None
+        };
+        SVGElementData {
+            source,
             width,
             height,
             view_box,

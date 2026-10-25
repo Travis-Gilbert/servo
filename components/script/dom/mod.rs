@@ -210,6 +210,9 @@ pub(crate) mod types {
     include!(concat!(env!("OUT_DIR"), "/InterfaceTypes.rs"));
 }
 
+pub(crate) mod mse;
+pub(crate) use self::mse::*;
+
 pub(crate) mod abort;
 pub(crate) use self::abort::*;
 pub(crate) mod activation;

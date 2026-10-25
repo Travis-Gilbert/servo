@@ -39,6 +39,8 @@ pub trait BackendDeInit {
 }
 
 pub trait Backend: Send + Sync {
+    fn create_mse_source(&self) -> Option<Arc<dyn player::mse::MediaSource>> { None }
+    fn supports_mse_type(&self, _mime: &str) -> bool { false }
     fn create_player(
         &self,
         id: &ClientContextId,

@@ -118,6 +118,7 @@ impl AsRef<[f32]> for GStreamerAudioChunk {
 
 #[derive(PartialEq)]
 enum PlayerSource {
+    Mse(gstreamer_mse::MseSrc),
     Seekable(ServoSrc),
     Stream(ServoMediaStreamSrc),
 }
@@ -179,7 +180,7 @@ impl PlayerInner {
     }
 
     pub fn set_playback_rate(&mut self, playback_rate: f64) -> Result<(), PlayerError> {
-        if self.stream_type != StreamType::Seekable {
+        if self.stream_type == StreamType::Stream {
             return Err(PlayerError::NonSeekableStream);
         }
 
@@ -259,7 +260,7 @@ impl PlayerInner {
     }
 
     pub fn seek(&mut self, time: f64) -> Result<(), PlayerError> {
-        if self.stream_type != StreamType::Seekable {
+        if self.stream_type == StreamType::Stream {
             return Err(PlayerError::NonSeekableStream);
         }
         if let Some(ref metadata) = self.last_metadata &&
@@ -613,6 +614,7 @@ impl GStreamerPlayer {
         // The estimated version for the fix is 1.14.5 / 1.15.1.
         // https://github.com/servo/servo/issues/22010#issuecomment-432599657
         let uri = match self.stream_type {
+            StreamType::Mse => "mse://".to_value(),
             StreamType::Stream => {
                 register_servo_media_stream_src().map_err(|error| {
                     PlayerError::Backend(format!(
@@ -837,6 +839,16 @@ impl GStreamerPlayer {
 
                 let mut inner = inner_clone.lock().unwrap();
                 let source = match inner.stream_type {
+                    StreamType::Mse => {
+                        let Ok(src) = source.dynamic_cast::<gstreamer_mse::MseSrc>() else {
+                            let _ = sender.lock().unwrap().send(Err(PlayerError::SetStreamFailed));
+                            return None;
+                        };
+                        is_ready_clone.call_once(|| {
+                            let _ = sender.lock().unwrap().send(Ok(()));
+                        });
+                        PlayerSource::Mse(src)
+                    },
                     StreamType::Seekable => {
                         let servosrc = source
                             .dynamic_cast::<ServoSrc>()
@@ -983,6 +995,18 @@ macro_rules! inner_player_proxy {
 }
 
 impl Player for GStreamerPlayer {
+    fn connect_media_source(&self, source: &dyn servo_media_player::mse::MediaSource) -> Result<(), PlayerError> {
+        self.setup()?;
+        let inner = self.inner.borrow();
+        let inner = inner.as_ref().ok_or(PlayerError::SetStreamFailed)?.lock().unwrap();
+        let native = source.as_any().downcast_ref::<super::mse::Source>()
+            .ok_or(PlayerError::SetStreamFailed)?;
+        match inner.source.as_ref() {
+            Some(PlayerSource::Mse(src)) => { native.0.attach(src); Ok(()) },
+            _ => Err(PlayerError::SetStreamFailed),
+        }
+    }
+
     inner_player_proxy!(play, ());
     inner_player_proxy!(pause, ());
     inner_player_proxy_getter!(paused, bool, DEFAULT_PAUSED);

@@ -11,6 +11,7 @@ pub mod media_capture;
 pub mod media_stream;
 mod media_stream_source;
 pub mod player;
+mod mse;
 mod registry_scanner;
 mod render;
 mod source;
@@ -197,6 +198,12 @@ impl GStreamerBackend {
 }
 
 impl Backend for GStreamerBackend {
+    fn create_mse_source(&self) -> Option<Arc<dyn servo_media_player::mse::MediaSource>> {
+        Some(Arc::new(mse::Source(gstreamer_mse::MediaSource::new())))
+    }
+    fn supports_mse_type(&self, mime: &str) -> bool {
+        gstreamer_mse::MediaSource::is_type_supported(mime)
+    }
     #[expect(clippy::redundant_clone, reason = "False positive")]
     fn create_player(
         &self,

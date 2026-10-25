@@ -597,6 +597,7 @@ pub(crate) struct HTMLMediaElement {
     /// URL of the media resource, if any.
     #[no_trace]
     resource_url: DomRefCell<Option<ServoUrl>>,
+    mse_source: MutNullableDom<crate::dom::mediasource::MediaSource>,
     /// URL of the media resource, if the resource is set through the src_object attribute and it
     /// is a blob.
     #[no_trace]
@@ -714,6 +715,7 @@ impl HTMLMediaElement {
             seeking: Cell::new(false),
             current_seek_position: Cell::new(f64::NAN),
             resource_url: DomRefCell::new(None),
+            mse_source: MutNullableDom::new(None),
             blob_url: DomRefCell::new(None),
             played: DomRefCell::new(TimeRangesContainer::default()),
             audio_tracks_list: Default::default(),
@@ -752,7 +754,8 @@ impl HTMLMediaElement {
             .as_ref()
             .is_some_and(|player| !player.lock().unwrap().paused());
 
-        if self.is_potentially_playing() && !is_playing {
+        let should_play = self.is_potentially_playing();
+        if should_play && !is_playing {
             if let Some(ref player) = *self.player.borrow() {
                 let player = player.lock().unwrap();
 
@@ -766,7 +769,7 @@ impl HTMLMediaElement {
                     error!("Could not play media: {error:?}");
                 }
             }
-        } else if is_playing &&
+        } else if !should_play && is_playing &&
             let Some(ref player) = *self.player.borrow() &&
             let Err(error) = player.lock().unwrap().pause()
         {
@@ -1867,6 +1870,24 @@ impl HTMLMediaElement {
         // Step 5. Run the appropriate steps from the following list:
         match resource {
             Resource::Url(url) => {
+                if let Some(source) = self.global().media_source_for_url(url.as_str()) {
+                    let connected = source.is_closed() && self.player.borrow().as_ref()
+                        .is_some_and(|player| player.lock().unwrap().connect_media_source(source.backend()).is_ok());
+                    if !connected || source.attach(self).is_err() {
+                        self.resource_selection_algorithm_failure_steps(cx);
+                        return;
+                    }
+                    self.mse_source.set(Some(&source));
+                    *self.resource_url.borrow_mut() = Some(url);
+                    let this = Trusted::new(self);
+                    let generation = self.generation_id.get();
+                    self.global().task_manager().media_element_task_source().queue(task!(mse_attached: move |cx| {
+                        let this = this.root();
+                        if this.generation_id.get() == generation { this.delay_load_event(false, cx); }
+                    }));
+                    return;
+                }
+
                 // Step 5.remote.1. Optionally, run the following substeps. This is the expected
                 // behavior if the user agent intends to not attempt to fetch the resource until the
                 // user requests it explicitly (e.g. as a way to implement the preload attribute's
@@ -1917,7 +1938,7 @@ impl HTMLMediaElement {
                 if let Some(ref src_object) = *self.src_object.borrow() {
                     match src_object {
                         SrcObject::Blob(blob) => {
-                            let blob_url = URL::CreateObjectURL(&self.global(), blob);
+                            let blob_url = URL::CreateObjectURL(&self.global(), crate::dom::bindings::codegen::UnionTypes::BlobOrMediaSource::Blob(DomRoot::from_ref(&**blob)));
                             *self.blob_url.borrow_mut() =
                                 Some(ServoUrl::parse(&blob_url.str()).expect("infallible"));
                             self.fetch_request(cx, None, None);
@@ -2463,7 +2484,7 @@ impl HTMLMediaElement {
     }
 
     fn create_media_player(&self, resource: &Resource) -> Result<(), ()> {
-        let stream_type = match *resource {
+        let stream_type = match resource {
             Resource::Object => {
                 if let Some(ref src_object) = *self.src_object.borrow() {
                     match src_object {
@@ -2474,6 +2495,7 @@ impl HTMLMediaElement {
                     return Err(());
                 }
             },
+            Resource::Url(url) if self.global().media_source_for_url(url.as_str()).is_some() => StreamType::Mse,
             _ => StreamType::Seekable,
         };
 
@@ -2545,7 +2567,7 @@ impl HTMLMediaElement {
                 HTMLMediaElementTypeId::HTMLVideoElement
             );
             let should_enable_download_buffering =
-                (is_video || self.Loop()) && self.Preload() == "auto";
+                stream_type != StreamType::Mse && (is_video || self.Loop()) && self.Preload() == "auto";
             if let Err(error) =
                 player_guard.set_download_buffering_enabled(should_enable_download_buffering)
             {
@@ -2581,6 +2603,7 @@ impl HTMLMediaElement {
     }
 
     fn reset_media_player(&self, no_gc: &NoGC) {
+        if let Some(source) = self.mse_source.take() { source.detach(); }
         if self.player.borrow().is_none() {
             return;
         }
@@ -3858,6 +3881,9 @@ impl HTMLMediaElementMethods<crate::DomTypeHolder> for HTMLMediaElement {
 
     /// <https://html.spec.whatwg.org/multipage/#dom-media-buffered>
     fn Buffered(&self, cx: &mut JSContext) -> DomRoot<TimeRanges> {
+        if let Some(source) = self.mse_source.get() {
+            return TimeRanges::new(cx, self.global().as_window(), source.buffered());
+        }
         let mut buffered = TimeRangesContainer::default();
         if let Some(ref player) = *self.player.borrow() {
             let ranges = player.lock().unwrap().buffered();
