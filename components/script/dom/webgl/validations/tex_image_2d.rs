@@ -8,6 +8,7 @@ use servo_canvas_traits::webgl::WebGLError::*;
 use servo_canvas_traits::webgl::{TexDataType, TexFormat};
 
 use super::WebGLValidator;
+use super::tex_image_3d::{CommonTexImage3DValidator, CommonTexImage3DValidatorResult};
 use super::types::TexImageTarget;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::webgl::webglrenderingcontext::WebGLRenderingContext;
@@ -55,6 +56,8 @@ pub(crate) enum TexImageValidationError {
     InvalidOffsets,
     /// No base image has been defined for this texture target and level.
     MissingBaseTexture,
+    /// The texture's storage was already allocated and cannot change.
+    TextureImmutable,
 }
 
 impl std::error::Error for TexImageValidationError {}
@@ -83,6 +86,7 @@ impl fmt::Display for TexImageValidationError {
             InvalidCompressionFormat => "Unrecognized texture compression format",
             InvalidOffsets => "Invalid X/Y texture offset parameters",
             MissingBaseTexture => "No base image defined for this texture target and level",
+            TextureImmutable => "The texture's storage is immutable",
         };
         write!(f, "TexImageValidationError({})", description)
     }
@@ -690,8 +694,13 @@ impl WebGLValidator for CompressedTexSubImage2DValidator<'_> {
 }
 
 pub(crate) struct TexStorageValidator<'a> {
-    common_validator: CommonTexImage2DValidator<'a>,
+    context: &'a WebGLRenderingContext,
     dimensions: u8,
+    target: u32,
+    levels: i32,
+    internal_format: u32,
+    width: i32,
+    height: i32,
     depth: i32,
 }
 
@@ -718,16 +727,13 @@ impl<'a> TexStorageValidator<'a> {
         depth: i32,
     ) -> Self {
         TexStorageValidator {
-            common_validator: CommonTexImage2DValidator::new(
-                context,
-                target,
-                levels,
-                internal_format,
-                width,
-                height,
-                0,
-            ),
+            context,
             dimensions,
+            target,
+            levels,
+            internal_format,
+            width,
+            height,
             depth,
         }
     }
@@ -738,36 +744,64 @@ impl WebGLValidator for TexStorageValidator<'_> {
     type ValidatedOutput = TexStorageValidatorResult;
 
     fn validate(self) -> Result<Self::ValidatedOutput, TexImageValidationError> {
-        let context = self.common_validator.context;
-        let CommonTexImage2DValidatorResult {
-            texture,
-            target,
-            level,
-            internal_format,
-            width,
-            height,
-            border: _,
-        } = self.common_validator.validate()?;
+        let context = self.context;
 
-        if self.depth < 1 {
-            context.webgl_error(InvalidValue);
-            return Err(TexImageValidationError::DepthTooLow);
-        }
-        if level < 1 {
+        // The common validators take a mipmap level, while texStorage takes a number of levels.
+        // The size limits apply to level 0, where the storage starts.
+        let (texture, target, internal_format, width, height, depth) = if self.dimensions == 3 {
+            let CommonTexImage3DValidatorResult {
+                texture,
+                target,
+                internal_format,
+                width,
+                height,
+                depth,
+                ..
+            } = CommonTexImage3DValidator::new(
+                context,
+                self.target,
+                0,
+                self.internal_format,
+                self.width,
+                self.height,
+                self.depth,
+                0,
+            )
+            .validate()?;
+            (texture, target, internal_format, width, height, depth)
+        } else {
+            let CommonTexImage2DValidatorResult {
+                texture,
+                target,
+                internal_format,
+                width,
+                height,
+                ..
+            } = CommonTexImage2DValidator::new(
+                context,
+                self.target,
+                0,
+                self.internal_format,
+                self.width,
+                self.height,
+                0,
+            )
+            .validate()?;
+            (texture, target, internal_format, width, height, 1)
+        };
+
+        // INVALID_VALUE is generated if levels, width, height or depth is less than 1.
+        if self.levels < 1 {
             context.webgl_error(InvalidValue);
             return Err(TexImageValidationError::LevelTooLow);
         }
-
-        let dimensions_valid = match target {
-            TexImageTarget::Texture2D | TexImageTarget::CubeMap => self.dimensions == 2,
-            TexImageTarget::Texture3D | TexImageTarget::Texture2DArray => self.dimensions == 3,
-            _ => false,
-        };
-        if !dimensions_valid {
-            context.webgl_error(InvalidEnum);
-            return Err(TexImageValidationError::InvalidTextureTarget(
-                target.as_gl_constant(),
-            ));
+        if width < 1 || height < 1 {
+            context.webgl_error(InvalidValue);
+            return Err(TexImageValidationError::NegativeDimension);
+        }
+        if depth < 1 {
+            context.webgl_error(InvalidValue);
+            return Err(TexImageValidationError::DepthTooLow);
         }
 
         if !internal_format.is_sized() {
@@ -775,8 +809,11 @@ impl WebGLValidator for TexStorageValidator<'_> {
             return Err(TexImageValidationError::InvalidTextureFormat);
         }
 
-        let max_level = cmp::max(width, height).ilog2() + 1;
-        if level > max_level {
+        // INVALID_OPERATION is generated if levels is greater than
+        // floor(log2(max(width, height, depth))) + 1.
+        let levels = self.levels as u32;
+        let max_levels = cmp::max(cmp::max(width, height), depth).ilog2() + 1;
+        if levels > max_levels {
             context.webgl_error(InvalidOperation);
             return Err(TexImageValidationError::LevelTooHigh);
         }
@@ -788,14 +825,20 @@ impl WebGLValidator for TexStorageValidator<'_> {
             ));
         }
 
+        // INVALID_OPERATION is generated if the texture's storage is already immutable.
+        if texture.is_immutable() {
+            context.webgl_error(InvalidOperation);
+            return Err(TexImageValidationError::TextureImmutable);
+        }
+
         Ok(TexStorageValidatorResult {
             texture,
             target,
-            levels: level,
+            levels,
             internal_format,
             width,
             height,
-            depth: self.depth as u32,
+            depth,
         })
     }
 }
