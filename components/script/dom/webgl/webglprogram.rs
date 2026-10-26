@@ -110,20 +110,17 @@ impl DroppableWebGLProgram {
         Ok(shader)
     }
 
+    /// Lets go of the shaders once the program is deleted and no longer current.
+    ///
+    /// glDeleteProgram detaches the shaders itself when the GL program goes away, so sending
+    /// DetachShader here would name a program that no longer exists and fail with
+    /// INVALID_VALUE. Only the attach counts, which decide when a deleted shader can be
+    /// released, need updating.
     fn detach_shaders(&mut self) {
-        if let Some(ref mut shader) = self.fragment_shader {
-            if let Some(root) = shader.root() {
+        for slot in [&mut self.fragment_shader, &mut self.vertex_shader] {
+            if let Some(root) = slot.take().and_then(|shader| shader.root()) {
                 root.decrement_attached_counter();
-                self.send_command(WebGLCommand::DetachShader(self.id, root.id()));
             }
-            self.fragment_shader = None;
-        }
-        if let Some(ref mut shader) = self.vertex_shader {
-            if let Some(root) = shader.root() {
-                root.decrement_attached_counter();
-                self.send_command(WebGLCommand::DetachShader(self.id, root.id()));
-            }
-            self.vertex_shader = None;
         }
     }
 
