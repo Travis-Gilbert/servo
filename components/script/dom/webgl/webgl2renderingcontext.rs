@@ -160,6 +160,17 @@ impl ColorBufferKind {
         }
     }
 
+    /// The format and type that `getParameter` reports as `IMPLEMENTATION_COLOR_READ_FORMAT`
+    /// and `IMPLEMENTATION_COLOR_READ_TYPE`, which are the ones that `readPixels` accepts.
+    fn implementation_read(self) -> (u32, u32) {
+        match self {
+            Self::FixedPoint => (constants::RGBA, constants::UNSIGNED_BYTE),
+            Self::SignedInteger => (constants::RGBA_INTEGER, constants::INT),
+            Self::UnsignedInteger => (constants::RGBA_INTEGER, constants::UNSIGNED_INT),
+            Self::FloatingPoint => (constants::RGBA, constants::FLOAT),
+        }
+    }
+
     fn accepts(self, format: u32, pixel_type: u32) -> bool {
         matches!(
             (self, format, pixel_type),
@@ -177,6 +188,21 @@ impl ColorBufferKind {
                 (Self::FloatingPoint, constants::RGBA, constants::FLOAT)
         )
     }
+}
+
+/// The part of `data` that a compressed texture upload reads: `length` bytes starting at
+/// `offset`, or everything from `offset` on when `length` is 0. `None` when that does not lie
+/// inside of `data`, which is an `INVALID_VALUE`.
+///
+/// <https://registry.khronos.org/webgl/specs/latest/2.0/#3.7.6>
+fn compressed_source(data: &[u8], offset: u32, length: u32) -> Option<&[u8]> {
+    let start = offset as usize;
+    let end = if length == 0 {
+        data.len()
+    } else {
+        start.checked_add(length as usize)?
+    };
+    data.get(start..end)
 }
 
 impl WebGL2RenderingContext {
@@ -1101,7 +1127,7 @@ impl WebGL2RenderingContext {
                 // checked that they are as large as the elements of `data_type`.
                 let offset_bytes = src_offset as usize * element_size as usize;
                 if offset_bytes > bytes.len() {
-                    self.base.webgl_error(InvalidValue);
+                    self.base.webgl_error(InvalidOperation);
                     return None;
                 }
                 // The images are cut out of the array when the pixel store parameters place them
@@ -1315,6 +1341,31 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
                 let vao = self.current_vao(cx);
                 let vao = vao.id().map(|_| &*vao);
                 vao.to_jsval(cx, rval);
+                return;
+            },
+            // The format and type that `readPixels` accepts depend on what the read buffer stores.
+            constants::IMPLEMENTATION_COLOR_READ_FORMAT |
+            constants::IMPLEMENTATION_COLOR_READ_TYPE => {
+                let read_framebuffer_is_complete = self
+                    .base
+                    .get_read_framebuffer_slot()
+                    .get()
+                    .is_none_or(|fb| fb.check_status() == constants::FRAMEBUFFER_COMPLETE);
+                match self.read_color_buffer_kind() {
+                    Ok(kind) if read_framebuffer_is_complete => {
+                        let (format, pixel_type) = kind.implementation_read();
+                        let value = if parameter == constants::IMPLEMENTATION_COLOR_READ_FORMAT {
+                            format
+                        } else {
+                            pixel_type
+                        };
+                        rval.set(Int32Value(value as i32));
+                    },
+                    _ => {
+                        self.base.webgl_error(InvalidOperation);
+                        rval.set(NullValue());
+                    },
+                }
                 return;
             },
             // NOTE: DRAW_FRAMEBUFFER_BINDING is the same as FRAMEBUFFER_BINDING, handled on the WebGL1 side
@@ -1907,16 +1958,14 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
         src_length_override: u32,
     ) {
-        let mut data = pixels.as_slice_safe(no_gc).unwrap_or(&[]);
-        let start = src_offset as usize;
-        let end = (src_offset + src_length_override) as usize;
-        if start > data.len() || end > data.len() {
+        let Some(data) = compressed_source(
+            pixels.as_slice_safe(no_gc).unwrap_or(&[]),
+            src_offset,
+            src_length_override,
+        ) else {
             self.base.webgl_error(InvalidValue);
             return;
-        }
-        if src_length_override != 0 {
-            data = &data[start..end];
-        }
+        };
         self.base.compressed_tex_image_2d(
             target,
             level,
@@ -1943,16 +1992,14 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
         src_length_override: u32,
     ) {
-        let mut data = pixels.as_slice_safe(no_gc).unwrap_or(&[]);
-        let start = src_offset as usize;
-        let end = (src_offset + src_length_override) as usize;
-        if start > data.len() || end > data.len() {
+        let Some(data) = compressed_source(
+            pixels.as_slice_safe(no_gc).unwrap_or(&[]),
+            src_offset,
+            src_length_override,
+        ) else {
             self.base.webgl_error(InvalidValue);
             return;
-        }
-        if src_length_override != 0 {
-            data = &data[start..end];
-        }
+        };
         self.base.compressed_tex_sub_image_2d(
             target, level, xoffset, yoffset, width, height, format, data,
         )
