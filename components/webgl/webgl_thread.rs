@@ -2592,8 +2592,19 @@ impl WebGLImpl {
                     attach(attachment)
                 }
             },
-            WebGLCommand::ReadBuffer(buffer) => unsafe { gl.read_buffer(buffer) },
-            WebGLCommand::DrawBuffers(ref buffers) => unsafe { gl.draw_buffers(buffers) },
+            // The default framebuffer is a framebuffer object here, where BACK is not a valid
+            // buffer: WebGL's back buffer is its first color attachment.
+            WebGLCommand::ReadBuffer(buffer) => unsafe {
+                gl.read_buffer(back_to_color_attachment(buffer))
+            },
+            WebGLCommand::DrawBuffers(ref buffers) => unsafe {
+                let buffers: Vec<u32> = buffers
+                    .iter()
+                    .copied()
+                    .map(back_to_color_attachment)
+                    .collect();
+                gl.draw_buffers(&buffers)
+            },
         }
 
         // If debug asertions are enabled, then check the error state.
@@ -3315,6 +3326,16 @@ fn clamp_viewport(gl: &Gl, size: Size2D<u32>) -> Size2D<u32> {
             .min(max_renderbuffer[0] as u32)
             .max(1),
     )
+}
+
+/// Maps the `BACK` buffer of WebGL's default framebuffer to the color attachment of the
+/// framebuffer object that stands for it.
+fn back_to_color_attachment(buffer: u32) -> u32 {
+    if buffer == gl::BACK {
+        gl::COLOR_ATTACHMENT0
+    } else {
+        buffer
+    }
 }
 
 trait ToSurfmanVersion {
