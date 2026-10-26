@@ -4768,9 +4768,8 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         data_type: u32,
         pixels: CustomAutoRooterGuard<Option<ArrayBufferView>>,
     ) -> ErrorResult {
-        let validator = TexImage2DValidator::new(
-            self, target, level, format, width, height, 0, format, data_type,
-        );
+        let validator =
+            TexImage2DValidator::new_sub_image(self, target, level, width, height, format, data_type);
         let TexImage2DValidatorResult {
             texture,
             target,
@@ -4860,14 +4859,12 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             None => return Ok(()),
         };
 
-        let validator = TexImage2DValidator::new(
+        let validator = TexImage2DValidator::new_sub_image(
             self,
             target,
             level,
-            format,
             pixels.size().width as i32,
             pixels.size().height as i32,
-            0,
             format,
             data_type,
         );

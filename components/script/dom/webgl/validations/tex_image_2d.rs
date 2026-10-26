@@ -100,6 +100,10 @@ pub(crate) struct CommonTexImage2DValidator<'a> {
     width: i32,
     height: i32,
     border: i32,
+    /// Whether `internal_format` is the `format` argument of a sub-image upload, which accepts
+    /// every format of the context's version, such as RG and RED_INTEGER, and not only the
+    /// formats that are valid as an internal format.
+    sub_image: bool,
 }
 
 pub(crate) struct CommonTexImage2DValidatorResult {
@@ -155,7 +159,7 @@ impl WebGLValidator for CommonTexImage2DValidator<'_> {
         let internal_format = match TexFormat::from_gl_constant(self.internal_format) {
             Some(format)
                 if format.required_webgl_version() <= self.context.webgl_version() &&
-                    format.usable_as_internal() =>
+                    (self.sub_image || format.usable_as_internal()) =>
             {
                 format
             },
@@ -248,6 +252,7 @@ impl<'a> CommonTexImage2DValidator<'a> {
             width,
             height,
             border,
+            sub_image: false,
         }
     }
 }
@@ -285,6 +290,24 @@ impl<'a> TexImage2DValidator<'a> {
             format,
             data_type,
         }
+    }
+
+    /// Validates the arguments of `texSubImage2D`, which has no internal format: the `format`
+    /// takes its place and has to match the format of the image being updated.
+    pub(crate) fn new_sub_image(
+        context: &'a WebGLRenderingContext,
+        target: u32,
+        level: i32,
+        width: i32,
+        height: i32,
+        format: u32,
+        data_type: u32,
+    ) -> Self {
+        let mut validator = Self::new(
+            context, target, level, format, width, height, 0, format, data_type,
+        );
+        validator.common_validator.sub_image = true;
+        validator
     }
 }
 
