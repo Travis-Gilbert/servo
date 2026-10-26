@@ -1290,8 +1290,33 @@ impl WebGLImpl {
                     || components_per_format(format),
                     |format| format.components() as usize,
                 );
-                let len = bytes_per_type(pixel_type) * components * rect.size.area() as usize;
-                let mut pixels = vec![0; len];
+                let cpp = match pixel_type {
+                    gl::UNSIGNED_SHORT_4_4_4_4 |
+                    gl::UNSIGNED_SHORT_5_5_5_1 |
+                    gl::UNSIGNED_SHORT_5_6_5 => 2,
+                    gl::UNSIGNED_INT_2_10_10_10_REV |
+                    gl::UNSIGNED_INT_10F_11F_11F_REV |
+                    gl::UNSIGNED_INT_5_9_9_9_REV => 4,
+                    _ => (bytes_per_type(pixel_type) * components) as u32,
+                };
+                let len = servo_canvas_traits::pixel_storage::required_bytes(
+                    rect.size.width,
+                    rect.size.height,
+                    1,
+                    cpp,
+                    1,
+                );
+                let mut pixels = Vec::new();
+                let Some(len) = len.filter(|len| pixels.try_reserve_exact(*len).is_ok()) else {
+                    sender
+                        .send((
+                            GenericSharedMemory::from_vec(Vec::new()),
+                            SnapshotAlphaMode::Opaque,
+                        ))
+                        .unwrap();
+                    return;
+                };
+                pixels.resize(len, 0);
                 unsafe {
                     // We don't want any alignment padding on pixel rows.
                     gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
@@ -2059,6 +2084,20 @@ impl WebGLImpl {
                     webgl::ParameterBool4::ColorWritemask => state.color_write_mask,
                 };
                 sender.send(value).unwrap()
+            },
+            WebGLCommand::GetImplementationReadFormat(ref sender) => {
+                let version = gl.version();
+                let supported = version.is_embedded ||
+                    (version.major, version.minor) >= (4, 1) ||
+                    gl.supported_extensions()
+                        .contains("GL_ARB_ES2_compatibility");
+                let pair = supported.then(|| unsafe {
+                    (
+                        gl.get_parameter_i32(gl::IMPLEMENTATION_COLOR_READ_FORMAT) as u32,
+                        gl.get_parameter_i32(gl::IMPLEMENTATION_COLOR_READ_TYPE) as u32,
+                    )
+                });
+                sender.send(pair).unwrap();
             },
             WebGLCommand::GetParameterInt(param, ref sender) => {
                 let value = match param {

@@ -511,6 +511,7 @@ pub enum WebGLCommand {
     GetParameterBool(ParameterBool, GenericSender<bool>),
     GetParameterBool4(ParameterBool4, GenericSender<[bool; 4]>),
     GetParameterInt(ParameterInt, GenericSender<i32>),
+    GetImplementationReadFormat(GenericSender<Option<(u32, u32)>>),
     GetParameterUInt(ParameterUInt, GenericSender<u32>),
     GetParameterInt2(ParameterInt2, GenericSender<[i32; 2]>),
     GetParameterInt4(ParameterInt4, GenericSender<[i32; 4]>),

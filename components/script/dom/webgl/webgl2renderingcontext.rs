@@ -136,6 +136,7 @@ struct ReadPixelsSizes {
 #[derive(Clone, Copy)]
 enum ColorBufferKind {
     FixedPoint,
+    PackedFixedPoint,
     SignedInteger,
     UnsignedInteger,
     FloatingPoint,
@@ -156,6 +157,7 @@ impl ColorBufferKind {
                 R8ui | R16ui | R32ui | RG8ui | RG16ui | RG32ui | RGB8ui | RGB16ui | RGB32ui |
                 RGBA8ui | RGB10A2ui | RGBA16ui | RGBA32ui,
             ) => Self::UnsignedInteger,
+            Some(RGB10A2) => Self::PackedFixedPoint,
             _ => Self::FixedPoint,
         }
     }
@@ -165,6 +167,7 @@ impl ColorBufferKind {
     fn implementation_read(self) -> (u32, u32) {
         match self {
             Self::FixedPoint => (constants::RGBA, constants::UNSIGNED_BYTE),
+            Self::PackedFixedPoint => (constants::RGBA, constants::UNSIGNED_INT_2_10_10_10_REV),
             Self::SignedInteger => (constants::RGBA_INTEGER, constants::INT),
             Self::UnsignedInteger => (constants::RGBA_INTEGER, constants::UNSIGNED_INT),
             Self::FloatingPoint => (constants::RGBA, constants::FLOAT),
@@ -174,12 +177,15 @@ impl ColorBufferKind {
     fn accepts(self, format: u32, pixel_type: u32) -> bool {
         matches!(
             (self, format, pixel_type),
-            (Self::FixedPoint, constants::RGBA, constants::UNSIGNED_BYTE) |
-                (
-                    Self::SignedInteger,
-                    constants::RGBA_INTEGER,
-                    constants::INT
-                ) |
+            (
+                Self::FixedPoint | Self::PackedFixedPoint,
+                constants::RGBA,
+                constants::UNSIGNED_BYTE
+            ) | (
+                Self::PackedFixedPoint,
+                constants::RGBA,
+                constants::UNSIGNED_INT_2_10_10_10_REV
+            ) | (Self::SignedInteger, constants::RGBA_INTEGER, constants::INT) |
                 (
                     Self::UnsignedInteger,
                     constants::RGBA_INTEGER,
@@ -475,6 +481,15 @@ impl WebGL2RenderingContext {
             constants::RGBA | constants::RGBA_INTEGER => 4,
             _ => return Err(InvalidEnum),
         };
+        let channels = match pixel_type {
+            constants::UNSIGNED_SHORT_4_4_4_4 |
+            constants::UNSIGNED_SHORT_5_5_5_1 |
+            constants::UNSIGNED_SHORT_5_6_5 |
+            constants::UNSIGNED_INT_2_10_10_10_REV |
+            constants::UNSIGNED_INT_10F_11F_11F_REV |
+            constants::UNSIGNED_INT_5_9_9_9_REV => 1,
+            _ => channels,
+        };
         Ok(ReadPixelsAllowedFormats {
             array_types,
             channels,
@@ -554,8 +569,22 @@ impl WebGL2RenderingContext {
         })
     }
 
-    /// The kind of color buffer `readPixels` reads from: the read buffer of the bound read
-    /// framebuffer, or the default framebuffer.
+    fn implementation_read_pair(&self, kind: ColorBufferKind) -> (u32, u32) {
+        let (sender, receiver) = generic_channel::channel().unwrap();
+        self.base
+            .send_command(WebGLCommand::GetImplementationReadFormat(sender));
+        // Older desktop GL lacks the GLES query, and desktop drivers may return
+        // non-WebGL enums such as BGRA. Choose a supported fallback in either case.
+        receiver
+            .recv()
+            .unwrap()
+            .filter(|&(format, pixel_type)| {
+                self.calc_read_pixel_formats(pixel_type, format).is_ok()
+            })
+            .unwrap_or_else(|| kind.implementation_read())
+    }
+
+    /// The kind of color buffer in the read framebuffer, or the default framebuffer.
     fn read_color_buffer_kind(&self) -> WebGLResult<ColorBufferKind> {
         match self.base.get_read_framebuffer_slot().get() {
             Some(fb) => fb
@@ -588,16 +617,15 @@ impl WebGL2RenderingContext {
             return self.base.webgl_error(InvalidOperation);
         }
 
-        let color_buffer_kind =
-            handle_potential_webgl_error!(self.base, self.read_color_buffer_kind(), return);
-
-        let dst_byte_offset = {
-            let dst_elem_size = dst.get_array_type().byte_size().unwrap();
-            dst_elem_offset as usize * dst_elem_size
+        let Some(dst_elem_size) = dst.get_array_type().byte_size() else {
+            return self.base.webgl_error(InvalidOperation);
         };
-        if dst_byte_offset > dst.len() {
-            return self.base.webgl_error(InvalidValue);
-        }
+        let Some(dst_byte_offset) = (dst_elem_offset as usize)
+            .checked_mul(dst_elem_size)
+            .filter(|offset| *offset <= dst.len())
+        else {
+            return self.base.webgl_error(InvalidOperation);
+        };
 
         let dst_array_type = dst.get_array_type();
         let ReadPixelsAllowedFormats {
@@ -610,7 +638,11 @@ impl WebGL2RenderingContext {
         if !allowed_array_types.contains(&dst_array_type) {
             return self.base.webgl_error(InvalidOperation);
         }
-        if !color_buffer_kind.accepts(format, pixel_type) {
+        let color_buffer_kind =
+            handle_potential_webgl_error!(self.base, self.read_color_buffer_kind(), return);
+        if !color_buffer_kind.accepts(format, pixel_type) &&
+            (format, pixel_type) != self.implementation_read_pair(color_buffer_kind)
+        {
             return self.base.webgl_error(InvalidOperation);
         }
 
@@ -1366,7 +1398,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
                     .is_none_or(|fb| fb.check_status() == constants::FRAMEBUFFER_COMPLETE);
                 match self.read_color_buffer_kind() {
                     Ok(kind) if read_framebuffer_is_complete => {
-                        let (format, pixel_type) = kind.implementation_read();
+                        let (format, pixel_type) = self.implementation_read_pair(kind);
                         let value = if parameter == constants::IMPLEMENTATION_COLOR_READ_FORMAT {
                             format
                         } else {
@@ -2570,8 +2602,6 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             return self.base.webgl_error(InvalidOperation);
         }
 
-        let color_buffer_kind =
-            handle_potential_webgl_error!(self.base, self.read_color_buffer_kind(), return);
         let ReadPixelsAllowedFormats {
             array_types,
             channels,
@@ -2579,7 +2609,11 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             Ok(result) => result,
             Err(error) => return self.base.webgl_error(error),
         };
-        if !color_buffer_kind.accepts(format, pixel_type) {
+        let color_buffer_kind =
+            handle_potential_webgl_error!(self.base, self.read_color_buffer_kind(), return);
+        if !color_buffer_kind.accepts(format, pixel_type) &&
+            (format, pixel_type) != self.implementation_read_pair(color_buffer_kind)
+        {
             return self.base.webgl_error(InvalidOperation);
         }
         let bytes_per_pixel = array_types[0].byte_size().unwrap() * channels;
@@ -5567,5 +5601,28 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 impl WebGL2RenderingContextHelpers for WebGL2RenderingContext {
     fn is_webgl2_enabled(cx: &mut js::context::JSContext, global: HandleObject) -> bool {
         Self::is_webgl2_enabled(cx, global)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ColorBufferKind, compressed_source, constants};
+
+    #[test]
+    fn rgb10_a2_accepts_both_required_read_types() {
+        let kind = ColorBufferKind::of(constants::RGB10_A2);
+        assert!(kind.accepts(constants::RGBA, constants::UNSIGNED_BYTE));
+        assert!(kind.accepts(constants::RGBA, constants::UNSIGNED_INT_2_10_10_10_REV));
+        assert!(
+            !ColorBufferKind::FixedPoint
+                .accepts(constants::RGBA, constants::UNSIGNED_INT_2_10_10_10_REV,)
+        );
+    }
+
+    #[test]
+    fn compressed_source_offsets_do_not_wrap() {
+        assert!(compressed_source(&[0; 4], u32::MAX, 2).is_none());
+        assert!(compressed_source(&[0; 4], 2, u32::MAX).is_none());
+        assert!(compressed_source(&[0; 4], 4, 0).unwrap().is_empty());
     }
 }
