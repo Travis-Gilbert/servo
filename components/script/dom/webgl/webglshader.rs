@@ -24,6 +24,7 @@ use {
     crate::dom::webgl::extensions::extfragdepth::EXTFragDepth,
     crate::dom::webgl::extensions::extshadertexturelod::EXTShaderTextureLod,
     crate::dom::webgl::extensions::oesstandardderivatives::OESStandardDerivatives,
+    crate::dom::webgl::shaderisnan::isnan_by_bits,
     crate::dom::webgl::webglobject::WebGLObject,
     crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext},
     crate::dom::webglrenderingcontext::capture_webgl_backtrace,
@@ -249,7 +250,11 @@ impl WebGLShader {
 
         match validator.compile(&[&source.str()], options) {
             Ok(()) => {
-                let translated_source = validator.object_code();
+                let mut translated_source = validator.object_code();
+                if cfg!(target_os = "macos") {
+                    // The driver compiles with fast math, where isnan() is always false.
+                    translated_source = isnan_by_bits(translated_source);
+                }
                 debug!("Shader translated: {}", translated_source);
                 // NOTE: At this point we should be pretty sure that the compilation in the paint thread
                 // will succeed.

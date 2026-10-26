@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 pub(crate) mod extensions;
+pub(crate) mod shaderisnan;
 pub(crate) mod validations;
 pub(crate) mod vertexarrayobject;
 pub(crate) mod webgl2renderingcontext;
