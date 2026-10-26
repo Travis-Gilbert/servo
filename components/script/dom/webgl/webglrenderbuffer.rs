@@ -20,6 +20,7 @@ use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebG
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
+use crate::dom::webgl::extensions::extcolorbufferfloat::EXTColorBufferFloat;
 use crate::dom::webgl::webglframebuffer::WebGLFramebuffer;
 use crate::dom::webgl::webglobject::WebGLObject;
 use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
@@ -241,6 +242,25 @@ impl WebGLRenderbuffer {
                 } else {
                     constants::RGB8
                 }
+            },
+            // https://registry.khronos.org/webgl/extensions/EXT_color_buffer_float/
+            constants::R16F |
+            constants::RG16F |
+            constants::R32F |
+            constants::RG32F |
+            constants::R11F_G11F_B10F
+                if context
+                    .extension_manager()
+                    .is_enabled::<EXTColorBufferFloat>() =>
+            {
+                internal_format
+            },
+            EXTColorBufferHalfFloatConstants::RGBA16F_EXT
+                if context
+                    .extension_manager()
+                    .is_enabled::<EXTColorBufferFloat>() =>
+            {
+                internal_format
             },
             EXTColorBufferHalfFloatConstants::RGBA16F_EXT |
             EXTColorBufferHalfFloatConstants::RGB16F_EXT => {

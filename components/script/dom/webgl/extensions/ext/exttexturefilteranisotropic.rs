@@ -5,7 +5,6 @@
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
-use servo_canvas_traits::webgl::WebGLVersion;
 
 use super::{WebGLExtension, WebGLExtensionSpec, WebGLExtensions};
 use crate::dom::bindings::codegen::Bindings::EXTTextureFilterAnisotropicBinding::EXTTextureFilterAnisotropicConstants;
@@ -34,7 +33,7 @@ impl WebGLExtension for EXTTextureFilterAnisotropic {
     }
 
     fn spec() -> WebGLExtensionSpec {
-        WebGLExtensionSpec::Specific(WebGLVersion::WebGL1)
+        WebGLExtensionSpec::All
     }
 
     fn is_supported(ext: &WebGLExtensions) -> bool {

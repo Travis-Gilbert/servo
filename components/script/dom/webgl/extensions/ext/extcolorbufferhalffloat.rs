@@ -5,7 +5,6 @@
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
-use servo_canvas_traits::webgl::WebGLVersion;
 
 use super::{WebGLExtension, WebGLExtensionSpec, WebGLExtensions};
 use crate::dom::bindings::reflector::DomGlobal;
@@ -33,11 +32,13 @@ impl WebGLExtension for EXTColorBufferHalfFloat {
     }
 
     fn spec() -> WebGLExtensionSpec {
-        WebGLExtensionSpec::Specific(WebGLVersion::WebGL1)
+        WebGLExtensionSpec::All
     }
 
     fn is_supported(ext: &WebGLExtensions) -> bool {
-        OESTextureHalfFloat::is_supported(ext)
+        ext.has_core_float_buffers() ||
+            ext.supports_gl_extension("GL_EXT_color_buffer_float") ||
+            OESTextureHalfFloat::is_supported(ext)
     }
 
     fn enable(_ext: &WebGLExtensions) {}

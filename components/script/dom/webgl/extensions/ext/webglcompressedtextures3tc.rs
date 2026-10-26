@@ -5,7 +5,7 @@
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
-use servo_canvas_traits::webgl::{TexFormat, WebGLVersion};
+use servo_canvas_traits::webgl::TexFormat;
 
 use super::{WebGLExtension, WebGLExtensionSpec, WebGLExtensions};
 use crate::dom::bindings::reflector::DomGlobal;
@@ -33,7 +33,7 @@ impl WebGLExtension for WEBGLCompressedTextureS3TC {
     }
 
     fn spec() -> WebGLExtensionSpec {
-        WebGLExtensionSpec::Specific(WebGLVersion::WebGL1)
+        WebGLExtensionSpec::All
     }
 
     fn is_supported(ext: &WebGLExtensions) -> bool {

@@ -24,6 +24,7 @@ use crate::dom::bindings::codegen::Bindings::OESTextureHalfFloatBinding::OESText
 use crate::dom::bindings::codegen::Bindings::OESVertexArrayObjectBinding::OESVertexArrayObjectConstants;
 use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::WebGLRenderingContextConstants as constants;
 use crate::dom::bindings::trace::JSTraceable;
+use crate::dom::webgl::extensions::extcolorbufferfloat::EXTColorBufferFloat;
 use crate::dom::webgl::extensions::extcolorbufferhalffloat::EXTColorBufferHalfFloat;
 use crate::dom::webgl::extensions::oestexturefloat::OESTextureFloat;
 use crate::dom::webgl::extensions::oestexturehalffloat::OESTextureHalfFloat;
@@ -213,19 +214,23 @@ impl WebGLExtensions {
             .insert(name, Box::new(TypedWebGLExtensionWrapper::<T>::new()));
     }
 
+    /// Whether an extension is written against this context's WebGL version
+    /// and supported by its native GL context.
+    fn is_exposed(&self, extension: &dyn WebGLExtensionWrapper) -> bool {
+        if let WebGLExtensionSpec::Specific(version) = extension.spec() &&
+            self.webgl_version != version
+        {
+            return false;
+        }
+        extension.is_supported(self)
+    }
+
     pub(crate) fn get_supported_extensions(&self) -> Vec<&'static str> {
         self.extensions
             .borrow()
-            .iter()
-            .filter(|v| {
-                if let WebGLExtensionSpec::Specific(version) = v.1.spec() &&
-                    self.webgl_version != version
-                {
-                    return false;
-                }
-                v.1.is_supported(self)
-            })
-            .map(|ref v| v.1.name())
+            .values()
+            .filter(|extension| self.is_exposed(extension.as_ref()))
+            .map(|extension| extension.name())
             .collect()
     }
 
@@ -241,7 +246,7 @@ impl WebGLExtensions {
         let Some(extension) = extensions.get(&name) else {
             return;
         };
-        if extension.is_supported(self) {
+        if self.is_exposed(extension.as_ref()) {
             extension.instance_or_init(cx, ctx, self, rval);
         }
     }
@@ -417,7 +422,9 @@ impl WebGLExtensions {
     fn register_all_extensions(&self) {
         self.register::<ext::angleinstancedarrays::ANGLEInstancedArrays>();
         self.register::<ext::extblendminmax::EXTBlendMinmax>();
+        self.register::<ext::extcolorbufferfloat::EXTColorBufferFloat>();
         self.register::<ext::extcolorbufferhalffloat::EXTColorBufferHalfFloat>();
+        self.register::<ext::extfloatblend::EXTFloatBlend>();
         self.register::<ext::extfragdepth::EXTFragDepth>();
         self.register::<ext::extshadertexturelod::EXTShaderTextureLod>();
         self.register::<ext::exttexturefilteranisotropic::EXTTextureFilterAnisotropic>();
@@ -450,7 +457,20 @@ impl WebGLExtensions {
     }
 
     pub(crate) fn is_float_buffer_renderable(&self) -> bool {
-        self.is_enabled::<WEBGLColorBufferFloat>() || self.is_enabled::<OESTextureFloat>()
+        self.is_enabled::<WEBGLColorBufferFloat>() ||
+            self.is_enabled::<OESTextureFloat>() ||
+            self.is_enabled::<EXTColorBufferFloat>()
+    }
+
+    /// Whether this is desktop GL 3.0 or later, where float colour buffers,
+    /// float blending and linear filtering of float textures are core
+    /// features, so the driver does not list them as extensions.
+    pub(crate) fn has_core_float_buffers(&self) -> bool {
+        !self.is_gles() &&
+            self.is_min_glsl_version_satisfied(WebGLSLVersion {
+                major: 1,
+                minor: 30,
+            })
     }
 
     pub(crate) fn is_min_glsl_version_satisfied(&self, min_glsl_version: WebGLSLVersion) -> bool {
