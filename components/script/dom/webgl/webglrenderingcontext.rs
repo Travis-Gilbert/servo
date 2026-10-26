@@ -3211,6 +3211,17 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
                     WebGLFramebufferBindingRequest::Default,
                 ));
             }
+            // A WebGL 2 context binds the read framebuffer on its own, and it reverts to the
+            // default framebuffer too when the framebuffer is deleted.
+            if let Some(bound_object) = self.bound_read_framebuffer.get() &&
+                bound_object.id() == framebuffer.id()
+            {
+                self.bound_read_framebuffer.set(None);
+                self.send_command(WebGLCommand::BindFramebuffer(
+                    WebGL2RenderingContextConstants::READ_FRAMEBUFFER,
+                    WebGLFramebufferBindingRequest::Default,
+                ));
+            }
             framebuffer.delete(Operation::Infallible)
         }
     }
