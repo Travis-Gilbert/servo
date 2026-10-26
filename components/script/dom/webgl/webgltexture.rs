@@ -658,6 +658,10 @@ impl ImageInfo {
         self.height
     }
 
+    pub(crate) fn depth(&self) -> u32 {
+        self.depth
+    }
+
     pub(crate) fn internal_format(&self) -> TexFormat {
         self.internal_format
     }

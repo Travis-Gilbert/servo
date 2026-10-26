@@ -20,8 +20,8 @@ use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 use servo_base::generic_channel::{self, GenericSharedMemory};
 use servo_canvas_traits::webgl::WebGLError::*;
 use servo_canvas_traits::webgl::{
-    AlphaTreatment, GLContextAttributes, InternalFormatParameter, TexDataType, TexFormat,
-    WebGLCommand, WebGLContextId, WebGLResult, WebGLVersion, YAxisTreatment, webgl_channel,
+    GLContextAttributes, InternalFormatParameter, TexDataType, TexFormat, WebGLCommand,
+    WebGLContextId, WebGLResult, WebGLVersion, YAxisTreatment, webgl_channel,
 };
 use servo_config::pref;
 use url::Host;
@@ -55,7 +55,8 @@ use crate::dom::webgl::validations::tex_image_2d::{
     TexImage2DValidator, TexImage2DValidatorResult, TexStorageValidator, TexStorageValidatorResult,
 };
 use crate::dom::webgl::validations::tex_image_3d::{
-    TexImage3DValidator, TexImage3DValidatorResult,
+    CommonTexImage3DValidator, CommonTexImage3DValidatorResult, TexImage3DValidator,
+    TexImage3DValidatorResult,
 };
 use crate::dom::webgl::webglactiveinfo::WebGLActiveInfo;
 use crate::dom::webgl::webglbuffer::WebGLBuffer;
@@ -976,6 +977,92 @@ impl WebGL2RenderingContext {
         if let Some(fb) = self.base.bound_draw_framebuffer() {
             fb.invalidate_texture(texture);
         }
+    }
+
+    /// Builds the pixel source for a `texImage3D` or `texSubImage3D` upload of `depth` images of
+    /// `width` by `height` texels, starting `src_offset` elements into `src_data`. Generates the
+    /// GL error and returns `None` when the data cannot be uploaded.
+    #[expect(clippy::too_many_arguments)]
+    fn tex_3d_pixels(
+        &self,
+        no_gc: &NoGC,
+        width: u32,
+        height: u32,
+        depth: u32,
+        format: TexFormat,
+        data_type: TexDataType,
+        src_data: &Option<ArrayBufferView>,
+        src_offset: u32,
+    ) -> Option<TexPixels> {
+        // TODO: If pixel store parameter constraints are not met, generates an INVALID_OPERATION error.
+        let unpacking_alignment = self.base.texture_unpacking_alignment();
+        let element_size = data_type.element_size();
+        let components_per_element = data_type.components_per_element();
+        let components = format.components();
+        // NOTE: width, height and depth are positive or zero due to validate()
+        let expected_byte_len = if height == 0 || depth == 0 {
+            0
+        } else {
+            // We need to be careful here to not count unpack
+            // alignment at the end of the image, otherwise (for
+            // example) passing a single byte for uploading a 1x1x1
+            // GL_ALPHA/GL_UNSIGNED_BYTE texture would throw an error.
+            let cpp = element_size * components / components_per_element;
+            let mut padding_bytes = (cpp * width) % unpacking_alignment;
+            if padding_bytes > 0 {
+                padding_bytes = unpacking_alignment - padding_bytes;
+            }
+            let bytes_per_row = cpp * width + padding_bytes;
+            let bytes_last_row = cpp * width;
+            let bytes_per_image = bytes_per_row * height;
+            let bytes_last_image = bytes_per_row * (height - 1) + bytes_last_row;
+            bytes_per_image * (depth - 1) + bytes_last_image
+        };
+
+        let (mut alpha_treatment, mut y_axis_treatment) =
+            self.base.get_current_unpack_state(Alpha::NotPremultiplied);
+        // If UNPACK_FLIP_Y_WEBGL or UNPACK_PREMULTIPLY_ALPHA_WEBGL is set to true, texImage3D and texSubImage3D
+        // generate an INVALID_OPERATION error if they upload data from a PIXEL_UNPACK_BUFFER or a non-null client
+        // side ArrayBufferView.
+        if src_data.is_some() &&
+            (alpha_treatment.is_some() || y_axis_treatment == YAxisTreatment::Flipped)
+        {
+            self.base.webgl_error(InvalidOperation);
+            return None;
+        }
+
+        // If srcData is null, a buffer of sufficient size initialized to 0 is passed.
+        let buff = match src_data {
+            Some(data) => {
+                let bytes = data.as_slice_safe(no_gc).unwrap_or(&[]);
+                // `src_offset` counts elements of the view, and the validator has already
+                // checked that they are as large as the elements of `data_type`.
+                let offset_bytes = src_offset as usize * element_size as usize;
+                if offset_bytes > bytes.len() {
+                    self.base.webgl_error(InvalidValue);
+                    return None;
+                }
+                GenericSharedMemory::from_bytes(&bytes[offset_bytes..])
+            },
+            None => {
+                // Flipping or premultiplying zeroes changes nothing, and the flip works on one
+                // image, not on `depth` of them.
+                alpha_treatment = None;
+                y_axis_treatment = YAxisTreatment::AsIs;
+                GenericSharedMemory::from_byte(0, expected_byte_len as usize)
+            },
+        };
+        if buff.len() < expected_byte_len as usize {
+            self.base.webgl_error(InvalidOperation);
+            return None;
+        }
+
+        Some(TexPixels::from_array(
+            buff,
+            Size2D::new(width, height),
+            alpha_treatment,
+            y_axis_treatment,
+        ))
     }
 }
 
@@ -3194,63 +3281,12 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             return Ok(());
         };
 
-        // TODO: If pixel store parameter constraints are not met, generates an INVALID_OPERATION error.
-
-        let unpacking_alignment = self.base.texture_unpacking_alignment();
-        let element_size = data_type.element_size();
-        let components_per_element = data_type.components_per_element();
-        let components = format.components();
-        // NOTE: width, height and depth are positive or zero due to validate()
-        let expected_byte_len = if height == 0 {
-            0
-        } else {
-            // We need to be careful here to not count unpack
-            // alignment at the end of the image, otherwise (for
-            // example) passing a single byte for uploading a 1x1x1
-            // GL_ALPHA/GL_UNSIGNED_BYTE texture would throw an error.
-            let cpp = element_size * components / components_per_element;
-            let mut padding_bytes = (cpp * width) % unpacking_alignment;
-            if padding_bytes > 0 {
-                padding_bytes = unpacking_alignment - padding_bytes;
-            }
-            let bytes_per_row = cpp * width + padding_bytes;
-            let bytes_last_row = cpp * width;
-            let bytes_per_image = bytes_per_row * height;
-            let bytes_last_image = bytes_per_row * (height - 1) + bytes_last_row;
-            bytes_per_image * (depth - 1) + bytes_last_image
-        };
-
-        // If srcData is null, a buffer of sufficient size initialized to 0 is passed.
-        let buff = match *src_data {
-            Some(ref data) => {
-                GenericSharedMemory::from_bytes(data.as_slice_safe(no_gc).unwrap_or(&[]))
-            },
-            None => GenericSharedMemory::from_byte(0, expected_byte_len as usize),
-        };
-        if buff.len() < expected_byte_len as usize {
-            return {
-                self.base.webgl_error(InvalidOperation);
-                Ok(())
-            };
-        }
-        let (alpha_treatment, y_axis_treatment) =
-            self.base.get_current_unpack_state(Alpha::NotPremultiplied);
-        // If UNPACK_FLIP_Y_WEBGL or UNPACK_PREMULTIPLY_ALPHA_WEBGL is set to true, texImage3D and texSubImage3D
-        // generate an INVALID_OPERATION error if they upload data from a PIXEL_UNPACK_BUFFER or a non-null client
-        // side ArrayBufferView.
-        if let (Some(AlphaTreatment::Premultiply), YAxisTreatment::Flipped) =
-            (alpha_treatment, y_axis_treatment) &&
-            src_data.is_some()
-        {
-            self.base.webgl_error(InvalidOperation);
+        let Some(tex_source) = self.tex_3d_pixels(
+            no_gc, width, height, depth, format, data_type, &src_data, 0,
+        ) else {
             return Ok(());
-        }
-        let tex_source = TexPixels::from_array(
-            buff,
-            Size2D::new(width, height),
-            alpha_treatment,
-            y_axis_treatment,
-        );
+        };
+        let unpacking_alignment = self.base.texture_unpacking_alignment();
 
         self.tex_image_3d(
             &texture,
@@ -3267,6 +3303,212 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             tex_source,
         );
         Ok(())
+    }
+
+    /// <https://registry.khronos.org/webgl/specs/latest/2.0/#3.7.6>
+    ///
+    /// Replaces a three-dimensional or two-dimensional array texture sub-region.
+    fn TexSubImage3D(
+        &self,
+        no_gc: &NoGC,
+        target: u32,
+        level: i32,
+        xoffset: i32,
+        yoffset: i32,
+        zoffset: i32,
+        width: i32,
+        height: i32,
+        depth: i32,
+        format: u32,
+        type_: u32,
+        src_data: CustomAutoRooterGuard<Option<ArrayBufferView>>,
+        src_offset: u32,
+    ) -> Fallible<()> {
+        // If a WebGLBuffer is bound to the PIXEL_UNPACK_BUFFER target,
+        // generates an INVALID_OPERATION error.
+        if self.bound_pixel_unpack_buffer.get().is_some() {
+            self.base.webgl_error(InvalidOperation);
+            return Ok(());
+        }
+
+        // If srcData is null, generates an INVALID_VALUE error.
+        if src_data.is_none() {
+            self.base.webgl_error(InvalidValue);
+            return Ok(());
+        }
+
+        // Validate the target, texture, level and dimensions first, using any valid
+        // internal format, to find the image whose format the upload has to match.
+        let Ok(CommonTexImage3DValidatorResult {
+            texture,
+            target,
+            level,
+            ..
+        }) = CommonTexImage3DValidator::new(
+            &self.base,
+            target,
+            level,
+            TexFormat::RGBA8.as_gl_constant(),
+            width,
+            height,
+            depth,
+            0,
+        )
+        .validate()
+        else {
+            return Ok(());
+        };
+
+        let Some(image_info) = texture.image_info_for_target(&target, level) else {
+            self.base.webgl_error(InvalidOperation);
+            return Ok(());
+        };
+
+        let Ok(TexImage3DValidatorResult {
+            width,
+            height,
+            depth,
+            format,
+            data_type,
+            ..
+        }) = TexImage3DValidator::new(
+            &self.base,
+            target.as_gl_constant(),
+            level as i32,
+            image_info.internal_format().as_gl_constant(),
+            width,
+            height,
+            depth,
+            0,
+            format,
+            type_,
+            &src_data,
+        )
+        .validate()
+        else {
+            return Ok(());
+        };
+
+        // GL_INVALID_VALUE is generated if a offset is negative, or if the region does
+        // not fit in the image.
+        if xoffset < 0 ||
+            yoffset < 0 ||
+            zoffset < 0 ||
+            xoffset as u32 + width > image_info.width() ||
+            yoffset as u32 + height > image_info.height() ||
+            zoffset as u32 + depth > image_info.depth()
+        {
+            self.base.webgl_error(InvalidValue);
+            return Ok(());
+        }
+
+        let Some(pixels) = self.tex_3d_pixels(
+            no_gc, width, height, depth, format, data_type, &src_data, src_offset,
+        ) else {
+            return Ok(());
+        };
+
+        let effective_data_type = self
+            .base
+            .extension_manager()
+            .effective_type(data_type.as_gl_constant());
+        self.base.send_command(WebGLCommand::TexSubImage3D {
+            target: target.as_gl_constant(),
+            level,
+            xoffset,
+            yoffset,
+            zoffset,
+            size: pixels.size(),
+            depth,
+            format,
+            data_type,
+            effective_data_type,
+            unpacking_alignment: self.base.texture_unpacking_alignment(),
+            alpha_treatment: pixels.alpha_treatment(),
+            y_axis_treatment: pixels.y_axis_treatment(),
+            pixel_format: pixels.pixel_format(),
+            data: pixels.into_shared_memory().into(),
+        });
+
+        if let Some(fb) = self.base.bound_draw_framebuffer() {
+            fb.invalidate_texture(&texture);
+        }
+        Ok(())
+    }
+
+    /// <https://registry.khronos.org/webgl/specs/latest/2.0/#3.7.6>
+    ///
+    /// Copies framebuffer pixels into one layer of a three-dimensional or two-dimensional
+    /// array texture.
+    fn CopyTexSubImage3D(
+        &self,
+        target: u32,
+        level: i32,
+        xoffset: i32,
+        yoffset: i32,
+        zoffset: i32,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) {
+        handle_potential_webgl_error!(self.base, self.base.validate_framebuffer(), return);
+
+        // NB: A dummy (valid) internal format and border reuse the common validations: the
+        // copy takes the texture's own format.
+        let Ok(CommonTexImage3DValidatorResult {
+            texture,
+            target,
+            level,
+            width,
+            height,
+            ..
+        }) = CommonTexImage3DValidator::new(
+            &self.base,
+            target,
+            level,
+            TexFormat::RGBA8.as_gl_constant(),
+            width,
+            height,
+            1,
+            0,
+        )
+        .validate()
+        else {
+            return;
+        };
+
+        let Some(image_info) = texture.image_info_for_target(&target, level) else {
+            return self.base.webgl_error(InvalidOperation);
+        };
+
+        // GL_INVALID_VALUE is generated if a offset is negative, or if the region does
+        // not fit in the image.
+        if xoffset < 0 ||
+            yoffset < 0 ||
+            zoffset < 0 ||
+            xoffset as u32 + width > image_info.width() ||
+            yoffset as u32 + height > image_info.height() ||
+            zoffset as u32 >= image_info.depth()
+        {
+            return self.base.webgl_error(InvalidValue);
+        }
+
+        self.base.send_command(WebGLCommand::CopyTexSubImage3D(
+            target.as_gl_constant(),
+            level as i32,
+            xoffset,
+            yoffset,
+            zoffset,
+            x,
+            y,
+            width as i32,
+            height as i32,
+        ));
+
+        if let Some(fb) = self.base.bound_draw_framebuffer() {
+            fb.invalidate_texture(&texture);
+        }
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.8>

@@ -339,13 +339,13 @@ interface mixin WebGL2RenderingContextBase
   //void texSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
   //                   GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type,
   //                   TexImageSource source); // May throw DOMException
-  //[Throws]
-  //void texSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
-  //                   GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type,
-  //                   [AllowShared] ArrayBufferView? srcData, optional GLuint srcOffset = 0);
+  [Throws]
+  undefined texSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
+                     GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type,
+                     /*[AllowShared]*/ ArrayBufferView? srcData, optional GLuint srcOffset = 0);
 
-  //void copyTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
-  //                       GLint x, GLint y, GLsizei width, GLsizei height);
+  undefined copyTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
+                         GLint x, GLint y, GLsizei width, GLsizei height);
 
   //void compressedTexImage3D(GLenum target, GLint level, GLenum internalformat, GLsizei width,
   //                          GLsizei height, GLsizei depth, GLint border, GLsizei imageSize, GLintptr offset);

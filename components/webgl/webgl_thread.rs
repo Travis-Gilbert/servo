@@ -1177,6 +1177,21 @@ impl WebGLImpl {
             ) => unsafe {
                 gl.copy_tex_sub_image_2d(target, level, xoffset, yoffset, x, y, width, height)
             },
+            WebGLCommand::CopyTexSubImage3D(
+                target,
+                level,
+                xoffset,
+                yoffset,
+                zoffset,
+                x,
+                y,
+                width,
+                height,
+            ) => unsafe {
+                gl.copy_tex_sub_image_3d(
+                    target, level, xoffset, yoffset, zoffset, x, y, width, height,
+                )
+            },
             WebGLCommand::CullFace(mode) => unsafe { gl.cull_face(mode) },
             WebGLCommand::DepthFunc(func) => unsafe { gl.depth_func(func) },
             WebGLCommand::DepthMask(flag) => {
@@ -1705,6 +1720,51 @@ impl WebGLImpl {
                         size.height as i32,
                         depth as i32,
                         0,
+                        format.as_gl_constant(),
+                        effective_data_type,
+                        PixelUnpackData::Slice(Some(&pixels)),
+                    );
+                }
+            },
+            WebGLCommand::TexSubImage3D {
+                target,
+                level,
+                xoffset,
+                yoffset,
+                zoffset,
+                size,
+                depth,
+                format,
+                data_type,
+                effective_data_type,
+                unpacking_alignment,
+                alpha_treatment,
+                y_axis_treatment,
+                pixel_format,
+                ref data,
+            } => {
+                let pixels = prepare_pixels(
+                    format,
+                    data_type,
+                    size,
+                    unpacking_alignment,
+                    alpha_treatment,
+                    y_axis_treatment,
+                    pixel_format,
+                    Cow::Borrowed(data),
+                );
+
+                unsafe {
+                    gl.pixel_store_i32(gl::UNPACK_ALIGNMENT, unpacking_alignment as i32);
+                    gl.tex_sub_image_3d(
+                        target,
+                        level as i32,
+                        xoffset,
+                        yoffset,
+                        zoffset,
+                        size.width as i32,
+                        size.height as i32,
+                        depth as i32,
                         format.as_gl_constant(),
                         effective_data_type,
                         PixelUnpackData::Slice(Some(&pixels)),
