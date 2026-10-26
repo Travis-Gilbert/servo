@@ -52,6 +52,12 @@ struct Layout {
     required: usize,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum UnpackError {
+    InvalidOperation,
+    OutOfMemory,
+}
+
 impl PixelUnpack {
     /// Whether the image is stored the way it is when none of the parameters is set.
     pub(crate) fn is_default(&self) -> bool {
@@ -89,33 +95,33 @@ impl PixelUnpack {
             return None;
         }
 
-        let alignment = alignment.max(1) as usize;
-        let bytes_per_pixel = bytes_per_pixel as usize;
-        let row_bytes = (store_width as usize).checked_mul(bytes_per_pixel)?;
+        let alignment = alignment.max(1) as u64;
+        let bytes_per_pixel = bytes_per_pixel as u64;
+        let row_bytes = (store_width as u64).checked_mul(bytes_per_pixel)?;
         let row_stride = row_bytes.checked_next_multiple_of(alignment)?;
-        let image_stride = row_stride.checked_mul(store_height as usize)?;
-        let skipped = (self.skip_images as usize)
+        let image_stride = row_stride.checked_mul(store_height as u64)?;
+        let skipped = (self.skip_images as u64)
             .checked_mul(image_stride)?
-            .checked_add((self.skip_rows as usize).checked_mul(row_stride)?)?
-            .checked_add((self.skip_pixels as usize).checked_mul(bytes_per_pixel)?)?;
+            .checked_add((self.skip_rows as u64).checked_mul(row_stride)?)?
+            .checked_add((self.skip_pixels as u64).checked_mul(bytes_per_pixel)?)?;
 
         // Padding after the last row is not needed, so that a single byte is enough for a
         // 1x1 image of one byte.
         let required = if width == 0 || height == 0 || depth == 0 {
             0
         } else {
-            let last_row = (width as usize).checked_mul(bytes_per_pixel)?;
+            let last_row = (width as u64).checked_mul(bytes_per_pixel)?;
             skipped
-                .checked_add(image_stride.checked_mul(depth as usize - 1)?)?
-                .checked_add(row_stride.checked_mul(height as usize - 1)?)?
+                .checked_add(image_stride.checked_mul(depth as u64 - 1)?)?
+                .checked_add(row_stride.checked_mul(height as u64 - 1)?)?
                 .checked_add(last_row)?
         };
 
         Some(Layout {
-            skipped,
-            row_stride,
-            image_stride,
-            required,
+            skipped: usize::try_from(skipped).ok()?,
+            row_stride: usize::try_from(row_stride).ok()?,
+            image_stride: usize::try_from(image_stride).ok()?,
+            required: usize::try_from(required).ok()?,
         })
     }
 
@@ -126,14 +132,18 @@ impl PixelUnpack {
     }
 
     /// The image cut out of `data` as rows padded to `UNPACK_ALIGNMENT`, one image after the
-    /// other, or `None` when the parameters do not fit the image or `data` is too small for it.
-    pub(crate) fn unpack<'a>(&self, data: &'a [u8], shape: ImageShape) -> Option<Cow<'a, [u8]>> {
-        let layout = self.layout(shape)?;
+    /// other. Invalid layouts and allocation failures remain distinct WebGL errors.
+    pub(crate) fn unpack<'a>(
+        &self,
+        data: &'a [u8],
+        shape: ImageShape,
+    ) -> Result<Cow<'a, [u8]>, UnpackError> {
+        let layout = self.layout(shape).ok_or(UnpackError::InvalidOperation)?;
         if data.len() < layout.required {
-            return None;
+            return Err(UnpackError::InvalidOperation);
         }
         if self.is_default() {
-            return Some(Cow::Borrowed(data));
+            return Ok(Cow::Borrowed(data));
         }
 
         let ImageShape {
@@ -144,11 +154,23 @@ impl PixelUnpack {
             alignment,
             ..
         } = shape;
-        let row_bytes = width as usize * bytes_per_pixel as usize;
-        let packed_row_stride = row_bytes.next_multiple_of(alignment.max(1) as usize);
-        let mut packed = vec![0; packed_row_stride * height as usize * depth as usize];
+        if width == 0 || height == 0 || depth == 0 {
+            return Ok(Cow::Borrowed(&[]));
+        }
+        let row_bytes = (width as usize)
+            .checked_mul(bytes_per_pixel as usize)
+            .ok_or(UnpackError::OutOfMemory)?;
+        let packed_row_stride = row_bytes
+            .checked_next_multiple_of(alignment.max(1) as usize)
+            .ok_or(UnpackError::OutOfMemory)?;
+        let packed_len = packed_row_stride
+            .checked_mul(height as usize)
+            .ok_or(UnpackError::OutOfMemory)?
+            .checked_mul(depth as usize)
+            .ok_or(UnpackError::OutOfMemory)?;
+        let mut packed = zeroed_pixels(packed_len).ok_or(UnpackError::OutOfMemory)?;
         if row_bytes == 0 {
-            return Some(Cow::Owned(packed));
+            return Ok(Cow::Owned(packed));
         }
 
         for image in 0..depth as usize {
@@ -158,8 +180,16 @@ impl PixelUnpack {
                 packed[to..to + row_bytes].copy_from_slice(&data[from..from + row_bytes]);
             }
         }
-        Some(Cow::Owned(packed))
+        Ok(Cow::Owned(packed))
     }
+}
+
+/// Allocate pixel storage without aborting on a recoverable allocation failure.
+pub(crate) fn zeroed_pixels(length: usize) -> Option<Vec<u8>> {
+    let mut pixels = Vec::new();
+    pixels.try_reserve_exact(length).ok()?;
+    pixels.resize(length, 0);
+    Some(pixels)
 }
 
 #[cfg(test)]
@@ -200,8 +230,8 @@ mod tests {
         // Two rows of two one-byte pixels, rows aligned to 4: 4 + 2 bytes are needed.
         let unpack = PixelUnpack::default();
         assert_eq!(unpack.required_len(shape_2d(2, 2, 1, 4)), Some(6));
-        assert!(unpack.unpack(&[0; 5], shape_2d(2, 2, 1, 4)).is_none());
-        assert!(unpack.unpack(&[0; 6], shape_2d(2, 2, 1, 4)).is_some());
+        assert!(unpack.unpack(&[0; 5], shape_2d(2, 2, 1, 4)).is_err());
+        assert!(unpack.unpack(&[0; 6], shape_2d(2, 2, 1, 4)).is_ok());
     }
 
     #[test]
@@ -261,5 +291,42 @@ mod tests {
         assert!(unpack.required_len(shape_3d(2, 2, 1, 1, 1)).is_none());
         assert!(unpack.required_len(shape_3d(2, 2, 2, 1, 1)).is_none());
         assert!(unpack.required_len(shape_2d(2, 2, 1, 1)).is_some());
+    }
+    #[test]
+    fn volume_length_does_not_wrap_at_four_gibibytes() {
+        let expected = usize::try_from(34_359_738_368u64).ok();
+        assert_eq!(
+            PixelUnpack::default().required_len(shape_3d(2048, 2048, 2048, 4, 4)),
+            expected
+        );
+        assert!(
+            PixelUnpack::default()
+                .unpack(&[], shape_3d(2048, 2048, 2048, 4, 4))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn unrepresentable_volume_and_allocation_fail() {
+        assert!(
+            PixelUnpack::default()
+                .required_len(shape_3d(u32::MAX, u32::MAX, u32::MAX, 16, 8))
+                .is_none()
+        );
+        assert!(zeroed_pixels(usize::MAX).is_none());
+    }
+
+    #[test]
+    fn empty_volume_does_not_allocate_or_copy_skipped_rows() {
+        let unpack = PixelUnpack {
+            skip_images: 1,
+            ..Default::default()
+        };
+        assert!(
+            unpack
+                .unpack(&[], shape_3d(2, 0, 2, 4, 4))
+                .unwrap()
+                .is_empty()
+        );
     }
 }

@@ -497,7 +497,12 @@ impl WebGL2RenderingContext {
         } else {
             width as usize
         };
-        if self.texture_pack_skip_pixels.get() + width as usize > pixels_per_row {
+        if self
+            .texture_pack_skip_pixels
+            .get()
+            .checked_add(width as usize)
+            .is_none_or(|end| end > pixels_per_row)
+        {
             return Err(InvalidOperation);
         }
 
@@ -511,7 +516,9 @@ impl WebGL2RenderingContext {
                 remainder => pack_alignment - remainder,
             }
         };
-        let row_stride = bytes_per_row + row_padding_bytes;
+        let row_stride = bytes_per_row
+            .checked_add(row_padding_bytes)
+            .ok_or(InvalidOperation)?;
         let size = if width == 0 || height == 0 {
             0
         } else {
@@ -616,19 +623,32 @@ impl WebGL2RenderingContext {
             Ok(result) => result,
             Err(error) => return self.base.webgl_error(error),
         };
-        let dst_end = dst_byte_offset + skipped_bytes + size;
+        let Some(dst_end) = dst_byte_offset
+            .checked_add(skipped_bytes)
+            .and_then(|offset| offset.checked_add(size))
+        else {
+            return self.base.webgl_error(InvalidOperation);
+        };
         let dst_pixels = dst.as_mut_slice_safe(no_gc).unwrap_or(&mut []);
         if dst_pixels.len() < dst_end {
             return self.base.webgl_error(InvalidOperation);
         }
 
         let dst_byte_offset = {
-            let margin_left = cmp::max(0, -x) as usize;
-            let margin_top = cmp::max(0, -y) as usize;
-            dst_byte_offset +
-                skipped_bytes +
-                margin_left * bytes_per_pixel +
-                margin_top * row_stride
+            let margin_left = x.saturating_neg().max(0) as usize;
+            let margin_top = y.saturating_neg().max(0) as usize;
+            let Some(offset) = margin_left
+                .checked_mul(bytes_per_pixel)
+                .and_then(|left| margin_top.checked_mul(row_stride)?.checked_add(left))
+                .and_then(|margin| {
+                    dst_byte_offset
+                        .checked_add(skipped_bytes)?
+                        .checked_add(margin)
+                })
+            else {
+                return self.base.webgl_error(InvalidOperation);
+            };
+            offset
         };
         let src_rect = {
             let (fb_width, fb_height) = handle_potential_webgl_error!(
@@ -661,6 +681,10 @@ impl WebGL2RenderingContext {
             src_rect, format, pixel_type, sender,
         ));
         let (src, _) = receiver.recv().unwrap();
+        if src.is_empty() && src_rect.size.width != 0 && src_rect.size.height != 0 {
+            self.base.webgl_error(OutOfMemory);
+            return;
+        }
 
         for i in 0..src_rect.size.height as usize {
             let src_start = i * src_row_bytes as usize;
@@ -883,10 +907,13 @@ impl WebGL2RenderingContext {
         );
         let src_offset = src_offset as usize;
 
-        if array.len() < src_offset + array_size {
+        let Some(array) = src_offset
+            .checked_add(array_size)
+            .and_then(|end| array.get(src_offset..end))
+        else {
             return self.base.webgl_error(InvalidValue);
-        }
-        let array = array[src_offset..src_offset + array_size].to_vec();
+        };
+        let array = array.to_vec();
 
         self.base.send_command(msg(buffer, draw_buffer, array));
         self.mark_as_dirty();
@@ -1083,30 +1110,10 @@ impl WebGL2RenderingContext {
         src_data: &Option<ArrayBufferView>,
         src_offset: u32,
     ) -> Option<TexPixels> {
-        let unpacking_alignment = self.base.texture_unpacking_alignment();
         let element_size = data_type.element_size();
-        let components_per_element = data_type.components_per_element();
-        let components = format.components();
-        // NOTE: width, height and depth are positive or zero due to validate()
-        let expected_byte_len = if height == 0 || depth == 0 {
-            0
-        } else {
-            // We need to be careful here to not count unpack
-            // alignment at the end of the image, otherwise (for
-            // example) passing a single byte for uploading a 1x1x1
-            // GL_ALPHA/GL_UNSIGNED_BYTE texture would throw an error.
-            let cpp = element_size * components / components_per_element;
-            let mut padding_bytes = (cpp * width) % unpacking_alignment;
-            if padding_bytes > 0 {
-                padding_bytes = unpacking_alignment - padding_bytes;
-            }
-            let bytes_per_row = cpp * width + padding_bytes;
-            let bytes_last_row = cpp * width;
-            let bytes_per_image = bytes_per_row * height;
-            let bytes_last_image = bytes_per_row * (height - 1) + bytes_last_row;
-            bytes_per_image * (depth - 1) + bytes_last_image
-        };
-
+        let shape = self
+            .base
+            .tex_image_shape(width, height, depth, true, format, data_type);
         let (mut alpha_treatment, mut y_axis_treatment) =
             self.base.get_current_unpack_state(Alpha::NotPremultiplied);
         // If UNPACK_FLIP_Y_WEBGL or UNPACK_PREMULTIPLY_ALPHA_WEBGL is set to true, texImage3D and texSubImage3D
@@ -1125,25 +1132,28 @@ impl WebGL2RenderingContext {
                 let bytes = data.as_slice_safe(no_gc).unwrap_or(&[]);
                 // `src_offset` counts elements of the view, and the validator has already
                 // checked that they are as large as the elements of `data_type`.
-                let offset_bytes = src_offset as usize * element_size as usize;
-                if offset_bytes > bytes.len() {
+                let Some(bytes) = (src_offset as usize)
+                    .checked_mul(element_size as usize)
+                    .and_then(|offset| bytes.get(offset..))
+                else {
                     self.base.webgl_error(InvalidOperation);
                     return None;
-                }
+                };
                 // The images are cut out of the array when the pixel store parameters place them
                 // inside of it. If those constraints are not met, or the array is too small,
                 // that is an INVALID_OPERATION.
                 let shape = self
                     .base
                     .tex_image_shape(width, height, depth, true, format, data_type);
-                match self
-                    .base
-                    .texture_unpack()
-                    .unpack(&bytes[offset_bytes..], shape)
-                {
-                    Some(bytes) => GenericSharedMemory::from_bytes(&bytes),
-                    None => {
-                        self.base.webgl_error(InvalidOperation);
+                match self.base.texture_unpack().unpack(bytes, shape) {
+                    Ok(bytes) => GenericSharedMemory::from_bytes(&bytes),
+                    Err(error) => {
+                        self.base.webgl_error(match error {
+                            crate::dom::webgl::pixelunpack::UnpackError::InvalidOperation => {
+                                InvalidOperation
+                            },
+                            crate::dom::webgl::pixelunpack::UnpackError::OutOfMemory => OutOfMemory,
+                        });
                         return None;
                     },
                 }
@@ -1153,13 +1163,16 @@ impl WebGL2RenderingContext {
                 // image, not on `depth` of them.
                 alpha_treatment = None;
                 y_axis_treatment = YAxisTreatment::AsIs;
-                GenericSharedMemory::from_byte(0, expected_byte_len as usize)
+                let Some(bytes) = crate::dom::webgl::pixelunpack::PixelUnpack::default()
+                    .required_len(shape)
+                    .and_then(crate::dom::webgl::pixelunpack::zeroed_pixels)
+                else {
+                    self.base.webgl_error(OutOfMemory);
+                    return None;
+                };
+                GenericSharedMemory::from_vec(bytes)
             },
         };
-        if buff.len() < expected_byte_len as usize {
-            self.base.webgl_error(InvalidOperation);
-            return None;
-        }
 
         Some(TexPixels::from_array(
             buff,
@@ -1734,10 +1747,12 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         let bound_buffer =
             handle_potential_webgl_error!(self.base, bound_buffer.ok_or(InvalidOperation), return);
 
-        let elem_size = data.get_array_type().byte_size().unwrap();
+        let elem_size = data.get_array_type().byte_size().unwrap_or(1);
         let elem_count = data.len() / elem_size;
         let elem_offset = elem_offset as usize;
-        let byte_offset = elem_offset * elem_size;
+        let Some(byte_offset) = elem_offset.checked_mul(elem_size) else {
+            return self.base.webgl_error(InvalidValue);
+        };
 
         if byte_offset > data.len() {
             return self.base.webgl_error(InvalidValue);
@@ -1751,15 +1766,22 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         if copy_count == 0 {
             return;
         }
-        let copy_bytes = copy_count * elem_size;
+        let Some(copy_bytes) = copy_count.checked_mul(elem_size) else {
+            return self.base.webgl_error(InvalidValue);
+        };
 
-        if byte_offset + copy_bytes > data.len() {
+        if byte_offset
+            .checked_add(copy_bytes)
+            .is_none_or(|end| end > data.len())
+        {
             return self.base.webgl_error(InvalidValue);
         }
 
         let data_end = byte_offset + copy_bytes;
         let data = data.as_slice_safe(cx.no_gc()).unwrap_or(&[]);
-        let data = &data[byte_offset..data_end];
+        let Some(data) = data.get(byte_offset..data_end) else {
+            return self.base.webgl_error(InvalidValue);
+        };
         handle_potential_webgl_error!(self.base, bound_buffer.buffer_data(target, data, usage));
     }
 
@@ -1792,10 +1814,12 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         let bound_buffer =
             handle_potential_webgl_error!(self.base, bound_buffer.ok_or(InvalidOperation), return);
 
-        let src_elem_size = src_data.get_array_type().byte_size().unwrap();
+        let src_elem_size = src_data.get_array_type().byte_size().unwrap_or(1);
         let src_elem_count = src_data.len() / src_elem_size;
         let src_elem_offset = src_elem_offset as usize;
-        let src_byte_offset = src_elem_offset * src_elem_size;
+        let Some(src_byte_offset) = src_elem_offset.checked_mul(src_elem_size) else {
+            return self.base.webgl_error(InvalidValue);
+        };
 
         if dst_byte_offset < 0 || src_byte_offset > src_data.len() {
             return self.base.webgl_error(InvalidValue);
@@ -1809,24 +1833,34 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         if copy_count == 0 {
             return;
         }
-        let copy_bytes = copy_count * src_elem_size;
+        let Some(copy_bytes) = copy_count.checked_mul(src_elem_size) else {
+            return self.base.webgl_error(InvalidValue);
+        };
 
-        let dst_byte_offset = dst_byte_offset as usize;
-        if dst_byte_offset + copy_bytes > bound_buffer.capacity() ||
-            src_byte_offset + copy_bytes > src_data.len()
+        let Ok(dst_byte_offset) = usize::try_from(dst_byte_offset) else {
+            return self.base.webgl_error(InvalidValue);
+        };
+        if dst_byte_offset
+            .checked_add(copy_bytes)
+            .is_none_or(|end| end > bound_buffer.capacity()) ||
+            src_byte_offset
+                .checked_add(copy_bytes)
+                .is_none_or(|end| end > src_data.len())
         {
             return self.base.webgl_error(InvalidValue);
         }
 
+        let src_end = src_byte_offset + copy_bytes;
+        let data = src_data.as_slice_safe(cx.no_gc()).unwrap_or(&[]);
+        let Some(data) = data.get(src_byte_offset..src_end) else {
+            return self.base.webgl_error(InvalidValue);
+        };
         let (sender, receiver) = generic_channel::channel().unwrap();
         self.base.send_command(WebGLCommand::BufferSubData(
             target,
             dst_byte_offset as isize,
             receiver,
         ));
-        let src_end = src_byte_offset + copy_bytes;
-        let data = src_data.as_slice_safe(cx.no_gc()).unwrap_or(&[]);
-        let data = &data[src_byte_offset..src_end];
         let buffer = GenericSharedMemory::from_bytes(data);
         sender.send(buffer).unwrap();
     }
@@ -1903,10 +1937,12 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         let bound_buffer =
             handle_potential_webgl_error!(self.base, bound_buffer.ok_or(InvalidOperation), return);
 
-        let dst_elem_size = dst_buffer.get_array_type().byte_size().unwrap();
+        let dst_elem_size = dst_buffer.get_array_type().byte_size().unwrap_or(1);
         let dst_elem_count = dst_buffer.len() / dst_elem_size;
         let dst_elem_offset = dst_elem_offset as usize;
-        let dst_byte_offset = dst_elem_offset * dst_elem_size;
+        let Some(dst_byte_offset) = dst_elem_offset.checked_mul(dst_elem_size) else {
+            return self.base.webgl_error(InvalidValue);
+        };
 
         if src_byte_offset < 0 || dst_byte_offset > dst_buffer.len() {
             return self.base.webgl_error(InvalidValue);
@@ -1920,13 +1956,21 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         if copy_count == 0 {
             return;
         }
-        let copy_bytes = copy_count * dst_elem_size;
+        let Some(copy_bytes) = copy_count.checked_mul(dst_elem_size) else {
+            return self.base.webgl_error(InvalidValue);
+        };
 
         // TODO(mmatyas): Transform Feedback
 
-        let src_byte_offset = src_byte_offset as usize;
-        if src_byte_offset + copy_bytes > bound_buffer.capacity() ||
-            dst_byte_offset + copy_bytes > dst_buffer.len()
+        let Ok(src_byte_offset) = usize::try_from(src_byte_offset) else {
+            return self.base.webgl_error(InvalidValue);
+        };
+        if src_byte_offset
+            .checked_add(copy_bytes)
+            .is_none_or(|end| end > bound_buffer.capacity()) ||
+            dst_byte_offset
+                .checked_add(copy_bytes)
+                .is_none_or(|end| end > dst_buffer.len())
         {
             return self.base.webgl_error(InvalidValue);
         }
@@ -1941,7 +1985,10 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         let data = receiver.recv().unwrap();
         let dst_end = dst_byte_offset + copy_bytes;
         let dst_buffer = dst_buffer.as_mut_slice_safe(cx.no_gc()).unwrap_or(&mut []);
-        dst_buffer[dst_byte_offset..dst_end].copy_from_slice(&data);
+        let Some(dst) = dst_buffer.get_mut(dst_byte_offset..dst_end) else {
+            return self.base.webgl_error(InvalidValue);
+        };
+        dst.copy_from_slice(&data);
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.6>
@@ -2516,8 +2563,10 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         if dst_byte_offset < 0 {
             return self.base.webgl_error(InvalidValue);
         }
-        let dst_byte_offset = dst_byte_offset as usize;
-        if dst_byte_offset > dst.capacity() {
+        let Ok(dst_byte_offset) = usize::try_from(dst_byte_offset) else {
+            return self.base.webgl_error(InvalidOperation);
+        };
+        if dst_byte_offset > dst.capacity() || u32::try_from(dst_byte_offset).is_err() {
             return self.base.webgl_error(InvalidOperation);
         }
 
@@ -2543,7 +2592,12 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             Ok(result) => result,
             Err(error) => return self.base.webgl_error(error),
         };
-        let dst_end = dst_byte_offset + skipped_bytes + size;
+        let Some(dst_end) = dst_byte_offset
+            .checked_add(skipped_bytes)
+            .and_then(|offset| offset.checked_add(size))
+        else {
+            return self.base.webgl_error(InvalidOperation);
+        };
         if dst.capacity() < dst_end {
             return self.base.webgl_error(InvalidOperation);
         }
@@ -3757,7 +3811,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             return Ok(());
         }
 
-        if pbo_offset < 0 || pbo_offset as usize > pixel_unpack_buffer.capacity() {
+        if pbo_offset < 0 {
             self.base.webgl_error(InvalidValue);
             return Ok(());
         }
@@ -3791,6 +3845,11 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             Err(_) => return Ok(()),
         };
 
+        let Ok(pbo_byte_offset) = usize::try_from(pbo_offset) else {
+            self.base.webgl_error(InvalidOperation);
+            return Ok(());
+        };
+
         // The pixel store parameters have to fit the image, and the buffer has to hold the part of
         // it that the image reads, which starts at the offset.
         let unpack = self.base.texture_unpack();
@@ -3799,8 +3858,10 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             .tex_image_shape(width, height, 1, false, format, data_type);
         let required = unpack
             .required_len(shape)
-            .and_then(|required| required.checked_add(pbo_offset as usize));
-        if required.is_none_or(|required| required > pixel_unpack_buffer.capacity()) {
+            .and_then(|required| required.checked_add(pbo_byte_offset));
+        if required.is_none_or(|required| required > pixel_unpack_buffer.capacity()) ||
+            u32::try_from(pbo_byte_offset).is_err()
+        {
             self.base.webgl_error(InvalidOperation);
             return Ok(());
         }
@@ -3965,11 +4026,31 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
         let unpacking_alignment = self.base.texture_unpacking_alignment();
 
-        let src_elem_size = src_data.get_array_type().byte_size().unwrap();
-        let src_byte_offset = src_offset as usize * src_elem_size;
-
-        if src_data.len() <= src_byte_offset {
+        let Some(src_elem_size) = src_data.get_array_type().byte_size() else {
             self.base.webgl_error(InvalidOperation);
+            return Ok(());
+        };
+        let src_data_slice = src_data.as_slice_safe(no_gc).unwrap_or(&[]);
+        let Some(src_data_slice) = (src_offset as usize)
+            .checked_mul(src_elem_size)
+            .and_then(|offset| src_data_slice.get(offset..))
+        else {
+            self.base.webgl_error(InvalidOperation);
+            return Ok(());
+        };
+
+        if self
+            .base
+            .validate_tex_image_2d_data(
+                width,
+                height,
+                format,
+                data_type,
+                unpacking_alignment,
+                Some(&*src_data),
+            )
+            .is_err()
+        {
             return Ok(());
         }
 
@@ -3979,35 +4060,18 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         let shape = self
             .base
             .tex_image_shape(width, height, 1, false, format, data_type);
-        let src_data_slice = src_data.as_slice_safe(no_gc).unwrap_or(&[]);
-        let buff = match self
-            .base
-            .texture_unpack()
-            .unpack(&src_data_slice[src_byte_offset..], shape)
-        {
-            Some(bytes) => GenericSharedMemory::from_bytes(&bytes),
-            None => {
-                self.base.webgl_error(InvalidOperation);
+        let buff = match self.base.texture_unpack().unpack(src_data_slice, shape) {
+            Ok(bytes) => GenericSharedMemory::from_bytes(&bytes),
+            Err(error) => {
+                self.base.webgl_error(match error {
+                    crate::dom::webgl::pixelunpack::UnpackError::InvalidOperation => {
+                        InvalidOperation
+                    },
+                    crate::dom::webgl::pixelunpack::UnpackError::OutOfMemory => OutOfMemory,
+                });
                 return Ok(());
             },
         };
-
-        let expected_byte_length = match self.base.validate_tex_image_2d_data(
-            width,
-            height,
-            format,
-            data_type,
-            unpacking_alignment,
-            Some(&*src_data),
-        ) {
-            Ok(byte_length) => byte_length,
-            Err(()) => return Ok(()),
-        };
-
-        if expected_byte_length as usize > buff.len() {
-            self.base.webgl_error(InvalidOperation);
-            return Ok(());
-        }
 
         let size = Size2D::new(width, height);
 

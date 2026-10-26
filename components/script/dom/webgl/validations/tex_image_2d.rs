@@ -472,10 +472,13 @@ fn valid_compressed_data_len(
 
     let required_blocks_hor = width.div_ceil(block_width);
     let required_blocks_ver = height.div_ceil(block_height);
-    let required_blocks = required_blocks_hor * required_blocks_ver;
-
-    let required_bytes = required_blocks * compression.bytes_per_block as u32;
-    data_len == required_bytes as usize
+    servo_canvas_traits::pixel_storage::required_bytes(
+        required_blocks_hor,
+        required_blocks_ver,
+        1,
+        compression.bytes_per_block as u32,
+        1,
+    ) == Some(data_len)
 }
 
 fn is_subimage_blockaligned(

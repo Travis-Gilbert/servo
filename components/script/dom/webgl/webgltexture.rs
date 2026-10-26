@@ -542,8 +542,14 @@ impl WebGLTexture {
     }
 
     pub(crate) fn image_info_at_face(&self, face: u8, level: u32) -> Option<ImageInfo> {
-        let pos = (level * self.face_count.get() as u32) + face as u32;
-        self.image_info_array.borrow()[pos as usize]
+        let pos = level
+            .checked_mul(self.face_count.get() as u32)?
+            .checked_add(face as u32)?;
+        self.image_info_array
+            .borrow()
+            .get(pos as usize)
+            .copied()
+            .flatten()
     }
 
     fn set_image_infos_at_level(&self, level: u32, image_info: ImageInfo) {
@@ -565,7 +571,7 @@ impl WebGLTexture {
             .iter()
             .filter_map(|info| *info)
             .map(|info| info.physical_size())
-            .sum();
+            .fold(0usize, usize::saturating_add);
         self.reflector().update_memory_size(self, size);
     }
 
@@ -691,10 +697,10 @@ impl ImageInfo {
 
     /// Returns approximate physical size
     pub(crate) fn physical_size(&self) -> usize {
-        self.width as usize *
-            self.height as usize *
-            self.depth as usize *
-            self.internal_format.components() as usize
+        (self.width as usize)
+            .saturating_mul(self.height as usize)
+            .saturating_mul(self.depth as usize)
+            .saturating_mul(self.internal_format.components() as usize)
     }
 }
 

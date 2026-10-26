@@ -1713,6 +1713,20 @@ impl WebGLImpl {
                     Cow::Borrowed(data),
                 );
 
+                let cpp = data_type.element_size() * format.components() /
+                    data_type.components_per_element();
+                let required = servo_canvas_traits::pixel_storage::required_bytes(
+                    size.width,
+                    size.height,
+                    depth,
+                    cpp,
+                    unpacking_alignment,
+                );
+                if required.is_none_or(|length| length > pixels.len()) {
+                    error!("WebGL upload has insufficient pixel storage");
+                    return;
+                }
+
                 unsafe {
                     gl.pixel_store_i32(gl::UNPACK_ALIGNMENT, unpacking_alignment as i32);
                     gl.tex_image_3d(
@@ -1757,6 +1771,20 @@ impl WebGLImpl {
                     Cow::Borrowed(data),
                 );
 
+                let cpp = data_type.element_size() * format.components() /
+                    data_type.components_per_element();
+                let required = servo_canvas_traits::pixel_storage::required_bytes(
+                    size.width,
+                    size.height,
+                    depth,
+                    cpp,
+                    unpacking_alignment,
+                );
+                if required.is_none_or(|length| length > pixels.len()) {
+                    error!("WebGL upload has insufficient pixel storage");
+                    return;
+                }
+
                 unsafe {
                     gl.pixel_store_i32(gl::UNPACK_ALIGNMENT, unpacking_alignment as i32);
                     gl.tex_sub_image_3d(
@@ -1798,6 +1826,20 @@ impl WebGLImpl {
                     pixel_format,
                     Cow::Borrowed(data),
                 );
+
+                let cpp = data_type.element_size() * format.components() /
+                    data_type.components_per_element();
+                let required = servo_canvas_traits::pixel_storage::required_bytes(
+                    size.width,
+                    size.height,
+                    1,
+                    cpp,
+                    unpacking_alignment,
+                );
+                if required.is_none_or(|length| length > pixels.len()) {
+                    error!("WebGL upload has insufficient pixel storage");
+                    return;
+                }
 
                 unsafe {
                     gl.pixel_store_i32(gl::UNPACK_ALIGNMENT, unpacking_alignment as i32);
@@ -1863,6 +1905,20 @@ impl WebGLImpl {
                     pixel_format,
                     Cow::Borrowed(data),
                 );
+
+                let cpp = data_type.element_size() * format.components() /
+                    data_type.components_per_element();
+                let required = servo_canvas_traits::pixel_storage::required_bytes(
+                    size.width,
+                    size.height,
+                    1,
+                    cpp,
+                    unpacking_alignment,
+                );
+                if required.is_none_or(|length| length > pixels.len()) {
+                    error!("WebGL upload has insufficient pixel storage");
+                    return;
+                }
 
                 unsafe {
                     gl.pixel_store_i32(gl::UNPACK_ALIGNMENT, unpacking_alignment as i32);
@@ -3028,6 +3084,13 @@ fn prepare_pixels(
     pixels
 }
 
+/// Reserve conversion storage without wrapping a page-controlled pixel count.
+fn pixel_buffer(count: usize, cpp: usize) -> Option<Vec<u8>> {
+    let mut pixels = Vec::new();
+    pixels.try_reserve_exact(count.checked_mul(cpp)?).ok()?;
+    Some(pixels)
+}
+
 /// Translates an image in rgba8 (red in the first byte) format to
 /// the format that was requested of TexImage.
 fn image_to_tex_image_data(
@@ -3130,7 +3193,9 @@ fn image_to_tex_image_data(
             pixels
         },
         (TexFormat::RGBA, TexDataType::Float) | (TexFormat::RGBA32f, TexDataType::Float) => {
-            let mut rgbaf32 = Vec::<u8>::with_capacity(pixel_count * 16);
+            let Some(mut rgbaf32) = pixel_buffer(pixel_count, 16) else {
+                return Vec::new();
+            };
             for rgba8 in pixels.chunks(4) {
                 rgbaf32.write_f32::<NativeEndian>(rgba8[0] as f32).unwrap();
                 rgbaf32.write_f32::<NativeEndian>(rgba8[1] as f32).unwrap();
@@ -3141,7 +3206,9 @@ fn image_to_tex_image_data(
         },
 
         (TexFormat::RGB, TexDataType::Float) | (TexFormat::RGB32f, TexDataType::Float) => {
-            let mut rgbf32 = Vec::<u8>::with_capacity(pixel_count * 12);
+            let Some(mut rgbf32) = pixel_buffer(pixel_count, 12) else {
+                return Vec::new();
+            };
             for rgba8 in pixels.chunks(4) {
                 rgbf32.write_f32::<NativeEndian>(rgba8[0] as f32).unwrap();
                 rgbf32.write_f32::<NativeEndian>(rgba8[1] as f32).unwrap();
@@ -3169,7 +3236,9 @@ fn image_to_tex_image_data(
 
         (TexFormat::LuminanceAlpha, TexDataType::Float) |
         (TexFormat::LuminanceAlpha32f, TexDataType::Float) => {
-            let mut data = Vec::<u8>::with_capacity(pixel_count * 8);
+            let Some(mut data) = pixel_buffer(pixel_count, 8) else {
+                return Vec::new();
+            };
             for rgba8 in pixels.chunks(4) {
                 data.write_f32::<NativeEndian>(rgba8[0] as f32).unwrap();
                 data.write_f32::<NativeEndian>(rgba8[3] as f32).unwrap();
@@ -3179,7 +3248,9 @@ fn image_to_tex_image_data(
 
         (TexFormat::RGBA, TexDataType::HalfFloat) |
         (TexFormat::RGBA16f, TexDataType::HalfFloat) => {
-            let mut rgbaf16 = Vec::<u8>::with_capacity(pixel_count * 8);
+            let Some(mut rgbaf16) = pixel_buffer(pixel_count, 8) else {
+                return Vec::new();
+            };
             for rgba8 in pixels.chunks(4) {
                 rgbaf16
                     .write_u16::<NativeEndian>(f16::from_f32(rgba8[0] as f32).to_bits())
@@ -3198,7 +3269,9 @@ fn image_to_tex_image_data(
         },
 
         (TexFormat::RGB, TexDataType::HalfFloat) | (TexFormat::RGB16f, TexDataType::HalfFloat) => {
-            let mut rgbf16 = Vec::<u8>::with_capacity(pixel_count * 6);
+            let Some(mut rgbf16) = pixel_buffer(pixel_count, 6) else {
+                return Vec::new();
+            };
             for rgba8 in pixels.chunks(4) {
                 rgbf16
                     .write_u16::<NativeEndian>(f16::from_f32(rgba8[0] as f32).to_bits())
@@ -3299,16 +3372,32 @@ fn flip_pixels_y(
     let cpp = (data_type.element_size() * internal_format.components() /
         data_type.components_per_element()) as usize;
 
-    let stride = (width * cpp + unpacking_alignment - 1) & !(unpacking_alignment - 1);
-
-    let mut flipped = Vec::<u8>::with_capacity(pixels.len());
-
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+    let Some(row_bytes) = width.checked_mul(cpp) else {
+        return Vec::new();
+    };
+    let Some(stride) = row_bytes.checked_next_multiple_of(unpacking_alignment.max(1)) else {
+        return Vec::new();
+    };
+    let Some(length) = stride
+        .checked_mul(height - 1)
+        .and_then(|length| length.checked_add(row_bytes))
+    else {
+        return Vec::new();
+    };
+    if pixels.len() < length {
+        return Vec::new();
+    }
+    let Some(mut flipped) = pixel_buffer(length, 1) else {
+        return Vec::new();
+    };
+    flipped.resize(length, 0);
     for y in 0..height {
-        let flipped_y = height - 1 - y;
-        let start = flipped_y * stride;
-
-        flipped.extend_from_slice(&pixels[start..(start + width * cpp)]);
-        flipped.extend(vec![0u8; stride - width * cpp]);
+        let start = (height - 1 - y) * stride;
+        flipped[y * stride..y * stride + row_bytes]
+            .copy_from_slice(&pixels[start..start + row_bytes]);
     }
 
     flipped

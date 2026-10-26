@@ -637,8 +637,13 @@ impl WebGLRenderingContext {
         // Handle validation failed: LINEAR filtering not valid for this texture
         // WebGL Conformance tests expect to fallback to [0, 0, 0, 255] RGBA UNSIGNED_BYTE
         let data_type = TexDataType::UnsignedByte;
-        let expected_byte_length = size.area() * 4;
-        let mut pixels = vec![0u8; expected_byte_length as usize];
+        let Some(mut pixels) =
+            servo_canvas_traits::pixel_storage::required_bytes(size.width, size.height, 1, 4, 1)
+                .and_then(crate::dom::webgl::pixelunpack::zeroed_pixels)
+        else {
+            self.webgl_error(OutOfMemory);
+            return false;
+        };
         for rgba8 in pixels.chunks_mut(4) {
             rgba8[3] = 255u8;
         }
@@ -837,7 +842,7 @@ impl WebGLRenderingContext {
         data_type: TexDataType,
         unpacking_alignment: u32,
         data: Option<&ArrayBufferView>,
-    ) -> Result<u32, ()> {
+    ) -> Result<usize, ()> {
         let element_size = data_type.element_size();
         let components_per_element = data_type.components_per_element();
         let components = format.components();
@@ -860,18 +865,21 @@ impl WebGLRenderingContext {
             return Err(());
         }
 
-        // NOTE: width and height are positive or zero due to validate()
-        if height == 0 {
-            Ok(0)
-        } else {
-            // We need to be careful here to not count unpack
-            // alignment at the end of the image, otherwise (for
-            // example) passing a single byte for uploading a 1x1
-            // GL_ALPHA/GL_UNSIGNED_BYTE texture would throw an error.
-            let cpp = element_size * components / components_per_element;
-            let stride = (width * cpp + unpacking_alignment - 1) & !(unpacking_alignment - 1);
-            Ok(stride * (height - 1) + width * cpp)
-        }
+        let shape = ImageShape {
+            width,
+            height,
+            depth: 1,
+            is_3d: false,
+            bytes_per_pixel: element_size * components / components_per_element,
+            alignment: unpacking_alignment,
+        };
+        PixelUnpack::default().required_len(shape).ok_or_else(|| {
+            self.webgl_error(if data.is_some() {
+                InvalidOperation
+            } else {
+                OutOfMemory
+            });
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1535,14 +1543,15 @@ impl WebGLRenderingContext {
         } else {
             vec.len() - offset
         };
-        if offset + length > vec.len() {
-            return Err(InvalidValue);
-        }
+        let end = offset
+            .checked_add(length)
+            .filter(|end| *end <= vec.len())
+            .ok_or(InvalidValue)?;
 
         let vec = if offset == 0 && length == vec.len() {
             vec
         } else {
-            vec[offset..offset + length].to_vec()
+            vec[offset..end].to_vec()
         };
 
         if vec.len() < uniform_size || vec.len() % uniform_size != 0 {
@@ -2119,6 +2128,12 @@ impl CanvasContext for WebGLRenderingContext {
             sender,
         ));
         let (data, alpha_mode) = receiver.recv().unwrap();
+        if servo_canvas_traits::pixel_storage::required_bytes(size.width, size.height, 1, 4, 1)
+            .is_none_or(|length| data.len() != length)
+        {
+            self.webgl_error(OutOfMemory);
+            return None;
+        }
         Some(Snapshot::from_vec(
             size.cast(),
             SnapshotPixelFormat::RGBA,
@@ -3975,7 +3990,11 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             0 => 0,
             remainder => pack_alignment - remainder,
         };
-        let dest_stride = row_len + dest_padding;
+        let dest_stride = handle_potential_webgl_error!(
+            self,
+            row_len.checked_add(dest_padding).ok_or(InvalidOperation),
+            return
+        );
 
         let full_rows_len = handle_potential_webgl_error!(
             self,
@@ -4006,19 +4025,31 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         //  pixels::clip
         let src_rect = src_rect.to_u32();
 
-        let mut dest_offset = 0;
-        if x < 0 {
-            dest_offset += -x * bytes_per_pixel;
-        }
-        if y < 0 {
-            dest_offset += -y * row_len;
-        }
+        let dest_offset = handle_potential_webgl_error!(
+            self,
+            i64::from(x)
+                .saturating_neg()
+                .max(0)
+                .checked_mul(i64::from(bytes_per_pixel))
+                .and_then(|left| i64::from(y)
+                    .saturating_neg()
+                    .max(0)
+                    .checked_mul(i64::from(dest_stride))?
+                    .checked_add(left))
+                .and_then(|offset| usize::try_from(offset).ok())
+                .ok_or(InvalidOperation),
+            return
+        );
 
         let (sender, receiver) = generic_channel::channel().unwrap();
         self.send_command(WebGLCommand::ReadPixels(
             src_rect, format, pixel_type, sender,
         ));
         let (src, _) = receiver.recv().unwrap();
+        if src.is_empty() && src_rect.size.width != 0 && src_rect.size.height != 0 {
+            self.webgl_error(OutOfMemory);
+            return;
+        }
 
         let src_row_len = src_rect.size.width as usize * bytes_per_pixel as usize;
         for i in 0..src_rect.size.height {
@@ -4654,7 +4685,13 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         // If data is null, a buffer of sufficient size
         // initialized to 0 is passed.
         let buff = match *pixels {
-            None => GenericSharedMemory::from_byte(0, expected_byte_length as usize),
+            None => match crate::dom::webgl::pixelunpack::zeroed_pixels(expected_byte_length) {
+                Some(bytes) => GenericSharedMemory::from_vec(bytes),
+                None => {
+                    self.webgl_error(OutOfMemory);
+                    return Ok(());
+                },
+            },
             Some(ref data) => {
                 // The image is cut out of the array when the pixel store parameters place it
                 // inside of it. The parameters that do not fit the image, and an array that is
@@ -4662,9 +4699,14 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
                 let shape = self.tex_image_shape(width, height, 1, false, format, data_type);
                 let bytes = data.as_slice_safe(no_gc).unwrap_or_default();
                 match self.texture_unpack.get().unpack(bytes, shape) {
-                    Some(bytes) => GenericSharedMemory::from_bytes(&bytes),
-                    None => {
-                        self.webgl_error(InvalidOperation);
+                    Ok(bytes) => GenericSharedMemory::from_bytes(&bytes),
+                    Err(error) => {
+                        self.webgl_error(match error {
+                            crate::dom::webgl::pixelunpack::UnpackError::InvalidOperation => {
+                                InvalidOperation
+                            },
+                            crate::dom::webgl::pixelunpack::UnpackError::OutOfMemory => OutOfMemory,
+                        });
                         return Ok(());
                     },
                 }
@@ -4677,7 +4719,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         //      is required by the specified width, height, format,
         //      type, and pixel storage parameters, generates an
         //      INVALID_OPERATION error."
-        if buff.len() < expected_byte_length as usize {
+        if buff.len() < expected_byte_length {
             return {
                 self.webgl_error(InvalidOperation);
                 Ok(())
@@ -4872,9 +4914,14 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             .get()
             .unpack(pixels.as_slice_safe(no_gc).unwrap_or(&[]), shape)
         {
-            Some(bytes) => GenericSharedMemory::from_bytes(&bytes),
-            None => {
-                self.webgl_error(InvalidOperation);
+            Ok(bytes) => GenericSharedMemory::from_bytes(&bytes),
+            Err(error) => {
+                self.webgl_error(match error {
+                    crate::dom::webgl::pixelunpack::UnpackError::InvalidOperation => {
+                        InvalidOperation
+                    },
+                    crate::dom::webgl::pixelunpack::UnpackError::OutOfMemory => OutOfMemory,
+                });
                 return Ok(());
             },
         };
@@ -4885,7 +4932,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         //      is required by the specified width, height, format,
         //      type, and pixel storage parameters, generates an
         //      INVALID_OPERATION error."
-        if buff.len() < expected_byte_length as usize {
+        if buff.len() < expected_byte_length {
             return {
                 self.webgl_error(InvalidOperation);
                 Ok(())
