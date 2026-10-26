@@ -135,6 +135,11 @@ impl ProtocolRegistry {
         self.handlers.get(scheme).map(|e| e.as_ref())
     }
 
+    /// Remove a handler so an embedder can wrap it before building the engine.
+    pub fn remove(&mut self, scheme: &str) -> Option<Box<dyn ProtocolHandler>> {
+        self.handlers.remove(scheme)
+    }
+
     pub fn merge(&mut self, mut other: ProtocolRegistry) {
         for (scheme, handler) in other.handlers.drain() {
             if FORBIDDEN_SCHEMES.contains(&scheme.as_str()) {

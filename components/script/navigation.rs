@@ -236,6 +236,9 @@ impl InProgressLoad {
             .unwrap_or(InsecureRequestsPolicy::DoNotUpgrade);
 
         let request_client = RequestClient {
+            document_url: self.load_data.initiator_url.clone(),
+            is_embedder_navigation: matches!(self.load_data.load_origin, LoadOrigin::Constellation) &&
+                self.parent_info.is_none(),
             preloaded_resources: PreloadedResources::default(),
             policy_container: self.load_data.policy_container.clone().unwrap_or_default(),
             origin: Origin::Origin(client_origin),

@@ -88,6 +88,8 @@ pub enum LoadOrigin {
 pub struct LoadData {
     /// The origin where the load started.
     pub load_origin: LoadOrigin,
+    /// Initiating document URL, independent of referrer policy and opaque origins.
+    pub initiator_url: Option<ServoUrl>,
     /// The URL.
     pub url: ServoUrl,
     /// <https://html.spec.whatwg.org/multipage/#concept-document-about-base-url>
@@ -151,6 +153,7 @@ impl LoadData {
     #[expect(clippy::too_many_arguments)]
     pub fn new(
         load_origin: LoadOrigin,
+        initiator_url: Option<ServoUrl>,
         url: ServoUrl,
         about_base_url: Option<ServoUrl>,
         creator_pipeline_id: Option<PipelineId>,
@@ -163,6 +166,7 @@ impl LoadData {
     ) -> Self {
         Self {
             load_origin,
+            initiator_url,
             url,
             about_base_url,
             creator_pipeline_id,
@@ -192,6 +196,7 @@ impl LoadData {
     pub fn new_for_new_unrelated_webview(url: ServoUrl) -> Self {
         Self::new(
             LoadOrigin::Constellation,
+            None,
             url,
             None,
             None,

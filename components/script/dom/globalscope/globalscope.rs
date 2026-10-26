@@ -2284,6 +2284,8 @@ impl GlobalScope {
             return window.request_client(no_gc);
         }
         RequestClient {
+            document_url: None,
+            is_embedder_navigation: false,
             preloaded_resources: Default::default(),
             policy_container: self.policy_container(),
             origin: RequestOrigin::Origin(self.origin().immutable().clone()),

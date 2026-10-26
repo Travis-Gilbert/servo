@@ -191,6 +191,7 @@ impl Location {
         // TODO: rethrow exceptions, set exceptions enabled flag.
         let load_data = LoadData::new(
             LoadOrigin::Script(load_origin),
+            Some(source_document.url()),
             url,
             source_document.about_base_url(),
             creator_pipeline_id,

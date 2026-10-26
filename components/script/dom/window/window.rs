@@ -1014,6 +1014,8 @@ impl Window {
             )
         };
         RequestClient {
+            document_url: Some(self.Document().url()),
+            is_embedder_navigation: false,
             preloaded_resources,
             policy_container,
             origin: Origin::Origin(origin.immutable().clone()),
@@ -3353,6 +3355,7 @@ impl Window {
         };
         LoadData::new(
             LoadOrigin::Script(self.origin().snapshot()),
+            Some(source_document.url()),
             url,
             source_document.about_base_url(),
             Some(pipeline_id),

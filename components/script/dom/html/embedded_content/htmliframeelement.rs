@@ -394,6 +394,7 @@ impl HTMLIFrameElement {
         let pipeline_id = Some(window.pipeline_id());
         let mut load_data = LoadData::new(
             LoadOrigin::Script(document.origin().snapshot()),
+            Some(document.url()),
             url,
             Some(document.base_url()),
             pipeline_id,
@@ -515,6 +516,7 @@ impl HTMLIFrameElement {
         let propagate_encoding_to_child_document = url.origin().same_origin(&window.origin());
         let mut load_data = LoadData::new(
             LoadOrigin::Script(document.origin().snapshot()),
+            Some(document.url()),
             url,
             about_base_url,
             creator_pipeline_id,
@@ -572,6 +574,7 @@ impl HTMLIFrameElement {
             // > initiator origin
             // >     document's origin
             LoadOrigin::Script(document.origin().snapshot()),
+            Some(document.url()),
             ServoUrl::parse("about:blank").unwrap(),
             // > about base URL
             // >     document's about base URL

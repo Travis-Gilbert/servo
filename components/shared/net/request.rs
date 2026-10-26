@@ -213,6 +213,12 @@ pub type PreloadedResources = FxHashMap<PreloadKey, PreloadId>;
 /// <https://fetch.spec.whatwg.org/#concept-request-client>
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct RequestClient {
+    /// The initiating document URL, not a referrer or a request-controlled URL.
+    #[serde(default)]
+    pub document_url: Option<ServoUrl>,
+    /// Set only for direct embedder navigations, never inferred from an opaque origin.
+    #[serde(default)]
+    pub is_embedder_navigation: bool,
     /// <https://html.spec.whatwg.org/multipage/#map-of-preloaded-resources>
     pub preloaded_resources: PreloadedResources,
     /// <https://html.spec.whatwg.org/multipage/#concept-settings-object-policy-container>

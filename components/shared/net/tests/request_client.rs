@@ -13,6 +13,8 @@ const TEST_URL: &str = "https://app.invalid/";
 
 fn request_client(is_window: bool, is_nested_browsing_context: bool) -> RequestClient {
     RequestClient {
+        document_url: None,
+        is_embedder_navigation: false,
         preloaded_resources: Default::default(),
         policy_container: Default::default(),
         origin: Origin::Origin(ServoUrl::parse(TEST_URL).unwrap().origin()),
@@ -96,4 +98,17 @@ fn request_builder_preserves_request_client_kind() {
             assert_eq!(client.origin, expected.origin);
         }
     }
+}
+
+#[test]
+fn missing_protocol_initiator_metadata_fails_closed() {
+    let mut encoded = serde_json::to_value(request_client(true, false)).unwrap();
+    encoded.as_object_mut().unwrap().remove("document_url");
+    encoded
+        .as_object_mut()
+        .unwrap()
+        .remove("is_embedder_navigation");
+    let decoded: RequestClient = serde_json::from_value(encoded).unwrap();
+    assert!(decoded.document_url.is_none());
+    assert!(!decoded.is_embedder_navigation);
 }
