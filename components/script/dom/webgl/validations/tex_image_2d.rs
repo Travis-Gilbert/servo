@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::{self, cmp, fmt};
+use std::{self, fmt};
 
 use servo_canvas_traits::webgl::WebGLError::*;
 use servo_canvas_traits::webgl::{TexDataType, TexFormat};
@@ -201,7 +201,9 @@ impl WebGLValidator for CommonTexImage2DValidator<'_> {
         // GL_INVALID_VALUE is generated if width or height is greater than
         // GL_MAX_TEXTURE_SIZE when target is GL_TEXTURE_2D or
         // GL_MAX_CUBE_MAP_TEXTURE_SIZE when target is not GL_TEXTURE_2D.
-        if width > max_size >> level || height > max_size >> level {
+        let max_size_for_level =
+            servo_canvas_traits::pixel_storage::mip_size(max_size, self.level).unwrap_or(0);
+        if width > max_size_for_level || height > max_size_for_level {
             self.context.webgl_error(InvalidValue);
             return Err(TexImageValidationError::TextureTooBig);
         }
@@ -841,7 +843,12 @@ impl WebGLValidator for TexStorageValidator<'_> {
         // INVALID_OPERATION is generated if levels is greater than
         // floor(log2(max(width, height, depth))) + 1.
         let levels = self.levels as u32;
-        let max_levels = cmp::max(cmp::max(width, height), depth).ilog2() + 1;
+        let max_levels = servo_canvas_traits::pixel_storage::mip_levels(
+            width,
+            height,
+            depth,
+            target == TexImageTarget::Texture3D,
+        );
         if levels > max_levels {
             context.webgl_error(InvalidOperation);
             return Err(TexImageValidationError::LevelTooHigh);

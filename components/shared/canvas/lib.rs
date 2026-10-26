@@ -13,6 +13,7 @@ use profile_traits::mem::ReportsChan;
 use crate::canvas::CanvasId;
 
 pub mod canvas;
+pub mod pixel_storage;
 #[macro_use]
 pub mod webgl;
 
