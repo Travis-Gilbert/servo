@@ -131,6 +131,54 @@ struct ReadPixelsSizes {
     size: usize,
 }
 
+/// What a color buffer stores. It decides which (format, type) pairs `readPixels` accepts.
+/// <https://registry.khronos.org/OpenGL/specs/es/3.0/es_spec_3.0.pdf> section 4.3.2.
+#[derive(Clone, Copy)]
+enum ColorBufferKind {
+    FixedPoint,
+    SignedInteger,
+    UnsignedInteger,
+    FloatingPoint,
+}
+
+impl ColorBufferKind {
+    fn of(internal_format: u32) -> Self {
+        use TexFormat::*;
+        match TexFormat::from_gl_constant(internal_format) {
+            Some(
+                R16f | R32f | RG16f | RG32f | R11fG11fB10f | RGB16f | RGB32f | RGBA16f | RGBA32f,
+            ) => Self::FloatingPoint,
+            Some(
+                R8i | R16i | R32i | RG8i | RG16i | RG32i | RGB8i | RGB16i | RGB32i | RGBA8i |
+                RGBA16i | RGBA32i,
+            ) => Self::SignedInteger,
+            Some(
+                R8ui | R16ui | R32ui | RG8ui | RG16ui | RG32ui | RGB8ui | RGB16ui | RGB32ui |
+                RGBA8ui | RGB10A2ui | RGBA16ui | RGBA32ui,
+            ) => Self::UnsignedInteger,
+            _ => Self::FixedPoint,
+        }
+    }
+
+    fn accepts(self, format: u32, pixel_type: u32) -> bool {
+        matches!(
+            (self, format, pixel_type),
+            (Self::FixedPoint, constants::RGBA, constants::UNSIGNED_BYTE) |
+                (
+                    Self::SignedInteger,
+                    constants::RGBA_INTEGER,
+                    constants::INT
+                ) |
+                (
+                    Self::UnsignedInteger,
+                    constants::RGBA_INTEGER,
+                    constants::UNSIGNED_INT
+                ) |
+                (Self::FloatingPoint, constants::RGBA, constants::FLOAT)
+        )
+    }
+}
+
 impl WebGL2RenderingContext {
     fn new_inherited(
         cx: &mut JSContext,
@@ -467,6 +515,21 @@ impl WebGL2RenderingContext {
         })
     }
 
+    /// The kind of color buffer `readPixels` reads from: the read buffer of the bound read
+    /// framebuffer, or the default framebuffer.
+    fn read_color_buffer_kind(&self) -> WebGLResult<ColorBufferKind> {
+        match self.base.get_read_framebuffer_slot().get() {
+            Some(fb) => fb
+                .attachment_internal_format(fb.read_buffer())
+                .map(ColorBufferKind::of)
+                .ok_or(InvalidOperation),
+            None if self.default_fb_readbuffer.get() != constants::NONE => {
+                Ok(ColorBufferKind::FixedPoint)
+            },
+            None => Err(InvalidOperation),
+        }
+    }
+
     #[expect(clippy::too_many_arguments)]
     fn read_pixels_into(
         &self,
@@ -486,14 +549,8 @@ impl WebGL2RenderingContext {
             return self.base.webgl_error(InvalidOperation);
         }
 
-        let fb_slot = self.base.get_draw_framebuffer_slot();
-        let fb_readbuffer_valid = match fb_slot.get() {
-            Some(fb) => fb.attachment(fb.read_buffer()).is_some(),
-            None => self.default_fb_readbuffer.get() != constants::NONE,
-        };
-        if !fb_readbuffer_valid {
-            return self.base.webgl_error(InvalidOperation);
-        }
+        let color_buffer_kind =
+            handle_potential_webgl_error!(self.base, self.read_color_buffer_kind(), return);
 
         let dst_byte_offset = {
             let dst_elem_size = dst.get_array_type().byte_size().unwrap();
@@ -514,7 +571,7 @@ impl WebGL2RenderingContext {
         if !allowed_array_types.contains(&dst_array_type) {
             return self.base.webgl_error(InvalidOperation);
         }
-        if format != constants::RGBA || pixel_type != constants::UNSIGNED_BYTE {
+        if !color_buffer_kind.accepts(format, pixel_type) {
             return self.base.webgl_error(InvalidOperation);
         }
 
@@ -2357,16 +2414,19 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             return self.base.webgl_error(InvalidOperation);
         }
 
+        let color_buffer_kind =
+            handle_potential_webgl_error!(self.base, self.read_color_buffer_kind(), return);
         let ReadPixelsAllowedFormats {
-            array_types: _,
-            channels: bytes_per_pixel,
+            array_types,
+            channels,
         } = match self.calc_read_pixel_formats(pixel_type, format) {
             Ok(result) => result,
             Err(error) => return self.base.webgl_error(error),
         };
-        if format != constants::RGBA || pixel_type != constants::UNSIGNED_BYTE {
+        if !color_buffer_kind.accepts(format, pixel_type) {
             return self.base.webgl_error(InvalidOperation);
         }
+        let bytes_per_pixel = array_types[0].byte_size().unwrap() * channels;
 
         let ReadPixelsSizes {
             row_stride: _,

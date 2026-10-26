@@ -1284,9 +1284,12 @@ impl WebGLImpl {
                 gl.polygon_offset(factor, units)
             },
             WebGLCommand::ReadPixels(rect, format, pixel_type, ref sender) => {
-                let len = bytes_per_type(pixel_type) *
-                    components_per_format(format) *
-                    rect.size.area() as usize;
+                // glow sizes only the normalized formats; the integer ones come from TexFormat.
+                let components = TexFormat::from_gl_constant(format).map_or_else(
+                    || components_per_format(format),
+                    |format| format.components() as usize,
+                );
+                let len = bytes_per_type(pixel_type) * components * rect.size.area() as usize;
                 let mut pixels = vec![0; len];
                 unsafe {
                     // We don't want any alignment padding on pixel rows.

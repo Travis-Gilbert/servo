@@ -735,6 +735,17 @@ impl WebGLFramebuffer {
             .map(WebGLFramebufferAttachment::root)
     }
 
+    /// The internal format of the image attached at `attachment`, if there is one.
+    pub(crate) fn attachment_internal_format(&self, attachment: u32) -> Option<u32> {
+        let binding = self.attachment_binding(attachment)?;
+        match binding.borrow().as_ref()? {
+            WebGLFramebufferAttachment::Renderbuffer(rb) => Some(rb.internal_format()),
+            WebGLFramebufferAttachment::Texture { texture, level } => texture
+                .image_info_at_face(0, *level as u32)
+                .map(|info| info.internal_format().as_gl_constant()),
+        }
+    }
+
     pub(crate) fn texture2d(
         &self,
         attachment: u32,
