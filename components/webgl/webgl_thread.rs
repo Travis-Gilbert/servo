@@ -86,7 +86,7 @@ pub(crate) struct GLContextData {
 
 #[derive(Debug)]
 pub struct GLState {
-    _webgl_version: WebGLVersion,
+    webgl_version: WebGLVersion,
     _gl_version: GLVersion,
     requested_flags: ContextAttributeFlags,
     // This is the WebGL view of the color mask
@@ -204,7 +204,7 @@ impl Default for GLState {
     fn default() -> GLState {
         GLState {
             _gl_version: GLVersion { major: 1, minor: 0 },
-            _webgl_version: WebGLVersion::WebGL1,
+            webgl_version: WebGLVersion::WebGL1,
             requested_flags: ContextAttributeFlags::empty(),
             color_write_mask: [true, true, true, true],
             clear_color: (0., 0., 0., 0.),
@@ -679,7 +679,7 @@ impl WebGLThread {
 
         let state = GLState {
             _gl_version: gl_version,
-            _webgl_version: webgl_version,
+            webgl_version,
             requested_flags,
             default_vao,
             ..Default::default()
@@ -2041,8 +2041,20 @@ impl WebGLImpl {
             },
             WebGLCommand::GetParameterFloat2(param, ref sender) => {
                 let mut value = [0.; 2];
+                // A core profile (what WebGL 2 gets on desktop GL) has no aliased points, so
+                // ALIASED_POINT_SIZE_RANGE is an invalid enum there: the range of point sizes
+                // is POINT_SIZE_RANGE instead.
+                let param = match param {
+                    webgl::ParameterFloat2::AliasedPointSizeRange
+                        if state.webgl_version == WebGLVersion::WebGL2 &&
+                            !gl.version().is_embedded =>
+                    {
+                        gl::POINT_SIZE_RANGE
+                    },
+                    param => param as u32,
+                };
                 unsafe {
-                    gl.get_parameter_f32_slice(param as u32, &mut value);
+                    gl.get_parameter_f32_slice(param, &mut value);
                 }
                 sender.send(value).unwrap()
             },
