@@ -2461,7 +2461,8 @@ impl WebGLImpl {
             WebGLCommand::GetActiveUniformBlockName(program_id, block_idx, ref sender) => {
                 let name =
                     unsafe { gl.get_active_uniform_block_name(program_id.glow(), block_idx) };
-                sender.send(name).unwrap();
+                // The name in the compiled shader has ANGLE's prefix, which script must not see.
+                sender.send(from_name_in_compiled_shader(&name)).unwrap();
             },
             WebGLCommand::GetActiveUniformBlockParameter(
                 program_id,
@@ -2740,7 +2741,10 @@ impl WebGLImpl {
                         gl::UNIFORM_BLOCK_DATA_SIZE,
                     )
                 };
-                ActiveUniformBlockInfo { name, size }
+                ActiveUniformBlockInfo {
+                    name: from_name_in_compiled_shader(&name),
+                    size,
+                }
             })
             .collect::<Vec<_>>()
             .into();
