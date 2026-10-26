@@ -6,6 +6,7 @@ use dom_struct::dom_struct;
 use js::context::JSContext;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 
+use super::oestexturefloat::OESTextureFloat;
 use super::{WebGLExtension, WebGLExtensionSpec, WebGLExtensions, constants as webgl};
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
@@ -35,8 +36,12 @@ impl WebGLExtension for OESTextureFloatLinear {
     }
 
     fn is_supported(ext: &WebGLExtensions) -> bool {
-        ext.has_core_float_buffers() ||
-            ext.supports_any_gl_extension(&["GL_OES_texture_float_linear", "GL_ARB_texture_float"])
+        (ext.is_webgl2() || OESTextureFloat::is_supported(ext)) &&
+            (ext.has_core_float_buffers() ||
+                ext.supports_any_gl_extension(&[
+                    "GL_OES_texture_float_linear",
+                    "GL_ARB_texture_float",
+                ]))
     }
 
     fn enable(ext: &WebGLExtensions) {

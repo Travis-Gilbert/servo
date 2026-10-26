@@ -35,7 +35,9 @@ impl WebGLExtension for EXTFloatBlend {
     }
 
     fn is_supported(ext: &WebGLExtensions) -> bool {
-        ext.has_core_float_buffers() || ext.supports_gl_extension("GL_EXT_float_blend")
+        ext.has_core_float_buffers() ||
+            ext.supports_gl_extension("GL_EXT_float_blend") ||
+            (!ext.is_gles() && ext.supports_gl_extension("GL_ARB_color_buffer_float"))
     }
 
     fn enable(_ext: &WebGLExtensions) {}

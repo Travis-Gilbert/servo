@@ -178,6 +178,7 @@ pub(crate) struct WebGLExtensions {
     api_type: GlType,
     #[no_trace]
     glsl_version: WebGLSLVersion,
+    gl_version: (u32, u32),
 }
 
 impl WebGLExtensions {
@@ -185,6 +186,7 @@ impl WebGLExtensions {
         webgl_version: WebGLVersion,
         api_type: GlType,
         glsl_version: WebGLSLVersion,
+        gl_version: (u32, u32),
     ) -> WebGLExtensions {
         Self {
             extensions: DomRefCell::new(HashMap::new()),
@@ -192,6 +194,7 @@ impl WebGLExtensions {
             webgl_version,
             api_type,
             glsl_version,
+            gl_version,
         }
     }
 
@@ -462,15 +465,14 @@ impl WebGLExtensions {
             self.is_enabled::<EXTColorBufferFloat>()
     }
 
-    /// Whether this is desktop GL 3.0 or later, where float colour buffers,
-    /// float blending and linear filtering of float textures are core
-    /// features, so the driver does not list them as extensions.
+    /// Float rendering and blending are core in desktop GL 3.0. GLES still needs
+    /// the corresponding native extensions; its shading language version is not evidence.
     pub(crate) fn has_core_float_buffers(&self) -> bool {
-        !self.is_gles() &&
-            self.is_min_glsl_version_satisfied(WebGLSLVersion {
-                major: 1,
-                minor: 30,
-            })
+        !self.is_gles() && self.gl_version >= (3, 0)
+    }
+
+    pub(crate) fn is_webgl2(&self) -> bool {
+        self.webgl_version == WebGLVersion::WebGL2
     }
 
     pub(crate) fn is_min_glsl_version_satisfied(&self, min_glsl_version: WebGLSLVersion) -> bool {
@@ -498,3 +500,72 @@ impl WebGLExtensions {
 // Helper structs
 #[derive(Eq, Hash, MallocSizeOf, PartialEq)]
 struct TexFormatType(TexFormat, u32);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dom::webgl::extensions::ext::extfloatblend::EXTFloatBlend;
+    use crate::dom::webgl::extensions::ext::oestexturefloatlinear::OESTextureFloatLinear;
+
+    fn extensions(
+        version: WebGLVersion,
+        api: GlType,
+        native: (u32, u32),
+        names: &[&str],
+    ) -> WebGLExtensions {
+        // DomRefCell only lends its contents on a script thread.
+        style::thread_state::initialize(style::thread_state::ThreadState::SCRIPT);
+        let extensions = WebGLExtensions::new(
+            version,
+            api,
+            WebGLSLVersion {
+                major: 9,
+                minor: 99,
+            },
+            native,
+        );
+        extensions.features.borrow_mut().gl_extensions =
+            names.iter().map(|name| (*name).into()).collect();
+        extensions
+    }
+
+    #[test]
+    fn glsl_does_not_imply_native_float_support() {
+        let ext = extensions(WebGLVersion::WebGL2, GlType::Gl, (2, 1), &[]);
+        assert!(!EXTColorBufferFloat::is_supported(&ext));
+        assert!(!EXTFloatBlend::is_supported(&ext));
+        let ext = extensions(WebGLVersion::WebGL2, GlType::Gl, (3, 0), &[]);
+        assert!(EXTColorBufferFloat::is_supported(&ext));
+        assert!(EXTFloatBlend::is_supported(&ext));
+    }
+
+    #[test]
+    fn gles_requires_each_float_extension() {
+        let ext = extensions(
+            WebGLVersion::WebGL2,
+            GlType::Gles,
+            (3, 2),
+            &["GL_EXT_color_buffer_float"],
+        );
+        assert!(EXTColorBufferFloat::is_supported(&ext));
+        assert!(!EXTFloatBlend::is_supported(&ext));
+        let ext = extensions(
+            WebGLVersion::WebGL2,
+            GlType::Gles,
+            (3, 2),
+            &["GL_EXT_float_blend"],
+        );
+        assert!(!EXTColorBufferFloat::is_supported(&ext));
+        assert!(EXTFloatBlend::is_supported(&ext));
+    }
+
+    #[test]
+    fn webgl1_float_extensions_require_texture_dependencies() {
+        let ext = extensions(WebGLVersion::WebGL1, GlType::Gl, (3, 0), &[]);
+        assert!(!OESTextureFloatLinear::is_supported(&ext));
+        assert!(!EXTColorBufferHalfFloat::is_supported(&ext));
+        let ext = extensions(WebGLVersion::WebGL2, GlType::Gl, (3, 0), &[]);
+        assert!(OESTextureFloatLinear::is_supported(&ext));
+        assert!(EXTColorBufferHalfFloat::is_supported(&ext));
+    }
+}

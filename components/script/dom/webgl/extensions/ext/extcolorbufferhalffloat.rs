@@ -36,9 +36,13 @@ impl WebGLExtension for EXTColorBufferHalfFloat {
     }
 
     fn is_supported(ext: &WebGLExtensions) -> bool {
-        ext.has_core_float_buffers() ||
-            ext.supports_gl_extension("GL_EXT_color_buffer_float") ||
-            OESTextureHalfFloat::is_supported(ext)
+        (ext.is_webgl2() || OESTextureHalfFloat::is_supported(ext)) &&
+            (ext.has_core_float_buffers() ||
+                ext.supports_any_gl_extension(&[
+                    "GL_EXT_color_buffer_float",
+                    "GL_EXT_color_buffer_half_float",
+                    "GL_ARB_texture_float",
+                ]))
     }
 
     fn enable(_ext: &WebGLExtensions) {}

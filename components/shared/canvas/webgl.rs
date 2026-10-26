@@ -164,6 +164,8 @@ pub struct WebGLCreateContextResult {
     pub limits: GLLimits,
     /// The GLSL version supported by the context.
     pub glsl_version: WebGLSLVersion,
+    /// The native GL version, independently of the shading language version.
+    pub gl_version: (u32, u32),
     /// The GL API used by the context.
     pub api_type: GlType,
 }

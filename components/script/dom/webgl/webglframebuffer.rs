@@ -365,11 +365,10 @@ impl WebGLFramebuffer {
             constants::R16F | constants::RG16F | constants::RGBA16F => {
                 color_buffer_float || half_float
             },
-            constants::RGB16F => half_float,
-            constants::R32F |
-            constants::RG32F |
-            constants::RGBA32F |
-            constants::R11F_G11F_B10F => color_buffer_float,
+            constants::RGB16F => false,
+            constants::R32F | constants::RG32F | constants::RGBA32F | constants::R11F_G11F_B10F => {
+                color_buffer_float
+            },
             _ => false,
         }
     }

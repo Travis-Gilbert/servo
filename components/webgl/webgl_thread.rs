@@ -379,6 +379,7 @@ impl WebGLThread {
                             sender: WebGLMsgSender::new(id, webgl_chan.clone()),
                             limits,
                             glsl_version,
+                            gl_version: (data.gl.version().major, data.gl.version().minor),
                             api_type,
                         }
                     }))

@@ -244,6 +244,14 @@ impl WebGLRenderbuffer {
                 }
             },
             // https://registry.khronos.org/webgl/extensions/EXT_color_buffer_float/
+            constants::R16F | constants::RG16F
+                if context.webgl_version() == WebGLVersion::WebGL2 &&
+                    context
+                        .extension_manager()
+                        .is_half_float_buffer_renderable() =>
+            {
+                internal_format
+            },
             constants::R16F |
             constants::RG16F |
             constants::R32F |
@@ -264,9 +272,11 @@ impl WebGLRenderbuffer {
             },
             EXTColorBufferHalfFloatConstants::RGBA16F_EXT |
             EXTColorBufferHalfFloatConstants::RGB16F_EXT => {
-                if !context
-                    .extension_manager()
-                    .is_half_float_buffer_renderable()
+                if (internal_format == EXTColorBufferHalfFloatConstants::RGB16F_EXT &&
+                    context.webgl_version() == WebGLVersion::WebGL2) ||
+                    !context
+                        .extension_manager()
+                        .is_half_float_buffer_renderable()
                 {
                     return Err(WebGLError::InvalidEnum);
                 }

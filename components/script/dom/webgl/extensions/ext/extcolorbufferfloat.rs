@@ -36,7 +36,9 @@ impl WebGLExtension for EXTColorBufferFloat {
     }
 
     fn is_supported(ext: &WebGLExtensions) -> bool {
-        ext.has_core_float_buffers() || ext.supports_gl_extension("GL_EXT_color_buffer_float")
+        ext.has_core_float_buffers() ||
+            ext.supports_gl_extension("GL_EXT_color_buffer_float") ||
+            (!ext.is_gles() && ext.supports_gl_extension("GL_ARB_texture_float"))
     }
 
     fn enable(_ext: &WebGLExtensions) {}

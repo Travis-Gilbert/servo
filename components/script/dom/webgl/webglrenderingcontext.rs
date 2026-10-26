@@ -270,6 +270,7 @@ impl WebGLRenderingContext {
                     webgl_version,
                     ctx_data.api_type,
                     ctx_data.glsl_version,
+                    ctx_data.gl_version,
                 ),
                 capabilities: Default::default(),
                 default_vao: Default::default(),
