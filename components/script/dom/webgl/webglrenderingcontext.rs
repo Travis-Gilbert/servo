@@ -851,7 +851,9 @@ impl WebGLRenderingContext {
         size: Size2D<u32>,
         source: TexSource,
     ) {
-        // TexImage2D depth is always equal to 1.
+        // TexImage2D depth is always equal to 1. WebGL2 has sized internal formats (RGBA32F,
+        // RGBA8UI, ...) that framebuffer completeness and readPixels depend on, so the image
+        // keeps the internal format, which equals the format in WebGL1.
         handle_potential_webgl_error!(
             self,
             texture.initialize(
@@ -859,7 +861,7 @@ impl WebGLRenderingContext {
                 size.width,
                 size.height,
                 1,
-                format,
+                internal_format,
                 level,
                 Some(data_type)
             )
@@ -2861,7 +2863,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
                 },
                 Some(WebGLFramebufferAttachmentRoot::Texture(texture)) => texture
                     .image_info_for_target(&target, 0)
-                    .map(|info| info.internal_format()),
+                    .map(|info| info.internal_format().to_unsized()),
                 None => None,
             },
             None => {
