@@ -157,9 +157,15 @@ impl WebGLValidator for CommonTexImage2DValidator<'_> {
         // GL_INVALID_ENUM is generated if internal_format is not an accepted
         // format.
         let internal_format = match TexFormat::from_gl_constant(self.internal_format) {
+            // The format of a sub-image upload is an unsized format such as RG or RED_INTEGER,
+            // never a sized internal format such as RG8.
             Some(format)
                 if format.required_webgl_version() <= self.context.webgl_version() &&
-                    (self.sub_image || format.usable_as_internal()) =>
+                    if self.sub_image {
+                        !format.is_sized()
+                    } else {
+                        format.usable_as_internal()
+                    } =>
             {
                 format
             },
