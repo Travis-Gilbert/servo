@@ -65,6 +65,7 @@ use crate::dom::node::NodeTraits;
 #[cfg(feature = "webxr")]
 use crate::dom::promise::Promise;
 use crate::dom::webgl::extensions::WebGLExtensions;
+use crate::dom::webgl::pixelunpack::{ImageShape, PixelUnpack};
 use crate::dom::webgl::validations::WebGLValidator;
 use crate::dom::webgl::validations::tex_image_2d::{
     CommonCompressedTexImage2DValidatorResult, CommonTexImage2DValidator,
@@ -177,6 +178,11 @@ pub(crate) struct WebGLRenderingContext {
     texture_unpacking_settings: Cell<TextureUnpacking>,
     // TODO(nox): Should be Cell<u8>.
     texture_unpacking_alignment: Cell<u32>,
+    /// The WebGL 2 parameters that place an image inside the array it is uploaded from. They
+    /// stay zero in a WebGL 1 context.
+    #[ignore_malloc_size_of = "Plain integers"]
+    #[no_trace]
+    texture_unpack: Cell<PixelUnpack>,
     bound_draw_framebuffer: MutNullableDom<WebGLFramebuffer>,
     // TODO(mmatyas): This was introduced in WebGL2, but listed here because it's used by
     // Textures and Renderbuffers, but such WebGLObjects have access only to the GL1 context.
@@ -246,6 +252,7 @@ impl WebGLRenderingContext {
                 texture_packing_alignment: Cell::new(4),
                 texture_unpacking_settings: Cell::new(TextureUnpacking::CONVERT_COLORSPACE),
                 texture_unpacking_alignment: Cell::new(4),
+                texture_unpack: Cell::new(PixelUnpack::default()),
                 bound_draw_framebuffer: MutNullableDom::new(None),
                 bound_read_framebuffer: MutNullableDom::new(None),
                 bound_buffer_array: MutNullableDom::new(None),
@@ -357,6 +364,36 @@ impl WebGLRenderingContext {
 
     pub(crate) fn texture_unpacking_alignment(&self) -> u32 {
         self.texture_unpacking_alignment.get()
+    }
+
+    pub(crate) fn texture_unpack(&self) -> PixelUnpack {
+        self.texture_unpack.get()
+    }
+
+    pub(crate) fn set_texture_unpack(&self, unpack: PixelUnpack) {
+        self.texture_unpack.set(unpack);
+    }
+
+    /// The size of `depth` images of `width` by `height` texels of this format and type, and
+    /// how their rows are aligned, for cutting them out of a client-side array.
+    pub(crate) fn tex_image_shape(
+        &self,
+        width: u32,
+        height: u32,
+        depth: u32,
+        is_3d: bool,
+        format: TexFormat,
+        data_type: TexDataType,
+    ) -> ImageShape {
+        ImageShape {
+            width,
+            height,
+            depth,
+            is_3d,
+            bytes_per_pixel: data_type.element_size() * format.components() /
+                data_type.components_per_element(),
+            alignment: self.texture_unpacking_alignment.get(),
+        }
     }
 
     pub(crate) fn bound_draw_framebuffer(&self) -> Option<DomRoot<WebGLFramebuffer>> {
@@ -4608,7 +4645,18 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         let buff = match *pixels {
             None => GenericSharedMemory::from_byte(0, expected_byte_length as usize),
             Some(ref data) => {
-                GenericSharedMemory::from_bytes(data.as_slice_safe(no_gc).unwrap_or_default())
+                // The image is cut out of the array when the pixel store parameters place it
+                // inside of it. The parameters that do not fit the image, and an array that is
+                // too small, are an INVALID_OPERATION.
+                let shape = self.tex_image_shape(width, height, 1, false, format, data_type);
+                let bytes = data.as_slice_safe(no_gc).unwrap_or_default();
+                match self.texture_unpack.get().unpack(bytes, shape) {
+                    Some(bytes) => GenericSharedMemory::from_bytes(&bytes),
+                    None => {
+                        self.webgl_error(InvalidOperation);
+                        return Ok(());
+                    },
+                }
             },
         };
 
@@ -4798,14 +4846,27 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             Err(()) => return Ok(()),
         };
 
-        let buff = handle_potential_webgl_error!(
+        let pixels = handle_potential_webgl_error!(
             self,
-            pixels
-                .as_ref()
-                .map(|p| GenericSharedMemory::from_bytes(p.as_slice_safe(no_gc).unwrap_or(&[])))
-                .ok_or(InvalidValue),
+            pixels.as_ref().ok_or(InvalidValue),
             return Ok(())
         );
+
+        // The image is cut out of the array when the pixel store parameters place it inside of
+        // it. The parameters that do not fit the image, and an array that is too small, are an
+        // INVALID_OPERATION.
+        let shape = self.tex_image_shape(width, height, 1, false, format, data_type);
+        let buff = match self
+            .texture_unpack
+            .get()
+            .unpack(pixels.as_slice_safe(no_gc).unwrap_or(&[]), shape)
+        {
+            Some(bytes) => GenericSharedMemory::from_bytes(&bytes),
+            None => {
+                self.webgl_error(InvalidOperation);
+                return Ok(());
+            },
+        };
 
         // From the WebGL spec:
         //

@@ -1057,7 +1057,6 @@ impl WebGL2RenderingContext {
         src_data: &Option<ArrayBufferView>,
         src_offset: u32,
     ) -> Option<TexPixels> {
-        // TODO: If pixel store parameter constraints are not met, generates an INVALID_OPERATION error.
         let unpacking_alignment = self.base.texture_unpacking_alignment();
         let element_size = data_type.element_size();
         let components_per_element = data_type.components_per_element();
@@ -1105,7 +1104,23 @@ impl WebGL2RenderingContext {
                     self.base.webgl_error(InvalidValue);
                     return None;
                 }
-                GenericSharedMemory::from_bytes(&bytes[offset_bytes..])
+                // The images are cut out of the array when the pixel store parameters place them
+                // inside of it. If those constraints are not met, or the array is too small,
+                // that is an INVALID_OPERATION.
+                let shape = self
+                    .base
+                    .tex_image_shape(width, height, depth, true, format, data_type);
+                match self
+                    .base
+                    .texture_unpack()
+                    .unpack(&bytes[offset_bytes..], shape)
+                {
+                    Some(bytes) => GenericSharedMemory::from_bytes(&bytes),
+                    None => {
+                        self.base.webgl_error(InvalidOperation);
+                        return None;
+                    },
+                }
             },
             None => {
                 // Flipping or premultiplying zeroes changes nothing, and the flip works on one
@@ -1208,6 +1223,38 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             },
             constants::SHADING_LANGUAGE_VERSION => {
                 "WebGL GLSL ES 3.00".to_jsval(cx, rval);
+                return;
+            },
+            constants::PACK_ROW_LENGTH => {
+                rval.set(Int32Value(self.texture_pack_row_length.get() as i32));
+                return;
+            },
+            constants::PACK_SKIP_PIXELS => {
+                rval.set(Int32Value(self.texture_pack_skip_pixels.get() as i32));
+                return;
+            },
+            constants::PACK_SKIP_ROWS => {
+                rval.set(Int32Value(self.texture_pack_skip_rows.get() as i32));
+                return;
+            },
+            constants::UNPACK_ROW_LENGTH => {
+                rval.set(Int32Value(self.base.texture_unpack().row_length as i32));
+                return;
+            },
+            constants::UNPACK_IMAGE_HEIGHT => {
+                rval.set(Int32Value(self.base.texture_unpack().image_height as i32));
+                return;
+            },
+            constants::UNPACK_SKIP_PIXELS => {
+                rval.set(Int32Value(self.base.texture_unpack().skip_pixels as i32));
+                return;
+            },
+            constants::UNPACK_SKIP_ROWS => {
+                rval.set(Int32Value(self.base.texture_unpack().skip_rows as i32));
+                return;
+            },
+            constants::UNPACK_SKIP_IMAGES => {
+                rval.set(Int32Value(self.base.texture_unpack().skip_images as i32));
                 return;
             },
             constants::MAX_CLIENT_WAIT_TIMEOUT_WEBGL => {
@@ -2362,12 +2409,19 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             return self.base.webgl_error(InvalidValue);
         }
 
+        let mut unpack = self.base.texture_unpack();
         match param_name {
             constants::PACK_ROW_LENGTH => self.texture_pack_row_length.set(param_value as _),
             constants::PACK_SKIP_PIXELS => self.texture_pack_skip_pixels.set(param_value as _),
             constants::PACK_SKIP_ROWS => self.texture_pack_skip_rows.set(param_value as _),
-            _ => self.base.PixelStorei(param_name, param_value),
+            constants::UNPACK_ROW_LENGTH => unpack.row_length = param_value as u32,
+            constants::UNPACK_IMAGE_HEIGHT => unpack.image_height = param_value as u32,
+            constants::UNPACK_SKIP_PIXELS => unpack.skip_pixels = param_value as u32,
+            constants::UNPACK_SKIP_ROWS => unpack.skip_rows = param_value as u32,
+            constants::UNPACK_SKIP_IMAGES => unpack.skip_images = param_value as u32,
+            _ => return self.base.PixelStorei(param_name, param_value),
         }
+        self.base.set_texture_unpack(unpack);
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
@@ -3690,6 +3744,36 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             Err(_) => return Ok(()),
         };
 
+        // The pixel store parameters have to fit the image, and the buffer has to hold the part of
+        // it that the image reads, which starts at the offset.
+        let unpack = self.base.texture_unpack();
+        let shape = self
+            .base
+            .tex_image_shape(width, height, 1, false, format, data_type);
+        let required = unpack
+            .required_len(shape)
+            .and_then(|required| required.checked_add(pbo_offset as usize));
+        if required.is_none_or(|required| required > pixel_unpack_buffer.capacity()) {
+            self.base.webgl_error(InvalidOperation);
+            return Ok(());
+        }
+
+        // The upload reads the buffer on the GL thread, which applies these parameters itself.
+        // Client-side uploads are cut out here and expect them to be zero there.
+        let unpack_parameters = [
+            (constants::UNPACK_ROW_LENGTH, unpack.row_length),
+            (constants::UNPACK_IMAGE_HEIGHT, unpack.image_height),
+            (constants::UNPACK_SKIP_PIXELS, unpack.skip_pixels),
+            (constants::UNPACK_SKIP_ROWS, unpack.skip_rows),
+            (constants::UNPACK_SKIP_IMAGES, unpack.skip_images),
+        ];
+        if !unpack.is_default() {
+            for (name, value) in unpack_parameters {
+                self.base
+                    .send_command(WebGLCommand::PixelStorei(name, value as i32));
+            }
+        }
+
         self.base.tex_image_2d(
             &texture,
             target,
@@ -3702,6 +3786,12 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             Size2D::new(width, height),
             TexSource::BufferOffset(pbo_offset),
         );
+
+        if !unpack.is_default() {
+            for (name, _) in unpack_parameters {
+                self.base.send_command(WebGLCommand::PixelStorei(name, 0));
+            }
+        }
 
         Ok(())
     }
@@ -3836,8 +3926,24 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             return Ok(());
         }
 
+        // The image is cut out of the array when the pixel store parameters place it inside of
+        // it. The parameters that do not fit the image, and an array that is too small, are an
+        // INVALID_OPERATION.
+        let shape = self
+            .base
+            .tex_image_shape(width, height, 1, false, format, data_type);
         let src_data_slice = src_data.as_slice_safe(no_gc).unwrap_or(&[]);
-        let buff = GenericSharedMemory::from_bytes(&src_data_slice[src_byte_offset..]);
+        let buff = match self
+            .base
+            .texture_unpack()
+            .unpack(&src_data_slice[src_byte_offset..], shape)
+        {
+            Some(bytes) => GenericSharedMemory::from_bytes(&bytes),
+            None => {
+                self.base.webgl_error(InvalidOperation);
+                return Ok(());
+            },
+        };
 
         let expected_byte_length = match self.base.validate_tex_image_2d_data(
             width,
