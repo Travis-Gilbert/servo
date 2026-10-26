@@ -25,6 +25,8 @@ use crate::dom::bindings::reflector::DomGlobal;
 #[cfg(feature = "webxr")]
 use crate::dom::bindings::root::MutNullableDom;
 use crate::dom::bindings::root::{Dom, DomRoot};
+use crate::dom::webgl::extensions::extcolorbufferfloat::EXTColorBufferFloat;
+use crate::dom::webgl::extensions::extcolorbufferhalffloat::EXTColorBufferHalfFloat;
 use crate::dom::webgl::webglobject::WebGLObject;
 use crate::dom::webgl::webglrenderbuffer::WebGLRenderbuffer;
 use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
@@ -303,10 +305,79 @@ impl WebGLFramebuffer {
         Ok((color, depth, stencil))
     }
 
-    fn check_attachment_constraints<'a>(
+    /// Whether a color attachment with this internal format can be rendered to: the formats that
+    /// are color-renderable in OpenGL ES 3.0, and the ones that an extension makes renderable
+    /// once it has been enabled. `EXT_render_snorm` is not implemented, so the normalized
+    /// formats never are.
+    ///
+    /// <https://registry.khronos.org/webgl/specs/latest/2.0/#4.1.5>
+    fn is_color_renderable(&self, format: u32) -> bool {
+        if matches!(
+            format,
+            constants::RGB |
+                constants::RGBA |
+                constants::RGB565 |
+                constants::RGB5_A1 |
+                constants::RGBA4
+        ) {
+            return true;
+        }
+        if self.webgl_version == WebGLVersion::WebGL1 {
+            return false;
+        }
+        if matches!(
+            format,
+            constants::R8 |
+                constants::RG8 |
+                constants::RGB8 |
+                constants::RGBA8 |
+                constants::SRGB8_ALPHA8 |
+                constants::RGB10_A2 |
+                constants::RGB10_A2UI |
+                constants::R8I |
+                constants::R8UI |
+                constants::R16I |
+                constants::R16UI |
+                constants::R32I |
+                constants::R32UI |
+                constants::RG8I |
+                constants::RG8UI |
+                constants::RG16I |
+                constants::RG16UI |
+                constants::RG32I |
+                constants::RG32UI |
+                constants::RGBA8I |
+                constants::RGBA8UI |
+                constants::RGBA16I |
+                constants::RGBA16UI |
+                constants::RGBA32I |
+                constants::RGBA32UI
+        ) {
+            return true;
+        }
+        let Some(context) = self.upcast().context() else {
+            return false;
+        };
+        let extensions = context.extension_manager();
+        let color_buffer_float = extensions.is_enabled::<EXTColorBufferFloat>();
+        let half_float = extensions.is_enabled::<EXTColorBufferHalfFloat>();
+        match format {
+            constants::R16F | constants::RG16F | constants::RGBA16F => {
+                color_buffer_float || half_float
+            },
+            constants::RGB16F => half_float,
+            constants::R32F |
+            constants::RG32F |
+            constants::RGBA32F |
+            constants::R11F_G11F_B10F => color_buffer_float,
+            _ => false,
+        }
+    }
+
+    fn check_attachment_constraints(
         &self,
         attachment: &Option<WebGLFramebufferAttachment>,
-        mut constraints: impl Iterator<Item = &'a u32>,
+        is_allowed: impl Fn(u32) -> bool,
         fb_size: &mut Option<(i32, i32)>,
     ) -> Result<(), u32> {
         // Get the size of this attachment.
@@ -338,7 +409,7 @@ impl WebGLFramebuffer {
         }
 
         if let Some(format) = format &&
-            constraints.all(|c| *c != format)
+            !is_allowed(format)
         {
             return Err(constants::FRAMEBUFFER_INCOMPLETE_ATTACHMENT);
         }
@@ -410,10 +481,12 @@ impl WebGLFramebuffer {
             ][..],
             &[constants::DEPTH_STENCIL][..],
         ];
+        // A texture keeps the sized internal format it was created with, so it can be attached
+        // to DEPTH_STENCIL_ATTACHMENT as DEPTH24_STENCIL8 or DEPTH32F_STENCIL8.
         let webgl2_attachment_constraints = &[
             &[constants::DEPTH_STENCIL][..],
             &[constants::DEPTH_STENCIL][..],
-            &[][..],
+            &[constants::DEPTH24_STENCIL8, constants::DEPTH32F_STENCIL8][..],
         ];
         let empty_attachment_constrains = &[&[][..], &[][..], &[][..]];
         let extra_attachment_constraints = match self.webgl_version {
@@ -426,87 +499,23 @@ impl WebGLFramebuffer {
             .map(|(a, b)| a.iter().chain(b.iter()));
 
         for (attachment, constraints) in attachments.iter().zip(attachment_constraints) {
-            if let Err(errnum) =
-                self.check_attachment_constraints(attachment, constraints, &mut fb_size)
-            {
+            if let Err(errnum) = self.check_attachment_constraints(
+                attachment,
+                |format| constraints.clone().any(|allowed| *allowed == format),
+                &mut fb_size,
+            ) {
                 return self.status.set(errnum);
             }
         }
 
-        let webgl1_color_constraints = &[
-            constants::RGB,
-            constants::RGB565,
-            constants::RGB5_A1,
-            constants::RGBA,
-            constants::RGBA4,
-        ][..];
-        let webgl2_color_constraints = &[
-            constants::ALPHA,
-            constants::LUMINANCE,
-            constants::LUMINANCE_ALPHA,
-            constants::R11F_G11F_B10F,
-            constants::R16F,
-            constants::R16I,
-            constants::R16UI,
-            constants::R32F,
-            constants::R32I,
-            constants::R32UI,
-            constants::R8,
-            constants::R8_SNORM,
-            constants::R8I,
-            constants::R8UI,
-            constants::RG16F,
-            constants::RG16I,
-            constants::RG16UI,
-            constants::RG32F,
-            constants::RG32I,
-            constants::RG32UI,
-            constants::RG8,
-            constants::RG8_SNORM,
-            constants::RG8I,
-            constants::RG8UI,
-            constants::RGB10_A2,
-            constants::RGB10_A2UI,
-            constants::RGB16F,
-            constants::RGB16I,
-            constants::RGB16UI,
-            constants::RGB32F,
-            constants::RGB32I,
-            constants::RGB32UI,
-            constants::RGB8,
-            constants::RGB8_SNORM,
-            constants::RGB8I,
-            constants::RGB8UI,
-            constants::RGB9_E5,
-            constants::RGBA16F,
-            constants::RGBA16I,
-            constants::RGBA16UI,
-            constants::RGBA32F,
-            constants::RGBA32I,
-            constants::RGBA32UI,
-            constants::RGBA8,
-            constants::RGBA8_SNORM,
-            constants::RGBA8I,
-            constants::RGBA8UI,
-            constants::SRGB8,
-            constants::SRGB8_ALPHA8,
-        ][..];
-        let empty_color_constrains = &[][..];
-        let extra_color_constraints = match self.webgl_version {
-            WebGLVersion::WebGL1 => empty_color_constrains,
-            WebGLVersion::WebGL2 => webgl2_color_constraints,
-        };
-        let color_constraints = webgl1_color_constraints
-            .iter()
-            .chain(extra_color_constraints.iter());
-
         let has_c = self.colors.iter().any(|att| att.borrow().is_some());
         for attachment in self.colors.iter() {
             let attachment = attachment.borrow();
-            let constraints = color_constraints.clone();
-            if let Err(errnum) =
-                self.check_attachment_constraints(&attachment, constraints, &mut fb_size)
-            {
+            if let Err(errnum) = self.check_attachment_constraints(
+                &attachment,
+                |format| self.is_color_renderable(format),
+                &mut fb_size,
+            ) {
                 return self.status.set(errnum);
             }
         }
@@ -536,6 +545,11 @@ impl WebGLFramebuffer {
             } else {
                 constants::FRAMEBUFFER_COMPLETE
             };
+        }
+
+        // Enabling an extension can make an attachment renderable after it was attached.
+        if self.status.get() == constants::FRAMEBUFFER_INCOMPLETE_ATTACHMENT {
+            self.update_status();
         }
 
         self.status.get()
