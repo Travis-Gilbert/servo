@@ -864,22 +864,23 @@ impl WebGLFramebuffer {
 
         let tex_id = match texture {
             Some(texture) => {
-                let (max_level, max_layer) = match texture.target() {
+                // Only the textures made of layers have one to attach.
+                let (max_level, max_layers) = match texture.target() {
                     Some(constants::TEXTURE_3D) => (
                         context.limits().max_3d_texture_size.ilog2(),
-                        context.limits().max_3d_texture_size - 1,
+                        context.limits().max_3d_texture_size,
                     ),
-                    Some(constants::TEXTURE_2D) => (
+                    Some(constants::TEXTURE_2D_ARRAY) => (
                         context.limits().max_tex_size.ilog2(),
-                        context.limits().max_array_texture_layers - 1,
+                        context.limits().max_array_texture_layers,
                     ),
                     _ => return Err(WebGLError::InvalidOperation),
                 };
 
-                if level < 0 || level as u32 >= max_level {
+                if level < 0 || level as u32 > max_level {
                     return Err(WebGLError::InvalidValue);
                 }
-                if layer < 0 || layer as u32 >= max_layer {
+                if layer < 0 || layer as u32 >= max_layers {
                     return Err(WebGLError::InvalidValue);
                 }
 
@@ -901,6 +902,13 @@ impl WebGLFramebuffer {
             level,
             layer,
         ));
+
+        if texture.is_none() {
+            self.detach_binding(binding, attachment)?;
+        }
+
+        self.update_status();
+        self.is_initialized.set(false);
         Ok(())
     }
 
