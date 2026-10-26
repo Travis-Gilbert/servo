@@ -1196,7 +1196,11 @@ impl TexFormat {
                 TexFormat::RGB |
                 TexFormat::RGBA |
                 TexFormat::Luminance |
-                TexFormat::LuminanceAlpha
+                TexFormat::LuminanceAlpha |
+                TexFormat::RedInteger |
+                TexFormat::RGInteger |
+                TexFormat::RGBInteger |
+                TexFormat::RGBAInteger
         )
     }
 
@@ -1564,4 +1568,23 @@ pub struct GLLimits {
     pub max_texture_lod_bias: f32,
     pub max_varying_components: u32,
     pub max_vertex_output_components: u32,
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::TexFormat;
+
+    #[test]
+    fn integer_external_formats_are_unsized() {
+        for format in [
+            TexFormat::RedInteger,
+            TexFormat::RGInteger,
+            TexFormat::RGBInteger,
+            TexFormat::RGBAInteger,
+        ] {
+            assert!(!format.is_sized());
+            assert!(!format.usable_as_internal());
+        }
+        assert!(TexFormat::RGBA32ui.is_sized());
+    }
 }

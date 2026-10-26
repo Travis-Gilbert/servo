@@ -1,0 +1,78 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WebGL texture levels, storage sizes and source offsets cannot overflow</title>
+<link rel="help" href="https://registry.khronos.org/webgl/specs/latest/2.0/#3.7.6">
+<script src="/resources/testharness.js"></script>
+<script src="/resources/testharnessreport.js"></script>
+<script>
+function context(version = "webgl2") {
+  const gl = document.createElement("canvas").getContext(version);
+  assert_implements(gl, version);
+  return gl;
+}
+for (const version of ["webgl", "webgl2"]) {
+  test(() => {
+    const gl = context(version);
+    gl.bindTexture(gl.TEXTURE_2D, gl.createTexture());
+    for (const level of [-2147483648, -1, 32, 33, 2147483647]) {
+      gl.texImage2D(gl.TEXTURE_2D, level, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      assert_equals(gl.getError(), gl.INVALID_VALUE, `level ${level}`);
+    }
+  }, `${version}: signed and overflowing 2D mip levels`);
+}
+test(() => {
+  const gl = context();
+  gl.bindTexture(gl.TEXTURE_3D, gl.createTexture());
+  for (const level of [-2147483648, -1, 32, 33, 2147483647]) {
+    gl.texImage3D(gl.TEXTURE_3D, level, gl.RGBA8, 1, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    assert_equals(gl.getError(), gl.INVALID_VALUE, `texImage3D ${level}`);
+    gl.texSubImage3D(gl.TEXTURE_3D, level, 0, 0, 0, 1, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+    assert_equals(gl.getError(), gl.INVALID_VALUE, `texSubImage3D ${level}`);
+    gl.copyTexSubImage3D(gl.TEXTURE_3D, level, 0, 0, 0, 0, 0, 1, 1);
+    assert_equals(gl.getError(), gl.INVALID_VALUE, `copyTexSubImage3D ${level}`);
+  }
+}, "All 3D entry points reject overflowing levels without crashing");
+test(() => {
+  const gl = context();
+  gl.bindTexture(gl.TEXTURE_3D, gl.createTexture());
+  const limit = gl.getParameter(gl.MAX_3D_TEXTURE_SIZE);
+  gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA8, limit + 1, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  assert_equals(gl.getError(), gl.INVALID_VALUE);
+  // A short array must be refused without allocating a multi-gigabyte zero buffer.
+  if (limit >= 2048) {
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA8, 2048, 2048, 2048, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(0));
+    assert_equals(gl.getError(), gl.INVALID_OPERATION);
+  }
+}, "Volume sizes cannot wrap into small source buffers");
+test(() => {
+  const gl = context();
+  gl.bindTexture(gl.TEXTURE_2D_ARRAY, gl.createTexture());
+  gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 3, gl.RGBA8, 2, 2, 8);
+  assert_equals(gl.getError(), gl.INVALID_OPERATION, "array layers do not add levels");
+  gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 2, gl.RGBA8, 2, 2, 8);
+  assert_equals(gl.getError(), gl.NO_ERROR);
+  gl.bindTexture(gl.TEXTURE_3D, gl.createTexture());
+  gl.texStorage3D(gl.TEXTURE_3D, 4, gl.RGBA8, 2, 2, 8);
+  assert_equals(gl.getError(), gl.NO_ERROR, "3D depth adds levels");
+}, "texStorage3D counts array and 3D mip levels differently");
+test(() => {
+  const gl = context();
+  gl.bindTexture(gl.TEXTURE_2D, gl.createTexture());
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32UI, 1, 1, 0, gl.RGBA_INTEGER, gl.UNSIGNED_INT, new Uint32Array(4));
+  assert_equals(gl.getError(), gl.NO_ERROR);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 1, 1, gl.RGBA_INTEGER, gl.UNSIGNED_INT, new Uint32Array(4));
+  assert_equals(gl.getError(), gl.NO_ERROR, "integer external formats are unsized");
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32UI, 1, 1, 0, gl.RGBA_INTEGER, gl.UNSIGNED_INT, new Uint32Array(4), 0xffffffff);
+  assert_equals(gl.getError(), gl.INVALID_OPERATION, "offset must not wrap on 32-bit hosts");
+  const data = new Uint32Array(4);
+  structuredClone(data.buffer, {transfer: [data.buffer]});
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32UI, 1, 1, 0, gl.RGBA_INTEGER, gl.UNSIGNED_INT, data, 1);
+  assert_equals(gl.getError(), gl.INVALID_OPERATION, "detached source and nonzero offset");
+  gl.bindTexture(gl.TEXTURE_3D, gl.createTexture());
+  gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA32UI, 1, 1, 1, 0, gl.RGBA_INTEGER, gl.UNSIGNED_INT, null);
+  gl.texSubImage3D(gl.TEXTURE_3D, 0, 0, 0, 0, 1, 1, 1, gl.RGBA_INTEGER, gl.UNSIGNED_INT, new Uint32Array(4), 0xffffffff);
+  assert_equals(gl.getError(), gl.INVALID_OPERATION);
+  gl.clearBufferfv(gl.COLOR, 0, new Float32Array(4), 0xffffffff);
+  assert_equals(gl.getError(), gl.INVALID_VALUE, "clearBuffer uses INVALID_VALUE");
+}, "Integer texture uploads and source offset errors");
+</script>
