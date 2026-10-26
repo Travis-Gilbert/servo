@@ -253,6 +253,11 @@ impl WebGL2RenderingContext {
         }
 
         let global = unsafe { GlobalScope::from_object(global.get()) };
+        // Pages of the protocols that the embedder lists, such as the ones it serves itself.
+        if servo_config::prefs::get().webgl2_enabled_for_scheme(global.get_url().scheme()) {
+            return true;
+        }
+
         let origin = global.origin();
         let host = origin.host();
         WEBGL2_ORIGINS
@@ -262,7 +267,8 @@ impl WebGL2RenderingContext {
 }
 
 /// List of domains for which WebGL 2 is enabled automatically, regardless
-/// of the status of the dom.webgl2.enabled preference.
+/// of the status of the dom.webgl2.enabled preference. The URL schemes in
+/// dom.webgl2.enabled.schemes are enabled the same way.
 static WEBGL2_ORIGINS: &[&str] = &["www.servoexperiments.com"];
 
 impl WebGL2RenderingContext {

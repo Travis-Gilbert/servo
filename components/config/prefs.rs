@@ -224,6 +224,10 @@ pub struct Preferences {
     /// Enable WebGL2 APIs.
     // feature: WebGL2 | #41394 | Web/API/WebGL2RenderingContext
     pub dom_webgl2_enabled: bool,
+    /// The URL schemes of the pages that get WebGL2 APIs although `dom_webgl2_enabled` is off, as
+    /// a comma-separated list such as `frame-notes`. An embedder sets it for the pages of its own
+    /// protocols, so that WebGL2 stays off for web content.
+    pub dom_webgl2_enabled_schemes: String,
     // feature: WebRTC | #41396 | Web/API/WebRTC_API
     pub dom_webrtc_enabled: bool,
     // feature: WebRTC Transceiver | #41396 | Web/API/RTCRtpTransceiver
@@ -495,6 +499,7 @@ impl Preferences {
             dom_transient_activation_duration_ms: 5000,
             dom_web_animations_enabled: false,
             dom_webgl2_enabled: false,
+            dom_webgl2_enabled_schemes: String::new(),
             dom_webgpu_enabled: false,
             dom_webgpu_wgpu_backend: String::new(),
             dom_webrtc_enabled: false,
@@ -616,6 +621,15 @@ impl Preferences {
         }
     }
 
+    /// Whether a page whose URL has this scheme is given WebGL2 although `dom_webgl2_enabled` is
+    /// off, because `dom_webgl2_enabled_schemes` lists the scheme.
+    pub fn webgl2_enabled_for_scheme(&self, scheme: &str) -> bool {
+        self.dom_webgl2_enabled_schemes
+            .split(',')
+            .map(str::trim)
+            .any(|allowed| !allowed.is_empty() && allowed.eq_ignore_ascii_case(scheme))
+    }
+
     /// The amount of time that a half cycle of a text caret blink takes. If blinking is disabled
     /// this returns `None`.
     pub fn editing_caret_blink_time(&self) -> Option<Duration> {
@@ -710,6 +724,25 @@ impl UserAgentPlatform {
 #[cfg(test)]
 mod tests {
     use super::{Preferences, get, set};
+
+    #[test]
+    fn webgl2_is_enabled_for_the_listed_schemes_only() {
+        let mut preferences = Preferences::default();
+        assert!(!preferences.webgl2_enabled_for_scheme("frame-notes"));
+        assert!(!preferences.webgl2_enabled_for_scheme(""));
+
+        preferences.dom_webgl2_enabled_schemes = "frame-notes, other".to_owned();
+        assert!(preferences.webgl2_enabled_for_scheme("frame-notes"));
+        assert!(preferences.webgl2_enabled_for_scheme("other"));
+        assert!(preferences.webgl2_enabled_for_scheme("FRAME-NOTES"));
+        assert!(!preferences.webgl2_enabled_for_scheme("https"));
+        assert!(!preferences.webgl2_enabled_for_scheme("frame"));
+        assert!(!preferences.webgl2_enabled_for_scheme("frame-notes-2"));
+
+        // An empty entry does not match the empty scheme.
+        preferences.dom_webgl2_enabled_schemes = "frame-notes,,".to_owned();
+        assert!(!preferences.webgl2_enabled_for_scheme(""));
+    }
 
     #[test]
     fn relational_selector_preference_reaches_stylo() {

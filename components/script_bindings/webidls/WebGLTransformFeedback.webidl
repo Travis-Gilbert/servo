@@ -7,6 +7,6 @@
 // https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.15
 //
 
-[Exposed=(Window), Pref="dom_webgl2_enabled"]
+[Exposed=(Window), Func="WebGL2RenderingContext::is_webgl2_enabled"]
 interface WebGLTransformFeedback : WebGLObject {
 };
