@@ -290,6 +290,8 @@ impl WebGL2RenderingContext {
             return true;
         }
 
+        // Keep the WebGL2 object interfaces exposed wherever the context is exposed,
+        // including the existing origin allowlist when both prefs are at their defaults.
         let origin = global.origin();
         let host = origin.host();
         WEBGL2_ORIGINS
