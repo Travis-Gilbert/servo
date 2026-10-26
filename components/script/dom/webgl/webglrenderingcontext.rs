@@ -1594,6 +1594,23 @@ impl WebGLRenderingContext {
         &self.bound_read_framebuffer
     }
 
+    /// The type WebGL 1 `readPixels` takes with RGBA: FLOAT from a floating-point color buffer,
+    /// UNSIGNED_BYTE from any other. Each is invalid for the other kind of buffer. WebGL 1 binds
+    /// one framebuffer, kept in the draw slot, and reads its first color attachment.
+    /// <https://registry.khronos.org/webgl/extensions/WEBGL_color_buffer_float/>
+    /// <https://registry.khronos.org/webgl/extensions/EXT_color_buffer_half_float/>
+    fn read_pixels_type(&self) -> u32 {
+        let floating_point = self
+            .bound_draw_framebuffer
+            .get()
+            .is_some_and(|fb| fb.attachment_is_floating_point(constants::COLOR_ATTACHMENT0));
+        if floating_point {
+            constants::FLOAT
+        } else {
+            constants::UNSIGNED_BYTE
+        }
+    }
+
     pub(crate) fn validate_new_framebuffer_binding(
         &self,
         framebuffer: Option<&WebGLFramebuffer>,
@@ -2308,11 +2325,8 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
                 vao.to_jsval(cx, retval);
                 return;
             },
-            // In readPixels we currently support RGBA/UBYTE only.  If
-            // we wanted to support other formats, we could ask the
-            // driver, but we would need to check for
-            // GL_OES_read_format support (assuming an underlying GLES
-            // driver. Desktop is happy to format convert for us).
+            // readPixels takes RGBA only, with the type `read_pixels_type` gives. Other
+            // formats would need GL_OES_read_format on an underlying GLES driver.
             constants::IMPLEMENTATION_COLOR_READ_FORMAT => {
                 if self.validate_framebuffer().is_err() {
                     self.webgl_error(InvalidOperation);
@@ -2325,7 +2339,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
                     self.webgl_error(InvalidOperation);
                     return retval.set(NullValue());
                 }
-                return retval.set(Int32Value(constants::UNSIGNED_BYTE as i32));
+                return retval.set(Int32Value(self.read_pixels_type() as i32));
             },
             constants::COMPRESSED_TEXTURE_FORMATS => {
                 let format_ids = self.extension_manager.get_tex_compression_ids();
@@ -3960,11 +3974,17 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             return self.webgl_error(InvalidValue);
         }
 
-        if format != constants::RGBA || pixel_type != constants::UNSIGNED_BYTE {
+        let read_type = self.read_pixels_type();
+        if format != constants::RGBA || pixel_type != read_type {
             return self.webgl_error(InvalidOperation);
         }
 
-        if pixels.get_array_type() != Type::Uint8 {
+        let (array_type, bytes_per_pixel) = if read_type == constants::FLOAT {
+            (Type::Float32, 16)
+        } else {
+            (Type::Uint8, 4)
+        };
+        if pixels.get_array_type() != array_type {
             return self.webgl_error(InvalidOperation);
         }
 
@@ -3977,8 +3997,6 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         if width == 0 || height == 0 {
             return;
         }
-
-        let bytes_per_pixel = 4;
 
         let row_len = handle_potential_webgl_error!(
             self,

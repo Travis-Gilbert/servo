@@ -13,7 +13,7 @@ use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_dom_object;
 use script_bindings::weakref::WeakRef;
 use servo_canvas_traits::webgl::{
-    WebGLCommand, WebGLError, WebGLFramebufferBindingRequest, WebGLFramebufferId,
+    TexDataType, WebGLCommand, WebGLError, WebGLFramebufferBindingRequest, WebGLFramebufferId,
     WebGLRenderbufferId, WebGLResult, WebGLTextureId, WebGLVersion, webgl_channel,
 };
 #[cfg(feature = "webxr")]
@@ -756,6 +756,27 @@ impl WebGLFramebuffer {
             WebGLFramebufferAttachment::Texture { texture, level } => texture
                 .image_info_at_face(0, *level as u32)
                 .map(|info| info.internal_format().as_gl_constant()),
+        }
+    }
+
+    /// Whether the image attached at `attachment` holds floating-point color. A WebGL 1 float
+    /// texture keeps an unsized format, so its data type decides.
+    pub(crate) fn attachment_is_floating_point(&self, attachment: u32) -> bool {
+        let Some(binding) = self.attachment_binding(attachment) else {
+            return false;
+        };
+        match binding.borrow().as_ref() {
+            Some(WebGLFramebufferAttachment::Renderbuffer(rb)) => matches!(
+                rb.internal_format(),
+                constants::RGBA32F | constants::RGB32F | constants::RGBA16F | constants::RGB16F
+            ),
+            Some(WebGLFramebufferAttachment::Texture { texture, level }) => texture
+                .image_info_at_face(0, *level as u32)
+                .and_then(|info| info.data_type())
+                .is_some_and(|data_type| {
+                    matches!(data_type, TexDataType::Float | TexDataType::HalfFloat)
+                }),
+            None => false,
         }
     }
 
