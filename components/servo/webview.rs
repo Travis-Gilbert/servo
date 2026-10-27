@@ -261,9 +261,13 @@ impl WebView {
 
     pub(crate) fn request_create_new(
         &self,
+        url: Url,
+        action: embedder_traits::NavigationAction,
         response_sender: GenericSender<Option<NewWebViewDetails>>,
     ) {
         let request = CreateNewWebViewRequest {
+            url,
+            action,
             storage_partition: self.storage_partition(),
             servo: self.servo(),
             responder: AutomaticResponder::new(response_sender, None),

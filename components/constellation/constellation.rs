@@ -3852,6 +3852,8 @@ where
     #[servo_tracing::instrument(skip_all)]
     fn handle_script_new_auxiliary(&mut self, load_info: AuxiliaryWebViewCreationRequest) {
         let AuxiliaryWebViewCreationRequest {
+            navigation_url,
+            navigation_action,
             load_data,
             opener_webview_id,
             opener_pipeline_id,
@@ -3867,6 +3869,8 @@ where
         self.constellation_to_embedder_proxy
             .send(ConstellationToEmbedderMsg::AllowOpeningWebView(
                 opener_webview_id,
+                navigation_url,
+                navigation_action,
                 webview_id_sender,
             ));
         // The embedder may register a partition from its popup callback. Keep
@@ -4337,12 +4341,17 @@ where
             // cares about a navigation that follows it.
             self.handle_allow_navigation_response(source_id, true);
         } else {
+            let is_main_frame = self.pipelines.get(&source_id).is_some_and(|pipeline| {
+                pipeline.browsing_context_id == BrowsingContextId::from(webview_id)
+            });
+            let action = load_data.navigation_action(is_main_frame);
             // Allow the embedder to handle the url itself
             self.constellation_to_embedder_proxy.send(
                 ConstellationToEmbedderMsg::AllowNavigationRequest(
                     webview_id,
                     source_id,
                     load_data.url,
+                    action,
                 ),
             );
         }

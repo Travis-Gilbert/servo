@@ -86,6 +86,10 @@ pub(crate) struct MouseEvent {
 }
 
 impl MouseEvent {
+    pub(crate) fn modifiers(&self) -> Modifiers {
+        self.modifiers.get()
+    }
+
     pub(crate) fn new_inherited() -> MouseEvent {
         MouseEvent {
             uievent: UIEvent::new_inherited(),

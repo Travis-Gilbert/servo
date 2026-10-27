@@ -341,6 +341,7 @@ impl WindowProxy {
         cx: &mut JSContext,
         name: DOMString,
         noopener: bool,
+        navigation: Option<&LoadData>,
     ) -> Option<DomRoot<WindowProxy>> {
         let (response_sender, response_receiver) = generic_channel::channel().unwrap();
         let window = self
@@ -397,7 +398,10 @@ impl WindowProxy {
             sandboxing_flag_set,
         );
         load_data.is_initial_about_blank = true;
+        let navigation = navigation.unwrap_or(&load_data);
         let load_info = AuxiliaryWebViewCreationRequest {
+            navigation_url: navigation.url.clone(),
+            navigation_action: navigation.navigation_action(true),
             load_data: load_data.clone(),
             opener_webview_id: window.webview_id(),
             opener_pipeline_id: self.currently_active.get().unwrap(),
@@ -599,10 +603,17 @@ impl WindowProxy {
         // Let targetNavigable and windowType be the result of applying the rules for
         // choosing a navigable given target, sourceDocument's node navigable, and noopener.
         // If targetNavigable is null, then return null.
-        let (chosen, new) = match self.choose_a_navigable(cx, non_empty_target, noopener) {
-            (Some(chosen), new) => (chosen, new),
-            (None, _) => return Ok(None),
-        };
+        let navigation = source_document.window().load_data_for_document(
+            url_record
+                .clone()
+                .unwrap_or_else(|| ServoUrl::parse("about:blank").unwrap()),
+            source_document.pipeline_id(),
+        );
+        let (chosen, new) =
+            match self.choose_a_navigable(cx, non_empty_target, noopener, &navigation) {
+                (Some(chosen), new) => (chosen, new),
+                (None, _) => return Ok(None),
+            };
         // TODO Step 15.2, Set up browsing context features for targetNavigable's
         // active browsing context given tokenizedFeatures.
         let Some(target_document) = chosen.document() else {
@@ -686,6 +697,7 @@ impl WindowProxy {
         cx: &mut JSContext,
         name: DOMString,
         noopener: bool,
+        navigation: &LoadData,
     ) -> (Option<DomRoot<WindowProxy>>, bool) {
         // Step 1. Let chosen be null.
         // Step 2. Let windowType be "existing or none".
@@ -755,7 +767,7 @@ impl WindowProxy {
         // TODO: Integrate `create_auxiliary_browsing_context` here and have it follow the spec.
         else {
             (
-                self.create_auxiliary_browsing_context(cx, name, noopener),
+                self.create_auxiliary_browsing_context(cx, name, noopener, Some(navigation)),
                 true,
             )
         }
@@ -1108,10 +1120,13 @@ impl WindowProxy {
             } else {
                 existing_document.global().get_referrer()
             };
+            let mut load_data = existing_document
+                .window()
+                .load_data_for_document(url, existing_document.pipeline_id());
+            load_data.referrer = referrer;
             chosen.navigate_from_other_thread(
                 &existing_document,
-                url,
-                referrer,
+                load_data,
                 NavigationHistoryBehavior::Push,
             );
         }
@@ -1129,22 +1144,20 @@ impl WindowProxy {
     pub(crate) fn navigate_from_other_thread(
         &self,
         source_document: &Document,
-        url: ServoUrl,
-        referrer: Referrer,
+        load_data: LoadData,
         history_handling: NavigationHistoryBehavior,
     ) {
-        let load_data = LoadData::new(
-            LoadOrigin::Script(source_document.origin().snapshot()),
-            url,
-            None,
-            Some(source_document.window().pipeline_id()),
-            referrer,
-            source_document.get_referrer_policy(),
-            None,
-            None,
-            false,
-            SandboxingFlagSet::empty(),
-        );
+        // The destination document is unavailable here. Keep the existing remote
+        // navigation defaults while retaining the request and activation snapshot.
+        let load_data = LoadData {
+            about_base_url: None,
+            referrer_policy: source_document.get_referrer_policy(),
+            inherited_secure_context: None,
+            inherited_insecure_requests_policy: None,
+            has_trustworthy_ancestor_origin: false,
+            creation_sandboxing_flag_set: SandboxingFlagSet::empty(),
+            ..load_data
+        };
         source_document.window().send_to_constellation(
             ScriptToConstellationMessage::LoadUrlInBrowsingContext(
                 self.browsing_context_id,
@@ -1178,7 +1191,7 @@ impl WindowProxy {
                 (Some(DomRoot::from_ref(self.top())), false)
             },
             "_blank" => (
-                self.create_auxiliary_browsing_context(cx, name, noopener),
+                self.create_auxiliary_browsing_context(cx, name, noopener, None),
                 true,
             ),
             _ => {
@@ -1196,7 +1209,7 @@ impl WindowProxy {
                 match found {
                     Some(proxy) => (Some(proxy), false),
                     None => (
-                        self.create_auxiliary_browsing_context(cx, name, noopener),
+                        self.create_auxiliary_browsing_context(cx, name, noopener, None),
                         true,
                     ),
                 }

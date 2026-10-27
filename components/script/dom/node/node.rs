@@ -624,6 +624,16 @@ impl Node {
         cx: &mut JSContext,
         event_type: Atom,
     ) {
+        self.fire_synthetic_pointer_event(cx, event_type, Modifiers::empty(), false);
+    }
+
+    pub(crate) fn fire_synthetic_pointer_event(
+        &self,
+        cx: &mut JSContext,
+        event_type: Atom,
+        modifiers: Modifiers,
+        trusted: bool,
+    ) {
         // Spec says the choice of which global to create the pointer event
         // on is not well-defined,
         // and refers to heycam/webidl#135
@@ -641,7 +651,7 @@ impl Node {
             Point2D::zero(),                    // coordinates uninitialized
             Point2D::zero(),                    // coordinates uninitialized
             Point2D::zero(),                    // coordinates uninitialized
-            Modifiers::empty(),                 // empty modifiers
+            modifiers,                          // activating event modifiers
             MouseButton::Primary,               // button, primary mouse button
             MouseButtons::empty(),              // buttons
             None,                               // related_target
@@ -665,10 +675,11 @@ impl Node {
         // Step 4. Set event's composed flag.
         pointer_event.upcast::<Event>().set_composed(true);
 
-        // Step 5. If the not trusted flag is set, initialize event's isTrusted attribute to false.
-        pointer_event.upcast::<Event>().set_trusted(false);
+        // Step 5. Preserve the initiating event's trust for user-agent activation;
+        // HTMLElement.click() and script-generated events remain untrusted.
+        pointer_event.upcast::<Event>().set_trusted(trusted);
 
-        // Step 6,8. TODO keyboard modifiers
+        // Steps 6 and 8: carry the activating event's keyboard modifiers.
 
         pointer_event
             .upcast::<Event>()

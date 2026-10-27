@@ -47,7 +47,7 @@ impl SpecificInputActivationType for SubmitInputActivation {
         &self,
         cx: &mut JSContext,
         input: &HTMLInputElement,
-        _event: &Event,
+        event: &Event,
         _target: &EventTarget,
     ) {
         // Step 1: If the element does not have a form owner, then return.
@@ -65,6 +65,7 @@ impl SpecificInputActivationType for SubmitInputActivation {
                 cx,
                 SubmittedFrom::NotFromForm,
                 FormSubmitterElement::Input(input),
+                event.modifiers(),
             )
         }
     }

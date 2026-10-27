@@ -995,10 +995,12 @@ impl ServoInner {
                 webview_id,
                 pipeline_id,
                 servo_url,
+                action,
             ) => {
                 if let Some(webview) = self.get_webview_handle(webview_id) {
                     let request = NavigationRequest {
                         url: servo_url.into_url(),
+                        action,
                         pipeline_id,
                         constellation_proxy: self.constellation_proxy.clone(),
                         response_sent: false,
@@ -1006,9 +1008,14 @@ impl ServoInner {
                     webview.delegate().request_navigation(webview, request);
                 }
             },
-            ConstellationToEmbedderMsg::AllowOpeningWebView(webview_id, response_sender) => {
+            ConstellationToEmbedderMsg::AllowOpeningWebView(
+                webview_id,
+                url,
+                action,
+                response_sender,
+            ) => {
                 if let Some(webview) = self.get_webview_handle(webview_id) {
-                    webview.request_create_new(response_sender);
+                    webview.request_create_new(url.into_url(), action, response_sender);
                 }
             },
             ConstellationToEmbedderMsg::WebViewClosed(webview_id) => {

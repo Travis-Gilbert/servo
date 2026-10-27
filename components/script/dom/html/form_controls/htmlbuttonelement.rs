@@ -499,6 +499,7 @@ impl Activatable for HTMLButtonElement {
                     cx,
                     SubmittedFrom::NotFromForm,
                     FormSubmitterElement::Button(self),
+                    event.modifiers(),
                 );
                 return;
             }

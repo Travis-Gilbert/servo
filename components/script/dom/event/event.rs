@@ -11,7 +11,7 @@ use dom_struct::dom_struct;
 use embedder_traits::InputEventResult;
 use js::context::JSContext;
 use js::rust::HandleObject;
-use keyboard_types::{Key, NamedKey};
+use keyboard_types::{Key, Modifiers, NamedKey};
 use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericBindings::PointerEventBinding::PointerEventMethods;
 use script_bindings::match_domstring_ascii;
@@ -121,6 +121,17 @@ pub(crate) struct EventPathSegment {
 }
 
 impl Event {
+    /// Snapshot the modifier keys from an activation's mouse or keyboard event.
+    pub(crate) fn modifiers(&self) -> Modifiers {
+        if let Some(event) = self.downcast::<MouseEvent>() {
+            event.modifiers()
+        } else if let Some(event) = self.downcast::<KeyboardEvent>() {
+            event.modifiers()
+        } else {
+            Modifiers::empty()
+        }
+    }
+
     pub(crate) fn new_inherited() -> Event {
         Event {
             reflector_: Reflector::new(),

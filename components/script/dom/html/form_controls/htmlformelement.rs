@@ -7,12 +7,14 @@ use std::cell::Cell;
 
 use content_security_policy::sandboxing_directive::SandboxingFlagSet;
 use dom_struct::dom_struct;
+use embedder_traits::NavigationType;
 use encoding_rs::{Encoding, UTF_8};
 use headers::{ContentType, HeaderMapExt};
 use html5ever::{LocalName, Prefix, local_name};
 use http::Method;
 use js::context::{JSContext, NoGC};
 use js::rust::HandleObject;
+use keyboard_types::Modifiers;
 use mime::{self, Mime};
 use net_traits::request::Referrer;
 use rand::random;
@@ -298,6 +300,7 @@ impl HTMLFormElementMethods<crate::DomTypeHolder> for HTMLFormElement {
             cx,
             SubmittedFrom::FromForm,
             FormSubmitterElement::Form(self),
+            Modifiers::empty(),
         );
     }
 
@@ -360,7 +363,12 @@ impl HTMLFormElementMethods<crate::DomTypeHolder> for HTMLFormElement {
             },
         };
         // Step 3
-        self.submit(cx, SubmittedFrom::NotFromForm, submitter);
+        self.submit(
+            cx,
+            SubmittedFrom::NotFromForm,
+            submitter,
+            Modifiers::empty(),
+        );
         Ok(())
     }
 
@@ -726,6 +734,7 @@ impl HTMLFormElement {
         cx: &mut JSContext,
         submit_method_flag: SubmittedFrom,
         submitter: FormSubmitterElement,
+        modifiers: Modifiers,
     ) {
         // Step 1
         if self.upcast::<Element>().cannot_navigate() {
@@ -858,11 +867,20 @@ impl HTMLFormElement {
         // parsed action, and target.
         let noopener = self.relations.get().get_element_noopener(target.as_ref());
 
+        let mut navigation = doc
+            .window()
+            .load_data_for_document(action_components.clone(), doc.pipeline_id());
+        navigation.navigation_type = NavigationType::FormSubmitted;
+        navigation.modifiers = modifiers;
+        if matches!((&*scheme, method), ("http" | "https", FormMethod::Post)) {
+            navigation.method = Method::POST;
+        }
+
         // Step 22. Let targetNavigable be the first return value of applying the rules
         // for choosing a navigable given target, form's node navigable, and noopener.
         let Some(chosen) = doc.browsing_context().and_then(|source| {
             source
-                .choose_a_navigable(cx, target.unwrap_or_default(), noopener)
+                .choose_a_navigable(cx, target.unwrap_or_default(), noopener, &navigation)
                 .0
         }) else {
             // Step 23. If targetNavigable is null, then return.
@@ -895,6 +913,9 @@ impl HTMLFormElement {
             target_document.has_trustworthy_ancestor_origin(),
             target_document.creation_sandboxing_flag_set_considering_parent_iframe(),
         );
+
+        load_data.navigation_type = navigation.navigation_type;
+        load_data.modifiers = navigation.modifiers;
 
         // Step 26. Select the appropriate row in the table below based on scheme as given by the first cell of each row.
         // Then, select the appropriate cell on that row based on method as given in the first cell of each column.

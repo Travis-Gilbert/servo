@@ -12,7 +12,7 @@ use std::rc::Rc;
 use content_security_policy::sandboxing_directive::SandboxingFlagSet;
 use crossbeam_channel::Sender;
 use embedder_traits::user_contents::UserContentManagerId;
-use embedder_traits::{ViewportDetails, WebDriverLoadStatus};
+use embedder_traits::{NavigationType, ViewportDetails, WebDriverLoadStatus};
 use http::header;
 use js::context::JSContext;
 use net_traits::blob_url_store::UrlWithBlobClaim;
@@ -382,6 +382,7 @@ pub(crate) fn navigate(
     if force_reload {
         // Step 7. If entry's document state's reload pending is true, then set request's reload-navigation flag.
         load_data.reload_navigation = true;
+        load_data.navigation_type = NavigationType::Reload;
     }
 
     // Step 3. Let initiatorOriginSnapshot be sourceDocument's origin.

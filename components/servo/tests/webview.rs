@@ -2087,3 +2087,480 @@ fn test_ephemeral_apis_and_shutdown_leave_configured_profile_untouched() {
         );
     }
 }
+
+mod navigation_action_tests {
+    use std::time::{Duration, Instant};
+
+    use http::Method;
+    use servo::{
+        Code, Key, KeyState, KeyboardEvent, Location, Modifiers, NamedKey, NavigationAction,
+        NavigationRequest, NavigationType, WebViewId,
+    };
+
+    use super::*;
+
+    struct NavigationDelegate {
+        requests: RefCell<Vec<(WebViewId, Url, NavigationAction)>>,
+        creations: RefCell<Vec<(Url, NavigationAction)>>,
+        popups: RefCell<Vec<WebView>>,
+        context: Rc<dyn RenderingContext>,
+        allow_creation: Cell<bool>,
+    }
+
+    impl NavigationDelegate {
+        fn new(test: &ServoTest) -> Rc<Self> {
+            Rc::new(Self {
+                requests: RefCell::default(),
+                creations: RefCell::default(),
+                popups: RefCell::default(),
+                context: test.rendering_context.clone(),
+                allow_creation: Cell::new(true),
+            })
+        }
+
+        fn take_request(&self, test: &ServoTest) -> (WebViewId, Url, NavigationAction) {
+            wait_until(test, || !self.requests.borrow().is_empty());
+            assert_eq!(self.requests.borrow().len(), 1);
+            self.requests.borrow_mut().pop().unwrap()
+        }
+    }
+
+    impl WebViewDelegate for NavigationDelegate {
+        fn notify_new_frame_ready(&self, webview: WebView) {
+            webview.paint();
+        }
+
+        fn request_navigation(&self, webview: WebView, request: NavigationRequest) {
+            // Allow setup of the iframe; deny test navigations so the page stays available.
+            if request.url.path() == "/frame" {
+                request.allow();
+                return;
+            }
+            self.requests.borrow_mut().push((
+                webview.id(),
+                request.url.clone(),
+                request.action.clone(),
+            ));
+            request.deny();
+        }
+
+        fn request_create_new(&self, parent: WebView, request: CreateNewWebViewRequest) {
+            self.creations
+                .borrow_mut()
+                .push((request.url.clone(), request.action.clone()));
+            if self.allow_creation.get() {
+                let popup = request
+                    .builder(self.context.clone())
+                    .delegate(parent.delegate())
+                    .build();
+                self.popups.borrow_mut().push(popup);
+            }
+        }
+    }
+
+    fn wait_until(test: &ServoTest, ready: impl Fn() -> bool) {
+        let start = Instant::now();
+        test.spin(|| {
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "navigation action timed out"
+            );
+            !ready()
+        });
+    }
+
+    fn page(
+        test: &ServoTest,
+        delegate: &Rc<NavigationDelegate>,
+    ) -> (net::test_util::Server, WebView) {
+        let (server, url) = make_server(|request, response| {
+            response.headers_mut().insert(
+                http::header::CONTENT_TYPE,
+                HeaderValue::from_static("text/html"),
+            );
+            let html = if request.uri().path() == "/frame" && request.uri().query() == Some("top") {
+                "<!doctype html><style>body { margin: 0 } a { display: block; width: 100px; height: 80px }</style><a href='/destination' target='_top'>Top link</a>"
+            } else if request.uri().path() == "/frame" {
+                "<!doctype html><style>body { margin: 0 } a { display: block; width: 100px; height: 80px }</style><a href='/destination'>Frame link</a>"
+            } else {
+                "<!doctype html><style>body { margin: 0 } a, button { display: block; width: 100px; height: 80px } iframe { position: absolute; left: 0; top: 200px; width: 100px; height: 80px; border: 0 }</style>\
+                 <a id='link' href='/destination'>Link</a>\
+                 <form action='/destination' method='post'><input type='hidden' name='value' value='body'><button type='submit'>Submit</button></form>\
+                 <iframe src='/frame'></iframe>"
+            };
+            *response.body_mut() = make_body(html.as_bytes().to_vec());
+        });
+        let view = WebViewBuilder::new(test.servo(), test.rendering_context.clone())
+            .delegate(delegate.clone())
+            .url(Url::parse(url.as_str()).unwrap())
+            .build();
+        view.show();
+        wait_until(test, || view.load_status() == LoadStatus::Complete);
+        wait_for_webview_scene_to_be_up_to_date(test, &view);
+        assert!(delegate.requests.borrow().is_empty());
+        (server, view)
+    }
+
+    fn key(view: &WebView, state: KeyState, key: NamedKey, code: Code, modifiers: Modifiers) {
+        view.notify_input_event(InputEvent::Keyboard(KeyboardEvent::new_without_event(
+            state,
+            Key::Named(key),
+            code,
+            Location::Standard,
+            modifiers,
+            false,
+            false,
+        )));
+    }
+
+    fn assert_action(
+        action: &NavigationAction,
+        kind: NavigationType,
+        main_frame: bool,
+        modifiers: Modifiers,
+        method: Method,
+    ) {
+        assert_eq!(action.navigation_type, kind);
+        assert_eq!(action.is_main_frame, main_frame);
+        assert_eq!(action.modifiers, modifiers);
+        assert_eq!(action.method, method);
+    }
+
+    #[test]
+    fn test_link_iframe_form_and_script_navigation_actions() {
+        let test = ServoTest::new();
+        let delegate = NavigationDelegate::new(&test);
+        let (server, view) = page(&test, &delegate);
+
+        for (point, kind, main_frame, method) in [
+            (
+                DevicePoint::new(20., 20.),
+                NavigationType::LinkActivated,
+                true,
+                Method::GET,
+            ),
+            (
+                DevicePoint::new(20., 220.),
+                NavigationType::LinkActivated,
+                false,
+                Method::GET,
+            ),
+            (
+                DevicePoint::new(20., 120.),
+                NavigationType::FormSubmitted,
+                true,
+                Method::POST,
+            ),
+        ] {
+            click_at_point(&view, point, MouseButton::Primary);
+            let (id, url, action) = delegate.take_request(&test);
+            assert_eq!(id, view.id());
+            assert_eq!(url.path(), "/destination");
+            assert_action(&action, kind, main_frame, Modifiers::empty(), method);
+        }
+
+        evaluate_javascript(&test, view.clone(), "location.href = '/destination'").unwrap();
+        let (_, _, action) = delegate.take_request(&test);
+        assert_action(
+            &action,
+            NavigationType::Other,
+            true,
+            Modifiers::empty(),
+            Method::GET,
+        );
+
+        evaluate_javascript(
+            &test,
+            view.clone(),
+            "document.querySelector('form').submit()",
+        )
+        .unwrap();
+        let (_, _, action) = delegate.take_request(&test);
+        assert_action(
+            &action,
+            NavigationType::FormSubmitted,
+            true,
+            Modifiers::empty(),
+            Method::POST,
+        );
+
+        evaluate_javascript(&test, view.clone(), "document.querySelector('a').click()").unwrap();
+        let (_, _, action) = delegate.take_request(&test);
+        assert_action(
+            &action,
+            NavigationType::Other,
+            true,
+            Modifiers::empty(),
+            Method::GET,
+        );
+
+        view.reload();
+        let (_, _, action) = delegate.take_request(&test);
+        assert_action(
+            &action,
+            NavigationType::Reload,
+            true,
+            Modifiers::empty(),
+            Method::GET,
+        );
+        server.close();
+    }
+
+    #[test]
+    fn test_shift_mouse_and_keyboard_navigation_actions() {
+        let test = ServoTest::new();
+        let delegate = NavigationDelegate::new(&test);
+        let (server, view) = page(&test, &delegate);
+
+        key(
+            &view,
+            KeyState::Down,
+            NamedKey::Shift,
+            Code::ShiftLeft,
+            Modifiers::empty(),
+        );
+        click_at_point(&view, DevicePoint::new(20., 20.), MouseButton::Primary);
+        let (_, _, action) = delegate.take_request(&test);
+        assert_action(
+            &action,
+            NavigationType::LinkActivated,
+            true,
+            Modifiers::SHIFT,
+            Method::GET,
+        );
+
+        // A script navigation while Shift remains held has no activating event.
+        evaluate_javascript(&test, view.clone(), "location.href = '/destination'").unwrap();
+        let (_, _, action) = delegate.take_request(&test);
+        assert_action(
+            &action,
+            NavigationType::Other,
+            true,
+            Modifiers::empty(),
+            Method::GET,
+        );
+
+        // The keydown's default action synthesizes a click. It must retain Shift.
+        evaluate_javascript(&test, view.clone(), "document.querySelector('a').focus()").unwrap();
+        key(
+            &view,
+            KeyState::Down,
+            NamedKey::Enter,
+            Code::Enter,
+            Modifiers::SHIFT,
+        );
+        let (_, _, action) = delegate.take_request(&test);
+        assert_action(
+            &action,
+            NavigationType::LinkActivated,
+            true,
+            Modifiers::SHIFT,
+            Method::GET,
+        );
+        key(
+            &view,
+            KeyState::Up,
+            NamedKey::Enter,
+            Code::Enter,
+            Modifiers::SHIFT,
+        );
+
+        click_at_point(&view, DevicePoint::new(20., 120.), MouseButton::Primary);
+        let (_, _, action) = delegate.take_request(&test);
+        assert_action(
+            &action,
+            NavigationType::FormSubmitted,
+            true,
+            Modifiers::SHIFT,
+            Method::POST,
+        );
+        // Enter in a text control submits through the editing-action path.
+        evaluate_javascript(
+            &test,
+            view.clone(),
+            r#"
+            document.querySelector('form').insertAdjacentHTML('beforeend', '<input id="entry">');
+            document.querySelector('#entry').focus();
+        "#,
+        )
+        .unwrap();
+        key(
+            &view,
+            KeyState::Down,
+            NamedKey::Enter,
+            Code::Enter,
+            Modifiers::SHIFT,
+        );
+        let (_, _, action) = delegate.take_request(&test);
+        assert_action(
+            &action,
+            NavigationType::FormSubmitted,
+            true,
+            Modifiers::SHIFT,
+            Method::POST,
+        );
+        key(
+            &view,
+            KeyState::Up,
+            NamedKey::Enter,
+            Code::Enter,
+            Modifiers::SHIFT,
+        );
+        key(
+            &view,
+            KeyState::Up,
+            NamedKey::Shift,
+            Code::ShiftLeft,
+            Modifiers::SHIFT,
+        );
+        server.close();
+    }
+
+    #[test]
+    fn test_auxiliary_navigation_action_matches_first_load() {
+        let test = ServoTest::new();
+        let delegate = NavigationDelegate::new(&test);
+        let (server, view) = page(&test, &delegate);
+
+        // Cover both target=_blank and the platform's alternate link action.
+        for target_blank in [true, false] {
+            evaluate_javascript(
+                &test,
+                view.clone(),
+                if target_blank {
+                    "link.target = '_blank'"
+                } else {
+                    "link.removeAttribute('target')"
+                },
+            )
+            .unwrap();
+            let modifiers = if target_blank {
+                Modifiers::SHIFT
+            } else if cfg!(target_os = "macos") {
+                Modifiers::SHIFT | Modifiers::META
+            } else {
+                Modifiers::SHIFT | Modifiers::CONTROL
+            };
+            key(
+                &view,
+                KeyState::Down,
+                NamedKey::Shift,
+                Code::ShiftLeft,
+                modifiers,
+            );
+            click_at_point(&view, DevicePoint::new(20., 20.), MouseButton::Primary);
+            let (id, url, action) = delegate.take_request(&test);
+            let (creation_url, creation_action) = delegate.creations.borrow_mut().pop().unwrap();
+            assert_eq!(creation_url, url);
+            assert_eq!(creation_action, action);
+            assert_ne!(id, view.id());
+            assert_eq!(id, delegate.popups.borrow().last().unwrap().id());
+            assert_action(
+                &action,
+                NavigationType::LinkActivated,
+                true,
+                modifiers,
+                Method::GET,
+            );
+            key(
+                &view,
+                KeyState::Up,
+                NamedKey::Shift,
+                Code::ShiftLeft,
+                Modifiers::SHIFT,
+            );
+
+            // These popups share the opener's RenderingContext and overlap it.
+            // Hit testing uses the shared WebRender scene, so an already painted
+            // about:blank popup can intercept the next click sent through `view`.
+            // Keep the popup alive for the assertions, but remove it from the scene
+            // and wait for that change before clicking the opener again.
+            delegate.popups.borrow().last().unwrap().hide();
+            wait_for_webview_scene_to_be_up_to_date(&test, &view);
+        }
+
+        // The embedder can inspect Shift+_blank and decline before a WebView exists.
+        delegate.allow_creation.set(false);
+        evaluate_javascript(&test, view.clone(), "link.target = '_blank'").unwrap();
+        key(
+            &view,
+            KeyState::Down,
+            NamedKey::Shift,
+            Code::ShiftLeft,
+            Modifiers::empty(),
+        );
+        click_at_point(&view, DevicePoint::new(20., 20.), MouseButton::Primary);
+        wait_until(&test, || !delegate.creations.borrow().is_empty());
+        let (_, action) = delegate.creations.borrow_mut().pop().unwrap();
+        assert_action(
+            &action,
+            NavigationType::LinkActivated,
+            true,
+            Modifiers::SHIFT,
+            Method::GET,
+        );
+        assert_eq!(delegate.popups.borrow().len(), 2);
+        assert!(delegate.requests.borrow().is_empty());
+        key(
+            &view,
+            KeyState::Up,
+            NamedKey::Shift,
+            Code::ShiftLeft,
+            Modifiers::SHIFT,
+        );
+        server.close();
+    }
+
+    #[test]
+    fn test_cross_origin_iframe_link_targets_main_frame() {
+        let test = ServoTest::new();
+        let delegate = NavigationDelegate::new(&test);
+        let (server, view) = page(&test, &delegate);
+        // localhost and 127.0.0.1 are distinct origins. The iframe's _top target
+        // exercises routing to a destination owned by another script thread.
+        evaluate_javascript(
+            &test,
+            view.clone(),
+            r#"
+            window.frameReady = false;
+            const frame = document.querySelector('iframe');
+            frame.onload = () => window.frameReady = true;
+            const url = new URL('/frame?top', location.href);
+            url.hostname = '127.0.0.1';
+            frame.src = url.href;
+        "#,
+        )
+        .unwrap();
+        wait_until(&test, || {
+            evaluate_javascript(&test, view.clone(), "window.frameReady").unwrap() ==
+                JSValue::Boolean(true)
+        });
+        wait_for_webview_scene_to_be_up_to_date(&test, &view);
+        key(
+            &view,
+            KeyState::Down,
+            NamedKey::Shift,
+            Code::ShiftLeft,
+            Modifiers::empty(),
+        );
+        click_at_point(&view, DevicePoint::new(20., 220.), MouseButton::Primary);
+        let (id, url, action) = delegate.take_request(&test);
+        assert_eq!(id, view.id());
+        assert_eq!(url.host_str(), Some("127.0.0.1"));
+        assert_action(
+            &action,
+            NavigationType::LinkActivated,
+            true,
+            Modifiers::SHIFT,
+            Method::GET,
+        );
+        key(
+            &view,
+            KeyState::Up,
+            NamedKey::Shift,
+            Code::ShiftLeft,
+            Modifiers::SHIFT,
+        );
+        server.close();
+    }
+}
