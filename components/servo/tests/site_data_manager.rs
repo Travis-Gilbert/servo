@@ -766,3 +766,188 @@ fn test_get_cookie_async() {
     assert_eq!(cookies[0].name(), "foo");
     assert_eq!(cookies[0].value(), "bar");
 }
+
+#[test]
+fn test_partition_roots_and_interleaved_management_callbacks() {
+    let root = tempfile::tempdir().unwrap();
+    let test = ServoTest::new();
+    let a = test
+        .servo()
+        .create_storage_partition(root.path().join("A"))
+        .unwrap();
+    let b = test
+        .servo()
+        .create_storage_partition(root.path().join("B"))
+        .unwrap();
+    assert_ne!(a.id(), b.id());
+    assert_ne!(a.root(), b.root());
+    assert!(matches!(
+        test.servo()
+            .create_storage_partition(root.path().join("A/../A")),
+        Err(servo::StoragePartitionError::DuplicateRoot(_))
+    ));
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(root.path().join("A"), root.path().join("alias")).unwrap();
+        assert!(matches!(
+            test.servo()
+                .create_storage_partition(root.path().join("alias")),
+            Err(servo::StoragePartitionError::DuplicateRoot(_))
+        ));
+    }
+    let url = url::Url::parse("https://profiles.example.com/").unwrap();
+    let completions = Rc::new(Cell::new(0));
+    for (partition, value) in [(&a, "A"), (&b, "B")] {
+        let completed = completions.clone();
+        partition.site_data_manager().set_cookie_for_url(
+            url.clone(),
+            Cookie::new("profile", value),
+            Some(Box::new(move || completed.set(completed.get() + 1))),
+        );
+    }
+    let results = Rc::new(RefCell::new(Vec::new()));
+    for (partition, value) in [(&b, "B"), (&a, "A")] {
+        let results = results.clone();
+        partition.site_data_manager().cookies_for_url_async(
+            url.clone(),
+            CookieSource::HTTP,
+            move |cookies| {
+                assert_eq!(cookies.len(), 1);
+                assert_eq!(cookies[0].value(), value);
+                results.borrow_mut().push(value);
+            },
+        );
+    }
+    test.spin(|| completions.get() != 2 || results.borrow().len() != 2);
+    a.site_data_manager().clear_cookies(None);
+    assert!(
+        a.site_data_manager()
+            .cookies_for_url(url.clone(), CookieSource::HTTP)
+            .is_empty()
+    );
+    assert_eq!(
+        b.site_data_manager()
+            .cookies_for_url(url, CookieSource::HTTP)[0]
+            .value(),
+        "B"
+    );
+    a.network_manager().clear_cache();
+
+    // Ephemeral owner creation and shutdown must not rewrite registered profiles.
+    let before = std::fs::read(root.path().join("A/clientstorage/default_v1/reg.sqlite")).unwrap();
+    let ephemeral = test.servo().create_ephemeral_storage_partition().unwrap();
+    assert!(ephemeral.root().is_none());
+    ephemeral.site_data_manager().set_cookie_for_url(
+        url::Url::parse("https://profiles.example.com/").unwrap(),
+        Cookie::new("profile", "temporary"),
+        None,
+    );
+    assert_eq!(
+        before,
+        std::fs::read(root.path().join("A/clientstorage/default_v1/reg.sqlite")).unwrap()
+    );
+    drop(test);
+    assert!(root.path().join("A/cookie_jar.json").exists());
+    assert!(root.path().join("B/cookie_jar.json").exists());
+}
+
+#[test]
+fn test_partition_initialization_errors_do_not_select_default() {
+    let root = tempfile::tempdir().unwrap();
+    let test = ServoTest::new_with_builder(|builder| {
+        let mut preferences = servo::Preferences::default();
+        preferences.network_http_disk_cache = "enabled-for-partitions".into();
+        builder.preferences(preferences)
+    });
+    let blocked = root.path().join("blocked");
+    std::fs::write(&blocked, b"not a directory").unwrap();
+    assert!(matches!(
+        test.servo().create_storage_partition(&blocked),
+        Err(servo::StoragePartitionError::Io(_))
+    ));
+    let bad_cache = root.path().join("bad-cache");
+    std::fs::create_dir_all(bad_cache.join("http-cache/cache.sqlite3")).unwrap();
+    assert!(matches!(
+        test.servo().create_storage_partition(&bad_cache),
+        Err(servo::StoragePartitionError::Registration(_))
+    ));
+    let good = test
+        .servo()
+        .create_storage_partition(root.path().join("good"))
+        .unwrap();
+    assert_ne!(good.id(), test.servo().default_storage_partition().id());
+    assert!(
+        good.root()
+            .unwrap()
+            .join("http-cache/cache.sqlite3")
+            .is_file()
+    );
+    assert!(
+        test.servo()
+            .create_ephemeral_storage_partition()
+            .unwrap()
+            .root()
+            .is_none()
+    );
+}
+
+#[test]
+fn test_partition_cache_and_site_data_clears_leave_other_profiles_intact() {
+    let test = ServoTest::new();
+    let (server, url) = make_server(|_, response| {
+        response.headers_mut().insert(
+            http::header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=3600"),
+        );
+        *response.body_mut() = make_body(b"<!doctype html>Partition management".to_vec());
+    });
+    let partitions = [
+        test.servo().create_ephemeral_storage_partition().unwrap(),
+        test.servo().create_ephemeral_storage_partition().unwrap(),
+    ];
+    let views = partitions.each_ref().map(|partition| {
+        WebViewBuilder::new(test.servo(), test.rendering_context.clone())
+            .storage_partition(partition.clone())
+            .url(url::Url::parse(url.as_str()).unwrap())
+            .build()
+    });
+    for (index, view) in views.iter().enumerate() {
+        evaluate_javascript(
+            &test,
+            view.clone(),
+            format!("localStorage.profile = '{index}'; sessionStorage.profile = '{index}';"),
+        )
+        .unwrap();
+        assert!(
+            !partitions[index]
+                .network_manager()
+                .cache_entries()
+                .is_empty()
+        );
+    }
+    partitions[0].network_manager().clear_cache();
+    assert!(partitions[0].network_manager().cache_entries().is_empty());
+    assert!(!partitions[1].network_manager().cache_entries().is_empty());
+    partitions[0]
+        .site_data_manager()
+        .clear_site_data(&["localhost"], StorageType::Local | StorageType::Session);
+    assert_eq!(
+        evaluate_javascript(
+            &test,
+            views[0].clone(),
+            "localStorage.getItem('profile') === null && sessionStorage.getItem('profile') === null"
+        )
+        .unwrap(),
+        JSValue::Boolean(true)
+    );
+    assert_eq!(
+        evaluate_javascript(
+            &test,
+            views[1].clone(),
+            "localStorage.profile + ':' + sessionStorage.profile"
+        )
+        .unwrap(),
+        JSValue::String("1:1".into())
+    );
+    server.close();
+}

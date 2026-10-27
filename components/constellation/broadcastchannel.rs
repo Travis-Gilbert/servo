@@ -16,6 +16,8 @@ pub(crate) struct BroadcastChannels {
     /// A map of broadcast routers to their Generic sender.
     routers: FxHashMap<BroadcastChannelRouterId, GenericCallback<BroadcastChannelMsg>>,
 
+    origins: FxHashMap<BroadcastChannelRouterId, ImmutableOrigin>,
+
     /// A map of origin to a map of channel name to a list of relevant routers.
     channels: HashMap<ImmutableOrigin, HashMap<String, Vec<BroadcastChannelRouterId>>>,
 }
@@ -27,7 +29,9 @@ impl BroadcastChannels {
         &mut self,
         router_id: BroadcastChannelRouterId,
         broadcast_callback: GenericCallback<BroadcastChannelMsg>,
+        origin: ImmutableOrigin,
     ) {
+        self.origins.insert(router_id, origin);
         if self.routers.insert(router_id, broadcast_callback).is_some() {
             warn!("Multiple attempts to add BroadcastChannel router.");
         }
@@ -36,6 +40,7 @@ impl BroadcastChannels {
     /// Remove a broadcast router.
     #[servo_tracing::instrument(skip_all)]
     pub fn remove_broadcast_channel_router(&mut self, router_id: BroadcastChannelRouterId) {
+        self.origins.remove(&router_id);
         if self.routers.remove(&router_id).is_none() {
             warn!("Attempt to remove unknown BroadcastChannel router.");
         }
@@ -55,6 +60,9 @@ impl BroadcastChannels {
         channel_name: String,
         origin: ImmutableOrigin,
     ) {
+        if self.origins.get(&router_id) != Some(&origin) {
+            return warn!("Broadcast router origin mismatch");
+        }
         let channels = self.channels.entry(origin).or_default();
         let routers = channels.entry(channel_name).or_default();
         routers.push(router_id);
@@ -68,6 +76,9 @@ impl BroadcastChannels {
         channel_name: String,
         origin: ImmutableOrigin,
     ) {
+        if self.origins.get(&router_id) != Some(&origin) {
+            return warn!("Broadcast router origin mismatch");
+        }
         if let Some(channels) = self.channels.get_mut(&origin) {
             let is_empty = if let Some(routers) = channels.get_mut(&channel_name) {
                 routers.retain(|router| router != &router_id);
@@ -96,6 +107,9 @@ impl BroadcastChannels {
         router_id: BroadcastChannelRouterId,
         message: BroadcastChannelMsg,
     ) {
+        if self.origins.get(&router_id) != Some(&message.origin) {
+            return warn!("Broadcast router origin mismatch");
+        }
         if let Some(channels) = self.channels.get(&message.origin) {
             let routers = match channels.get(&message.channel_name) {
                 Some(routers) => routers,

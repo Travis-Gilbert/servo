@@ -403,6 +403,11 @@ impl GlobalScope {
         inherited_secure_context: Option<bool>,
         unminify_js: bool,
     ) -> Self {
+        assert_eq!(
+            resource_threads.partition_id(),
+            storage_threads.partition_id(),
+            "Mismatched global storage owners"
+        );
         let fetch_group = RefCell::new(FetchGroup::new(resource_threads.sender()));
         Self {
             message_port_state: DomRefCell::new(MessagePortState::UnManaged),
@@ -958,15 +963,15 @@ impl GlobalScope {
         // Step 7, a few preliminary steps.
 
         // - Check the worker is not closing.
-        if let Some(worker) = self.downcast::<WorkerGlobalScope>() &&
-            worker.is_closing()
+        if let Some(worker) = self.downcast::<WorkerGlobalScope>()
+            && worker.is_closing()
         {
             return;
         }
 
         // - Check the associated document is fully-active.
-        if let Some(window) = self.downcast::<Window>() &&
-            !window.Document().is_fully_active()
+        if let Some(window) = self.downcast::<Window>()
+            && !window.Document().is_fully_active()
         {
             return;
         }
@@ -2131,6 +2136,7 @@ impl GlobalScope {
     /// Get a sender to the constellation thread.
     pub(crate) fn script_to_constellation_chan(&self) -> ScriptToConstellationChan {
         ScriptToConstellationChan {
+            storage_partition_id: self.storage_partition_id(),
             sender: self.script_to_constellation_sender.clone(),
             webview_id: self.webview_id().unwrap_or(TEST_WEBVIEW_ID),
             pipeline_id: self.pipeline_id(),
@@ -2529,6 +2535,10 @@ impl GlobalScope {
     }
 
     /// Get the `&ResourceThreads` for this global scope.
+    pub(crate) fn storage_partition_id(&self) -> servo_base::id::StoragePartitionId {
+        self.resource_threads.partition_id()
+    }
+
     pub(crate) fn resource_threads(&self) -> &ResourceThreads {
         &self.resource_threads
     }
@@ -2869,8 +2879,8 @@ impl GlobalScope {
                 // Step 2. If the result of Is url potentially trustworthy?
                 // given environment's top-level creation URL is "Potentially Trustworthy", then return true.
                 // Step 3. Return false.
-                if top_level_creation_url.scheme() == "blob" &&
-                    Some(true) == self.inherited_secure_context
+                if top_level_creation_url.scheme() == "blob"
+                    && Some(true) == self.inherited_secure_context
                 {
                     return true;
                 }
@@ -3285,19 +3295,34 @@ impl GlobalScopeHelpers<crate::DomTypeHolder> for GlobalScope {
 impl OwnerWindow<DomTypeHolder> for GlobalScope {}
 
 impl GlobalScope {
-    pub(crate) fn create_media_source_url(&self, source: &crate::dom::mediasource::MediaSource) -> DOMString {
-        let url = format!("blob:{}/{}", self.origin().immutable().ascii_serialization(), uuid::Uuid::new_v4());
-        self.media_source_urls.borrow_mut().push((url.clone(), Dom::from_ref(source)));
+    pub(crate) fn create_media_source_url(
+        &self,
+        source: &crate::dom::mediasource::MediaSource,
+    ) -> DOMString {
+        let url = format!(
+            "blob:{}/{}",
+            self.origin().immutable().ascii_serialization(),
+            uuid::Uuid::new_v4()
+        );
+        self.media_source_urls
+            .borrow_mut()
+            .push((url.clone(), Dom::from_ref(source)));
         DOMString::from(url)
     }
-    pub(crate) fn media_source_for_url(&self, url: &str) -> Option<DomRoot<crate::dom::mediasource::MediaSource>> {
-        self.media_source_urls.borrow().iter().find(|(key,_)| key == url)
-            .map(|(_,value)| DomRoot::from_ref(&**value))
+    pub(crate) fn media_source_for_url(
+        &self,
+        url: &str,
+    ) -> Option<DomRoot<crate::dom::mediasource::MediaSource>> {
+        self.media_source_urls
+            .borrow()
+            .iter()
+            .find(|(key, _)| key == url)
+            .map(|(_, value)| DomRoot::from_ref(&**value))
     }
     pub(crate) fn revoke_media_source_url(&self, url: &str) -> bool {
         let mut urls = self.media_source_urls.borrow_mut();
         let previous = urls.len();
-        urls.retain(|(key,_)| key != url);
+        urls.retain(|(key, _)| key != url);
         previous != urls.len()
     }
 }

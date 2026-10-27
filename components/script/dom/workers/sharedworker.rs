@@ -77,10 +77,10 @@ impl SharedWorkerKey {
         constructor_url: &ServoUrl,
         name: &str,
     ) -> bool {
-        self.storage_key == *storage_key &&
-            self.constructor_origin == *constructor_origin &&
-            self.constructor_url == *constructor_url &&
-            self.name == name
+        self.storage_key == *storage_key
+            && self.constructor_origin == *constructor_origin
+            && self.constructor_url == *constructor_url
+            && self.name == name
     }
 }
 
@@ -110,6 +110,7 @@ impl SharedWorkerSite {
 
 #[derive(Clone, Eq, MallocSizeOf, PartialEq)]
 pub(crate) struct SharedWorkerStorageKey {
+    partition_id: servo_base::id::StoragePartitionId,
     origin: ImmutableOrigin,
     top_level_site: Option<SharedWorkerSite>,
 }
@@ -126,6 +127,7 @@ impl SharedWorkerStorageKey {
             .map(|document| SharedWorkerSite::from_origin(document.origin().immutable().clone()));
 
         SharedWorkerStorageKey {
+            partition_id: global.storage_partition_id(),
             origin,
             top_level_site,
         }
@@ -550,9 +552,9 @@ impl SharedWorkerMethods<crate::DomTypeHolder> for SharedWorker {
                 // workerGlobalScope's type is not equal to options["type"];
                 // workerGlobalScope's credentials is not equal to options["credentials"]; or
                 // workerGlobalScope's extended lifetime is not equal to options["extendedLifetime"],
-                if registration.worker_type != worker_type ||
-                    registration.credentials != credentials ||
-                    registration.extended_lifetime != extended_lifetime
+                if registration.worker_type != worker_type
+                    || registration.credentials != credentials
+                    || registration.extended_lifetime != extended_lifetime
                 {
                     // Step 11.4.1. Queue a global task on the DOM manipulation task source given worker's relevant global object to fire an event named error at worker.
                     SharedWorker::queue_simple_error(global, worker_addr);

@@ -43,6 +43,10 @@ pub(crate) struct KeyboardEvent {
 }
 
 impl KeyboardEvent {
+    pub(crate) fn modifiers(&self) -> Modifiers {
+        self.modifiers.get()
+    }
+
     fn new_inherited() -> Self {
         Self {
             uievent: UIEvent::new_inherited(),

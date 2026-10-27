@@ -3,8 +3,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! The Web Locks registry: one lock request queue and one held lock set per
-//! origin, owned by the constellation so that every agent of an origin
-//! (documents in any pipeline, dedicated and shared workers) sees the same
+//! origin, owned by one storage partition in the constellation so that its agents
+//! (documents in any pipeline, dedicated and shared workers) see the same
 //! state.
 //!
 //! <https://w3c.github.io/web-locks/#lock-managers>
@@ -77,15 +77,15 @@ impl OriginLocks {
         let earlier = &self.queue[..index];
         match request.mode {
             WebLockMode::Exclusive => {
-                !self.held.iter().any(|lock| lock.name == request.name) &&
-                    !earlier.iter().any(|other| other.name == request.name)
+                !self.held.iter().any(|lock| lock.name == request.name)
+                    && !earlier.iter().any(|other| other.name == request.name)
             },
             WebLockMode::Shared => {
                 !self
                     .held
                     .iter()
-                    .any(|lock| lock.mode == WebLockMode::Exclusive && lock.name == request.name) &&
-                    !earlier.iter().any(|other| {
+                    .any(|lock| lock.mode == WebLockMode::Exclusive && lock.name == request.name)
+                    && !earlier.iter().any(|other| {
                         other.mode == WebLockMode::Exclusive && other.name == request.name
                     })
             },

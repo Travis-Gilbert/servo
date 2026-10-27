@@ -193,9 +193,6 @@ pub(crate) struct DocumentEventHandler {
     current_cursor: Cell<Option<Cursor>>,
     /// <http://w3c.github.io/touch-events/#dfn-active-touch-point>
     active_touch_points: DomRefCell<Vec<Dom<Touch>>>,
-    /// The active keyboard modifiers for the WebView. This is updated when receiving any input event.
-    #[no_trace]
-    active_keyboard_modifiers: Cell<Modifiers>,
     /// Map from touch identifier to pointer ID for active touch points
     active_pointer_ids: DomRefCell<FxHashMap<i32, i32>>,
     /// Counter for generating unique pointer IDs for touch inputs
@@ -233,7 +230,6 @@ impl DocumentEventHandler {
             most_recent_mousemove_point: Default::default(),
             current_cursor: Default::default(),
             active_touch_points: Default::default(),
-            active_keyboard_modifiers: Default::default(),
             active_pointer_ids: Default::default(),
             next_touch_pointer_id: Cell::new(1),
             access_key_handlers: Default::default(),
@@ -296,21 +292,6 @@ impl DocumentEventHandler {
         !self.pending_input_events.borrow().is_empty()
     }
 
-    pub(crate) fn alternate_action_keyboard_modifier_active(&self) -> bool {
-        #[cfg(target_os = "macos")]
-        {
-            self.active_keyboard_modifiers
-                .get()
-                .contains(Modifiers::META)
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            self.active_keyboard_modifiers
-                .get()
-                .contains(Modifiers::CONTROL)
-        }
-    }
-
     pub(crate) fn handle_pending_input_events(&self, cx: &mut JSContext) {
         debug_assert!(
             !self.pending_input_events.borrow().is_empty(),
@@ -343,8 +324,6 @@ impl DocumentEventHandler {
         // event or fire events later. We have to make a good decision about what to
         // return to the embedder when that happens.
         for event in pending_input_events {
-            self.active_keyboard_modifiers
-                .set(event.active_keyboard_modifiers);
             let result = match event.event.event {
                 InputEvent::MouseButton(mouse_button_event) => {
                     self.handle_native_mouse_button_event(cx, mouse_button_event, &event);
@@ -2236,7 +2215,12 @@ impl DocumentEventHandler {
             return;
         }
 
-        node.fire_synthetic_pointer_event_not_trusted(cx, atom!("click"));
+        node.fire_synthetic_pointer_event(
+            cx,
+            atom!("click"),
+            event.modifiers(),
+            event.upcast::<Event>().IsTrusted(),
+        );
         event.upcast::<Event>().mark_as_handled();
     }
 
@@ -2255,7 +2239,7 @@ impl DocumentEventHandler {
         let event = &event.event;
         if let Some(editing_action) = editing_action_from_keyboard_event(event) {
             let editing_host = document.editing_context(cx.no_gc(), node);
-            if editing_host.perform_editing_action(cx, editing_action) {
+            if editing_host.perform_editing_action(cx, editing_action, event.modifiers) {
                 return input_event_result | InputEventResult::Consumed;
             }
         }
@@ -2552,7 +2536,7 @@ impl DocumentEventHandler {
         // This behavior is unspecified, but all browsers do this. When activating the element it is
         // focused and scrolled into view.
         self.focus_and_scroll_to_element_for_key_event(cx, html_element.upcast());
-        command.perform_action(cx);
+        command.perform_action(cx, event.modifiers);
         true
     }
 

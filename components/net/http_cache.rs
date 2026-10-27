@@ -270,8 +270,9 @@ impl MallocSizeOf for HttpCache {
         self.entries
             .iter()
             .map(|(_key, entry)| entry.blocking_read().size_of(ops))
-            .sum::<usize>() +
-            self.disk_cache
+            .sum::<usize>()
+            + self
+                .disk_cache
                 .as_ref()
                 .map(|data| data.size_of(ops))
                 .unwrap_or(0)
@@ -281,10 +282,30 @@ impl MallocSizeOf for HttpCache {
 impl HttpCache {
     /// Create a new HttpCache with [`HttpCacheAssignment`]
     pub fn new(assignment: HttpCacheAssignment) -> Self {
+        let path = if assignment == HttpCacheAssignment::Public
+            && !servo_config::opts::get().temporary_storage
+        {
+            let path = pref!(network_http_disk_cache);
+            (!path.is_empty()).then(|| std::path::PathBuf::from(path))
+        } else {
+            None
+        };
+        Self::with_disk_cache(path)
+    }
+
+    /// Create an HttpCache whose disk tier lives at `path`, or a memory-only
+    /// cache when `path` is `None`. Panics if the disk cache cannot be opened.
+    pub fn with_disk_cache(path: Option<std::path::PathBuf>) -> Self {
+        Self::try_with_disk_cache(path).expect("Failed to initialize HTTP cache")
+    }
+
+    /// Like [`HttpCache::with_disk_cache`], but returns the disk cache's
+    /// initialization error instead of panicking.
+    pub fn try_with_disk_cache(path: Option<std::path::PathBuf>) -> Result<Self, String> {
         let size = pref!(network_http_cache_size)
             .try_into()
             .expect("http_cache_size needs to fit into u64");
-        let (disk_cache, lifecycle) = DiskCache::new(assignment);
+        let (disk_cache, lifecycle) = DiskCache::new(path)?;
         let memory_cache = Cache::with(
             size,
             size as u64,
@@ -293,10 +314,10 @@ impl HttpCache {
             lifecycle,
         );
 
-        Self {
+        Ok(Self {
             entries: memory_cache,
             disk_cache,
-        }
+        })
     }
 
     #[expect(clippy::len_without_is_empty)]
@@ -358,9 +379,9 @@ fn response_is_cacheable(metadata: &Metadata) -> bool {
     // 2. check for absence of the Authorization header field.
     let mut is_cacheable = false;
     let headers = metadata.headers.as_ref().unwrap();
-    if headers.contains_key(header::EXPIRES) ||
-        headers.contains_key(header::LAST_MODIFIED) ||
-        headers.contains_key(header::ETAG)
+    if headers.contains_key(header::EXPIRES)
+        || headers.contains_key(header::LAST_MODIFIED)
+        || headers.contains_key(header::ETAG)
     {
         is_cacheable = true;
     }
@@ -368,17 +389,17 @@ fn response_is_cacheable(metadata: &Metadata) -> bool {
         if directive.no_store() {
             return false;
         }
-        if directive.public() ||
-            directive.s_max_age().is_some() ||
-            directive.max_age().is_some() ||
-            directive.no_cache()
+        if directive.public()
+            || directive.s_max_age().is_some()
+            || directive.max_age().is_some()
+            || directive.no_cache()
         {
             // If cache-control is understood, we can use it and ignore pragma.
             return true;
         }
     }
-    if let Some(pragma) = headers.typed_get::<Pragma>() &&
-        pragma.is_no_cache()
+    if let Some(pragma) = headers.typed_get::<Pragma>()
+        && pragma.is_no_cache()
     {
         return false;
     }
@@ -463,8 +484,8 @@ fn get_response_expiry(response: &Response) -> ApproxDuration {
             return heuristic_freshness;
         }
         // Other status codes can only use heuristic freshness if the public cache directive is present.
-        if let Some(ref directives) = response.headers.typed_get::<CacheControl>() &&
-            directives.public()
+        if let Some(ref directives) = response.headers.typed_get::<CacheControl>()
+            && directives.public()
         {
             return heuristic_freshness;
         }
@@ -613,9 +634,9 @@ fn create_cached_response(
         ValidationStatus::Valid
     } else {
         ValidationStatus::Stale {
-            revalidate_in_background: within_stale_while_revalidate_window &&
-                !cached_resource.stale_while_revalidate.is_zero() &&
-                !request_demands_revalidation(request),
+            revalidate_in_background: within_stale_while_revalidate_window
+                && !cached_resource.stale_while_revalidate.is_zero()
+                && !request_demands_revalidation(request),
         }
     };
 
@@ -1198,8 +1219,8 @@ impl<'a> CachedResourcesOrGuard<'a> {
             Ok(FetchMetadata::Filtered {
                 filtered: _,
                 unsafe_: metadata,
-            }) |
-            Ok(FetchMetadata::Unfiltered(metadata)) => metadata,
+            })
+            | Ok(FetchMetadata::Unfiltered(metadata)) => metadata,
             _ => return,
         };
         if !response_is_cacheable(&metadata) {

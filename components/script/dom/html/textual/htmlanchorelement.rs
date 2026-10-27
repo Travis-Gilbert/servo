@@ -363,12 +363,13 @@ impl Activatable for HTMLAnchorElement {
         target: &EventTarget,
     ) {
         let element = self.as_element();
-        let mouse_event = event.downcast::<MouseEvent>().unwrap();
+        let mouse_event = event.downcast::<MouseEvent>();
         let mut ismap_suffix = None;
 
         // Step 1: If the target of the click event is an img element with an ismap attribute
         // specified, then server-side image map processing must be performed.
-        if let Some(element) = target.downcast::<Element>() &&
+        if let Some(mouse_event) = mouse_event &&
+            let Some(element) = target.downcast::<Element>() &&
             target.is::<HTMLImageElement>() &&
             element.has_attribute(&local_name!("ismap"))
         {
@@ -383,6 +384,6 @@ impl Activatable for HTMLAnchorElement {
 
         // Step 2.
         // TODO: Download the link is `download` attribute is set.
-        follow_hyperlink(cx, element, self.relations.get(), ismap_suffix);
+        follow_hyperlink(cx, element, self.relations.get(), ismap_suffix, event);
     }
 }

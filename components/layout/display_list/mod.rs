@@ -79,6 +79,7 @@ mod gradient;
 mod hit_test;
 mod paint_timing_handler;
 pub(crate) mod paint_traversal;
+mod selection;
 mod stacking_context;
 
 pub(crate) use document_layout_snapshot::build_document_layout_snapshot_projection;
@@ -904,6 +905,10 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
         }
     }
 
+    fn paints_text_selection(&self) -> bool {
+        true
+    }
+
     fn visit_text(
         &mut self,
         state: &TraversalState,
@@ -1330,80 +1335,17 @@ impl Fragment {
         state: &TraversalState,
         line_box_rect: &PhysicalRect<Au>,
     ) {
-        let run_data = &fragment.run_data;
-        let Some(selection) = *run_data.selection.borrow() else {
+        let Some(extent) = selection::text_selection_extent(fragment) else {
             return;
         };
-
-        // The selection character range is in pre-transformed character offsets, so use the
-        // OffsetMap contained within `run_data` to convert it to post-transformed character
-        // offsets. This allows updating this selection directly from the DOM (skipping layout).
-        let selection_character_range = run_data.map_dom_range_to_transformed_range(selection);
-
-        if fragment.character_range_in_dom_node.start > selection_character_range.end ||
-            fragment.character_range_in_dom_node.end < selection_character_range.start
-        {
-            return;
-        }
-
-        // When there is an active selection, the line is empty, and there is a forced linebreak,
-        // layout will push an empty fragment in order to trigger painting of the cursor on an empty line.
-        // This code ensure that it is only painted if the cursor is on the starting index of the empty
-        // fragment.
-        if fragment.is_empty_for_text_cursor &&
-            !fragment
-                .character_range_in_dom_node
-                .contains(&selection_character_range.start)
-        {
-            return;
-        }
-
-        let mut current_character_index = fragment.character_range_in_dom_node.start;
-        let mut current_advance = Au::zero();
-        let mut start_advance = None;
-        let mut end_advance = None;
-        for glyph_store in fragment.glyphs.iter() {
-            let glyph_store_character_count = glyph_store.character_count();
-            if current_character_index + glyph_store_character_count <
-                selection_character_range.start
-            {
-                current_advance += glyph_store.total_advance() +
-                    (fragment.justification_adjustment *
-                        glyph_store.total_word_separators() as i32);
-                current_character_index += glyph_store_character_count;
-                continue;
-            }
-
-            if current_character_index >= selection_character_range.end {
-                break;
-            }
-
-            for glyph in glyph_store.glyphs() {
-                if current_character_index >= selection_character_range.start {
-                    start_advance = start_advance.or(Some(current_advance));
-                }
-
-                current_character_index += glyph.character_count();
-                current_advance += glyph.advance();
-                if glyph.char_is_word_separator() {
-                    current_advance += fragment.justification_adjustment;
-                }
-
-                if current_character_index <= selection_character_range.end {
-                    end_advance = Some(current_advance);
-                }
-            }
-        }
-
-        let start_x = start_advance.unwrap_or(current_advance);
-        let end_x = end_advance.unwrap_or(current_advance);
+        let (start_x, end_x) = (extent.start, extent.end);
 
         let fragment_rect = fragment.base.rect();
         let fragment_origin =
             (state.origin + fragment_rect.origin.to_vector()) + Vector2D::new(start_x, Au::zero());
 
         let parent_style = fragment.style();
-        if !selection_character_range.is_empty() {
+        if !extent.is_collapsed {
             let selection_rect = Rect::new(
                 Point2D::new(fragment_origin.x, line_box_rect.min_y()),
                 Size2D::new(end_x - start_x, line_box_rect.height()),
@@ -1417,11 +1359,26 @@ impl Fragment {
             } else {
                 &unfocused_color
             };
+            let selection_color = rgba(*selection_color);
 
-            let selection_common = builder.common_properties(state, selection_rect, &parent_style);
-            builder
-                .wr()
-                .push_rect(&selection_common, selection_rect, rgba(*selection_color));
+            // Inside a line box the highlight is one rounded shape per line; elsewhere (inline
+            // stacking contexts, whose line box isn't known here) it stays a plain rectangle.
+            match state.line_selection.clone() {
+                Some(line_selection) => line_selection.paint(
+                    builder,
+                    state,
+                    selection_rect,
+                    selection_color,
+                    &parent_style,
+                ),
+                None => {
+                    let selection_common =
+                        builder.common_properties(state, selection_rect, &parent_style);
+                    builder
+                        .wr()
+                        .push_rect(&selection_common, selection_rect, selection_color);
+                },
+            }
 
             return;
         }

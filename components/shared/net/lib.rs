@@ -33,7 +33,7 @@ use servo_base::generic_channel::{
     self, CallbackSetter, GenericCallback, GenericOneshotSender, GenericSend, GenericSender,
     SendResult,
 };
-use servo_base::id::{CookieStoreId, HistoryStateId, PipelineId};
+use servo_base::id::{CookieStoreId, HistoryStateId, PipelineId, StoragePartitionId};
 use servo_url::{ImmutableOrigin, ServoUrl};
 use uuid::Uuid;
 
@@ -278,12 +278,12 @@ pub enum FetchResponseMsg {
 impl FetchResponseMsg {
     pub fn request_id(&self) -> RequestId {
         match self {
-            FetchResponseMsg::ProcessRequestBody(id) |
-            FetchResponseMsg::ProcessResponse(id, ..) |
-            FetchResponseMsg::ProcessResponseChunk(id, ..) |
-            FetchResponseMsg::ProcessResponseEOF(id, ..) |
-            FetchResponseMsg::ProcessCspViolations(id, ..) |
-            FetchResponseMsg::ProcessContentLength(id, _) => *id,
+            FetchResponseMsg::ProcessRequestBody(id)
+            | FetchResponseMsg::ProcessResponse(id, ..)
+            | FetchResponseMsg::ProcessResponseChunk(id, ..)
+            | FetchResponseMsg::ProcessResponseEOF(id, ..)
+            | FetchResponseMsg::ProcessCspViolations(id, ..)
+            | FetchResponseMsg::ProcessContentLength(id, _) => *id,
         }
     }
 }
@@ -557,12 +557,27 @@ pub type CoreResourceThread = GenericSender<CoreResourceMsg>;
 // See also: https://github.com/servo/servo/blob/735480/components/script/script_thread.rs#L313
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ResourceThreads {
+    partition_id: StoragePartitionId,
     pub core_thread: CoreResourceThread,
 }
 
 impl ResourceThreads {
     pub fn new(core_thread: CoreResourceThread) -> ResourceThreads {
-        ResourceThreads { core_thread }
+        Self::for_partition(StoragePartitionId::DEFAULT, core_thread)
+    }
+
+    pub fn for_partition(
+        partition_id: StoragePartitionId,
+        core_thread: CoreResourceThread,
+    ) -> Self {
+        Self {
+            partition_id,
+            core_thread,
+        }
+    }
+
+    pub fn partition_id(&self) -> StoragePartitionId {
+        self.partition_id
     }
 
     pub fn cache_entries(&self) -> Vec<CacheEntryDescriptor> {
@@ -1302,20 +1317,20 @@ impl NetworkError {
     pub fn is_permanent_failure(&self) -> bool {
         matches!(
             self,
-            NetworkError::ContentSecurityPolicy |
-                NetworkError::MixedContent |
-                NetworkError::SubresourceIntegrity |
-                NetworkError::Nosniff |
-                NetworkError::InvalidPort |
-                NetworkError::CorsGeneral |
-                NetworkError::CrossOriginResponse |
-                NetworkError::CorsCredentials |
-                NetworkError::CorsAllowMethods |
-                NetworkError::CorsAllowHeaders |
-                NetworkError::CorsMethod |
-                NetworkError::CorsAuthorization |
-                NetworkError::CorsHeaders |
-                NetworkError::UnsupportedScheme
+            NetworkError::ContentSecurityPolicy
+                | NetworkError::MixedContent
+                | NetworkError::SubresourceIntegrity
+                | NetworkError::Nosniff
+                | NetworkError::InvalidPort
+                | NetworkError::CorsGeneral
+                | NetworkError::CrossOriginResponse
+                | NetworkError::CorsCredentials
+                | NetworkError::CorsAllowMethods
+                | NetworkError::CorsAllowHeaders
+                | NetworkError::CorsMethod
+                | NetworkError::CorsAuthorization
+                | NetworkError::CorsHeaders
+                | NetworkError::UnsupportedScheme
         )
     }
 
@@ -1352,8 +1367,8 @@ pub fn trim_http_whitespace(mut slice: &[u8]) -> &[u8] {
 
 /// Returns true if a given string has a given suffix with case-insensitive match.
 pub fn ends_with_ignore_ascii_case(string: &str, suffix: &str) -> bool {
-    string.len() >= suffix.len() &&
-        string.as_bytes()[string.len() - suffix.len()..].eq_ignore_ascii_case(suffix.as_bytes())
+    string.len() >= suffix.len()
+        && string.as_bytes()[string.len() - suffix.len()..].eq_ignore_ascii_case(suffix.as_bytes())
 }
 
 /// Returns the cached current system locale, or en-US by default.

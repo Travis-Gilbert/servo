@@ -49,6 +49,7 @@ mod from_embedder {
     impl LogTarget for servo_constellation_traits::EmbedderToConstellationMessage {
         fn log_target(&self) -> &'static str {
             match self {
+                Self::RegisterStoragePartition { .. } => target!("RegisterStoragePartition"),
                 Self::Exit => target!("Exit"),
                 Self::AllowNavigationResponse(..) => target!("AllowNavigationResponse"),
                 Self::LoadUrl(..) => target!("LoadUrl"),

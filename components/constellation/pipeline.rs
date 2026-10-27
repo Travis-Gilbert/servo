@@ -15,7 +15,9 @@ use script_traits::{
     DiscardBrowsingContext, DocumentActivity, NewPipelineInfo, ScriptThreadMessage,
 };
 use servo_base::generic_channel::SendError;
-use servo_base::id::{BrowsingContextId, HistoryStateId, PipelineId, WebViewId};
+use servo_base::id::{
+    BrowsingContextId, HistoryStateId, PipelineId, StoragePartitionId, WebViewId,
+};
 use servo_constellation_traits::{LoadData, ServiceWorkerManagerFactory};
 use servo_url::ServoUrl;
 
@@ -25,6 +27,7 @@ use crate::event_loop::EventLoop;
 /// A `Pipeline` is the constellation's view of a `Window`. Each pipeline has an event loop
 /// (executed by a script thread). A script thread may be responsible for many pipelines.
 pub struct Pipeline {
+    pub storage_partition_id: StoragePartitionId,
     /// The ID of the pipeline.
     pub id: PipelineId,
 
@@ -127,6 +130,7 @@ impl Pipeline {
         load_data: LoadData,
     ) -> Self {
         let pipeline = Self {
+            storage_partition_id: event_loop.storage_partition_id,
             id,
             browsing_context_id,
             webview_id,

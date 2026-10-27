@@ -10,6 +10,7 @@ use embedder_traits::{EmbedderControlRequest, InputMethodRequest, InputMethodTyp
 use html5ever::{LocalName, Prefix, local_name, ns};
 use js::context::{JSContext, NoGC};
 use js::rust::HandleObject;
+use keyboard_types::Modifiers;
 use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericBindings::SelectionBinding::SelectionMethods;
 use script_bindings::traits::DomEventTrait;
@@ -333,7 +334,7 @@ impl TextControlElement for HTMLTextAreaElement {
         self.maybe_update_shared_selection();
     }
 
-    fn handle_key_reaction(&self, cx: &mut JSContext, action: KeyReaction) {
+    fn handle_key_reaction(&self, cx: &mut JSContext, action: KeyReaction, _modifiers: Modifiers) {
         match action {
             KeyReaction::TriggerDefaultAction => (),
             KeyReaction::DispatchInput(text, is_composing, input_type) => {
@@ -788,14 +789,14 @@ impl VirtualMethods for HTMLTextAreaElement {
                         .text_input
                         .borrow_mut()
                         .handle_compositionend(compositionevent);
-                    self.handle_key_reaction(cx, action);
+                    self.handle_key_reaction(cx, action, event.modifiers());
                     self.upcast::<Node>().dirty(cx.no_gc(), NodeDamage::Other);
                 } else if event.type_() == atom!("compositionupdate") {
                     let action = self
                         .text_input
                         .borrow_mut()
                         .handle_compositionupdate(compositionevent);
-                    self.handle_key_reaction(cx, action);
+                    self.handle_key_reaction(cx, action, event.modifiers());
                     self.upcast::<Node>().dirty(cx.no_gc(), NodeDamage::Other);
                 }
                 self.maybe_update_shared_selection();

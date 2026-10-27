@@ -433,10 +433,12 @@ impl ContextMenuNodes {
             let Some(browsing_context) = document.browsing_context() else {
                 return;
             };
+            let navigation = window.load_data_for_document(url.clone(), window.pipeline_id());
             let (browsing_context, new) = browsing_context.choose_a_navigable(
                 cx,
                 DOMString::from_static("_blank"),
                 true, /* noopener */
+                &navigation,
             );
             let Some(browsing_context) = browsing_context else {
                 return;

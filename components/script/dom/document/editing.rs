@@ -590,7 +590,12 @@ impl EditingContext {
         }
     }
 
-    pub(crate) fn perform_editing_action(&self, cx: &mut JSContext, action: EditingAction) -> bool {
+    pub(crate) fn perform_editing_action(
+        &self,
+        cx: &mut JSContext,
+        action: EditingAction,
+        modifiers: Modifiers,
+    ) -> bool {
         if let Some(node) = self.event_target().downcast::<Node>() {
             // A previous event listener, such as keydown or beforeinput, might have
             // hidden the event target. So we should re-check the layout and see if
@@ -620,7 +625,7 @@ impl EditingContext {
         match self {
             EditingContext::TextControl(element) => element
                 .text_control_element()
-                .perform_editing_action(cx, action),
+                .perform_editing_action(cx, action, modifiers),
             EditingContext::Document(document) => document.perform_editing_action(cx, &action),
         }
     }

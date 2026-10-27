@@ -46,7 +46,7 @@ use servo_base::generic_channel::{
     self, CallbackSetter, GenericCallback, GenericReceiver, GenericReceiverSet,
     GenericSelectionResult, GenericSender,
 };
-use servo_base::id::CookieStoreId;
+use servo_base::id::{CookieStoreId, StoragePartitionId};
 use servo_url::{ImmutableOrigin, ServoUrl};
 use tokio::sync::Mutex as TokioMutex;
 
@@ -66,14 +66,16 @@ use crate::fetch::methods::{
 };
 use crate::filemanager_thread::FileManager;
 use crate::hsts::{self, HstsList};
-use crate::http_cache::{HttpCache, HttpCacheAssignment};
+use crate::http_cache::HttpCache;
 use crate::http_loader::{HttpState, http_redirect_fetch};
 use crate::protocols::ProtocolRegistry;
 use crate::request_interceptor::RequestInterceptor;
 use crate::websocket_loader::create_handshake_request;
 
 /// Load a file with CA certificate and produce a RootCertStore with the results.
-fn load_root_cert_store_from_file(file_path: String) -> io::Result<Vec<CertificateDer<'static>>> {
+pub fn load_root_cert_store_from_file(
+    file_path: String,
+) -> io::Result<Vec<CertificateDer<'static>>> {
     let mut pem = BufReader::new(File::open(file_path)?);
 
     let certs = CertificateDer::pem_reader_iter(&mut pem)
@@ -120,7 +122,7 @@ pub fn new_resource_threads(
     );
     (
         ResourceThreads::new(public_core),
-        ResourceThreads::new(private_core),
+        ResourceThreads::for_partition(StoragePartitionId::PRIVATE, private_core),
         async_runtime,
     )
 }
@@ -137,8 +139,55 @@ pub fn new_core_resource_thread(
     ignore_certificate_errors: bool,
     protocols: Arc<ProtocolRegistry>,
 ) -> (CoreResourceThread, CoreResourceThread) {
+    let config_dir = config_dir.filter(|_| !servo_config::opts::get().temporary_storage);
+    let disk_cache_path = if !servo_config::opts::get().temporary_storage {
+        let path = servo_config::pref!(network_http_disk_cache);
+        (!path.is_empty()).then(|| PathBuf::from(path))
+    } else {
+        None
+    };
+    let public = new_partition_resource_threads(
+        StoragePartitionId::DEFAULT,
+        devtools_sender.clone(),
+        time_profiler_chan.clone(),
+        mem_profiler_chan.clone(),
+        embedder_proxy.clone(),
+        config_dir,
+        disk_cache_path,
+        ca_certificates.clone(),
+        ignore_certificate_errors,
+        protocols.clone(),
+    );
+    let private = new_partition_resource_threads(
+        StoragePartitionId::PRIVATE,
+        devtools_sender,
+        time_profiler_chan,
+        mem_profiler_chan,
+        embedder_proxy,
+        None,
+        None,
+        ca_certificates,
+        ignore_certificate_errors,
+        protocols,
+    );
+    (public.core_thread, private.core_thread)
+}
+
+/// Start one independent resource owner on the already initialized runtime.
+#[expect(clippy::too_many_arguments)]
+pub fn new_partition_resource_threads(
+    partition_id: StoragePartitionId,
+    devtools_sender: Option<Sender<DevtoolsControlMsg>>,
+    time_profiler_chan: ProfilerChan,
+    mem_profiler_chan: MemProfilerChan,
+    embedder_proxy: GenericEmbedderProxy<NetToEmbedderMsg>,
+    config_dir: Option<PathBuf>,
+    disk_cache_path: Option<PathBuf>,
+    ca_certificates: CACertificates<'static>,
+    ignore_certificate_errors: bool,
+    protocols: Arc<ProtocolRegistry>,
+) -> ResourceThreads {
     let (public_setup_chan, public_setup_port) = generic_channel::channel().unwrap();
-    let (private_setup_chan, private_setup_port) = generic_channel::channel().unwrap();
     let (report_chan, report_port) = generic_channel::channel().unwrap();
     let (revoke_sender, revoke_receiver) = generic_channel::channel().unwrap();
     let (refresh_sender, refresh_receiver) = generic_channel::channel().unwrap();
@@ -162,6 +211,7 @@ pub fn new_core_resource_thread(
             let mut channel_manager = ResourceChannelManager {
                 resource_manager,
                 config_dir,
+                disk_cache_path,
                 ca_certificates,
                 ignore_certificate_errors,
                 cancellation_listeners: Default::default(),
@@ -172,7 +222,6 @@ pub fn new_core_resource_thread(
                 || {
                     channel_manager.start(
                         public_setup_port,
-                        private_setup_port,
                         report_port,
                         revoke_receiver,
                         refresh_receiver,
@@ -180,31 +229,33 @@ pub fn new_core_resource_thread(
                         embedder_proxy,
                     )
                 },
-                String::from("network-cache-reporter"),
+                format!("network-cache-reporter-{partition_id:?}"),
                 report_chan,
                 CoreResourceMsg::CollectMemoryReport,
             );
         })
         .expect("Thread spawning failed");
-    (public_setup_chan, private_setup_chan)
+    ResourceThreads::for_partition(partition_id, public_setup_chan)
 }
 
 struct ResourceChannelManager {
     resource_manager: CoreResourceManager,
     config_dir: Option<PathBuf>,
+    disk_cache_path: Option<PathBuf>,
     ca_certificates: CACertificates<'static>,
     ignore_certificate_errors: bool,
     cancellation_listeners: FxHashMap<RequestId, Weak<CancellationListener>>,
     cookie_listeners: FxHashMap<CookieStoreId, GenericCallback<CookieAsyncResponse>>,
 }
 
-/// This returns a tuple HttpState and a private HttpState.
-fn create_http_states(
+/// Construct the HTTP state owned by one partition.
+fn create_http_state(
     config_dir: Option<&Path>,
+    disk_cache_path: Option<PathBuf>,
     ca_certificates: CACertificates<'static>,
     ignore_certificate_errors: bool,
     embedder_proxy: GenericEmbedderProxy<NetToEmbedderMsg>,
-) -> (Arc<HttpState>, Arc<HttpState>) {
+) -> Result<Arc<HttpState>, String> {
     let mut hsts_list = HstsList::default();
     let mut auth_cache = AuthCache::default();
     let mut cookie_jar = CookieStorage::new(150);
@@ -220,7 +271,7 @@ fn create_http_states(
         cookie_jar: RwLock::new(cookie_jar),
         auth_cache: RwLock::new(auth_cache),
         history_states: RwLock::new(FxHashMap::default()),
-        http_cache: HttpCache::new(HttpCacheAssignment::Public),
+        http_cache: HttpCache::try_with_disk_cache(disk_cache_path)?,
         client: create_http_client(create_tls_config(
             ca_certificates.clone(),
             ignore_certificate_errors,
@@ -230,23 +281,7 @@ fn create_http_states(
         embedder_proxy: embedder_proxy.clone(),
     };
 
-    let override_manager = CertificateErrorOverrideManager::new();
-    let private_http_state = HttpState {
-        hsts_list: RwLock::new(HstsList::default()),
-        cookie_jar: RwLock::new(CookieStorage::new(150)),
-        auth_cache: RwLock::new(AuthCache::default()),
-        history_states: RwLock::new(FxHashMap::default()),
-        http_cache: HttpCache::new(HttpCacheAssignment::Private),
-        client: create_http_client(create_tls_config(
-            ca_certificates,
-            ignore_certificate_errors,
-            override_manager.clone(),
-        )),
-        override_manager,
-        embedder_proxy,
-    };
-
-    (Arc::new(http_state), Arc::new(private_http_state))
+    Ok(Arc::new(http_state))
 }
 
 impl ResourceChannelManager {
@@ -254,22 +289,27 @@ impl ResourceChannelManager {
     fn start(
         &mut self,
         public_receiver: GenericReceiver<CoreResourceMsg>,
-        private_receiver: GenericReceiver<CoreResourceMsg>,
         memory_reporter: GenericReceiver<CoreResourceMsg>,
         revoke_receiver: GenericReceiver<CoreResourceMsg>,
         refresh_receiver: GenericReceiver<CoreResourceMsg>,
         protocols: Arc<ProtocolRegistry>,
         embedder_proxy: GenericEmbedderProxy<NetToEmbedderMsg>,
     ) {
-        let (public_http_state, private_http_state) = create_http_states(
+        let http_state = match create_http_state(
             self.config_dir.as_deref(),
+            self.disk_cache_path.clone(),
             self.ca_certificates.clone(),
             self.ignore_certificate_errors,
             embedder_proxy,
-        );
+        ) {
+            Ok(state) => state,
+            Err(error) => {
+                log::error!("Resource partition initialization failed: {error}");
+                return;
+            },
+        };
 
         let mut rx_set = GenericReceiverSet::new();
-        let private_id = rx_set.add(private_receiver);
         let public_id = rx_set.add(public_receiver);
         let reporter_id = rx_set.add(memory_reporter);
         let revoker_id = rx_set.add(revoke_receiver);
@@ -311,23 +351,14 @@ impl ResourceChannelManager {
                             let _ = refresh_request.new_token_sender.send(refreshed_token);
                         } else if id == reporter_id {
                             if let CoreResourceMsg::CollectMemoryReport(report_chan) = msg {
-                                self.process_report(
-                                    report_chan,
-                                    &public_http_state,
-                                    &private_http_state,
-                                );
+                                self.process_report(report_chan, &http_state);
                                 continue;
                             } else {
                                 log::error!("memory reporter should only send CollectMemoryReport");
                             }
                         } else {
-                            let group = if id == private_id {
-                                &private_http_state
-                            } else {
-                                assert_eq!(id, public_id);
-                                &public_http_state
-                            };
-                            if !self.process_msg(msg, group, Arc::clone(&protocols)) {
+                            assert_eq!(id, public_id);
+                            if !self.process_msg(msg, &http_state, Arc::clone(&protocols)) {
                                 return;
                             }
                         }
@@ -337,15 +368,9 @@ impl ResourceChannelManager {
         }
     }
 
-    fn process_report(
-        &mut self,
-        msg: ReportsChan,
-        public_http_state: &Arc<HttpState>,
-        private_http_state: &Arc<HttpState>,
-    ) {
+    fn process_report(&mut self, msg: ReportsChan, http_state: &Arc<HttpState>) {
         perform_memory_report(|ops| {
-            let mut reports = public_http_state.memory_reports("public", ops);
-            reports.extend(private_http_state.memory_reports("private", ops));
+            let mut reports = http_state.memory_reports("partition", ops);
             reports.extend(vec![
                 Report {
                     path: path!["hsts-preload-list"],
@@ -677,9 +702,9 @@ impl ResourceChannelManager {
                 return false;
             },
             // Ignore these messages as they are only sent on very specific channels.
-            CoreResourceMsg::CollectMemoryReport(_) |
-            CoreResourceMsg::RevokeTokenForFile(..) |
-            CoreResourceMsg::RefreshTokenForFile(..) => {},
+            CoreResourceMsg::CollectMemoryReport(_)
+            | CoreResourceMsg::RevokeTokenForFile(..)
+            | CoreResourceMsg::RefreshTokenForFile(..) => {},
         }
         true
     }

@@ -13,7 +13,7 @@ use paint_api::{PaintMessage, PaintProxy};
 use rustc_hash::{FxHashMap, FxHashSet};
 use script_traits::{ConstellationInputEvent, ScriptThreadMessage, WebViewState};
 use servo_base::Epoch;
-use servo_base::id::{BrowsingContextId, PipelineId, WebViewId};
+use servo_base::id::{BrowsingContextId, PipelineId, StoragePartitionId, WebViewId};
 use servo_constellation_traits::{ScreenshotReadinessResponse, SessionHistoryTraversalRequest};
 use style_traits::CSSPixel;
 
@@ -25,6 +25,7 @@ use crate::session_history::{JointSessionHistory, SessionHistoryChange};
 /// The `Constellation`'s view of a `WebView` in the embedding layer. This tracks all of the
 /// `Constellation` state for this `WebView`.
 pub(crate) struct ConstellationWebView {
+    pub storage_partition_id: StoragePartitionId,
     /// The [`WebViewId`] of this [`ConstellationWebView`].
     webview_id: WebViewId,
 
@@ -105,11 +106,13 @@ pub(crate) struct ConstellationWebView {
 
 impl ConstellationWebView {
     pub(crate) fn new(
+        storage_partition_id: StoragePartitionId,
         webview_id: WebViewId,
         focused_browsing_context_id: BrowsingContextId,
         user_content_manager_id: Option<UserContentManagerId>,
     ) -> Self {
         Self {
+            storage_partition_id,
             webview_id,
             user_content_manager_id,
             active_top_level_pipeline_id: None,

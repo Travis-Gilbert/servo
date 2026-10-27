@@ -10,8 +10,8 @@ use servo_base::generic_channel;
 use servo_base::id::{BrowsingContextId, PipelineId, WebViewId};
 use servo_constellation_traits::ScriptToConstellationMessage;
 
-use crate::dom::bindings::trace::HashMapTracedValues;
 use crate::dom::bindings::str::DOMString;
+use crate::dom::bindings::trace::HashMapTracedValues;
 use crate::dom::html::htmliframeelement::HTMLIFrameElement;
 use crate::dom::node::NodeTraits;
 use crate::dom::types::{GlobalScope, Window};
@@ -164,7 +164,12 @@ impl ScriptWindowProxies {
         let msg = ScriptToConstellationMessage::GetBrowsingContextInfo(pipeline_id, result_sender);
         senders
             .pipeline_to_constellation_sender
-            .send((webview_id, pipeline_id, msg))
+            .send((
+                Some(senders.storage_partition_id),
+                webview_id,
+                pipeline_id,
+                msg,
+            ))
             .expect("Failed to send to constellation.");
         result_receiver
             .recv()

@@ -9,6 +9,7 @@ use app_units::Au;
 use servo_base::id::ScrollTreeNodeId;
 use style::values::computed::TextDecorationLine;
 
+use crate::display_list::selection::LineSelection;
 use crate::display_list::{
     ClipId, FragmentTextDecoration, StackingContext, StackingContextFragments,
 };
@@ -314,13 +315,29 @@ impl<'a, Handler: PaintTraversalHandler> PaintTraversal<'a, Handler> {
             return;
         }
 
-        let inner_state = state.push_box_fragment(fragment);
-        for child in fragment.children.iter() {
-            self.traverse_line_boxes_and_replaced(
-                &inner_state,
-                child,
-                false, /* at_root_of_stacking_context */
-            );
+        let mut inner_state = state.push_box_fragment(fragment);
+        inner_state.line_selection = None;
+        let line_selections = if self.handler.paints_text_selection() {
+            LineSelection::for_line_boxes(inner_state.origin, &fragment.children)
+        } else {
+            Vec::new()
+        };
+        for (index, child) in fragment.children.iter().enumerate() {
+            match line_selections.get(index).cloned().flatten() {
+                Some(line_selection) => self.traverse_line_boxes_and_replaced(
+                    &TraversalState {
+                        line_selection: Some(line_selection),
+                        ..inner_state.clone()
+                    },
+                    child,
+                    false, /* at_root_of_stacking_context */
+                ),
+                None => self.traverse_line_boxes_and_replaced(
+                    &inner_state,
+                    child,
+                    false, /* at_root_of_stacking_context */
+                ),
+            }
         }
     }
 
@@ -537,6 +554,12 @@ pub(crate) trait PaintTraversalHandler {
     fn visit_positioning(&mut self, _state: &TraversalState, _fragment: &Arc<PositioningFragment>) {
     }
 
+    /// Whether this handler paints text selections, and so needs each line box's
+    /// [`TraversalState::line_selection`].
+    fn paints_text_selection(&self) -> bool {
+        false
+    }
+
     fn visit_box_for_root_background(&mut self, _state: &TraversalState) {}
     fn visit_box_for_outline(&mut self, _state: &TraversalState, _fragment: &Arc<BoxFragment>) {}
     fn visit_box_for_collapsed_table_borders(
@@ -557,6 +580,8 @@ pub(crate) struct TraversalState {
     /// Used for text LCP candidate grouping — all text fragments within
     /// a single element are unioned before computing effective visual size.
     pub containing_element_tag: Option<Tag>,
+    /// The selected part of the line box being traversed, if it has selected text.
+    pub line_selection: Option<Rc<LineSelection>>,
 }
 
 impl TraversalState {
@@ -605,12 +630,14 @@ impl TraversalState {
             clip_id: box_fragment.generated_clip_id().unwrap_or(self.clip_id),
             text_decorations,
             containing_element_tag: box_fragment.base.tag.or(self.containing_element_tag),
+            line_selection: self.line_selection.clone(),
         }
     }
 
     pub(crate) fn without_text_decorations(&self) -> Self {
         Self {
             text_decorations: Default::default(),
+            line_selection: self.line_selection.clone(),
             ..*self
         }
     }
@@ -625,6 +652,7 @@ impl TraversalState {
             clip_id: self.clip_id,
             text_decorations: self.text_decorations.clone(),
             containing_element_tag: self.containing_element_tag,
+            line_selection: self.line_selection.clone(),
         }
     }
 
@@ -635,6 +663,7 @@ impl TraversalState {
             clip_id: stacking_context.clip_id,
             text_decorations: stacking_context.text_decorations.clone(),
             containing_element_tag: self.containing_element_tag,
+            line_selection: None,
         }
     }
 }

@@ -28,17 +28,12 @@ impl CacheEntry {
 /// therefore intentionally separate from `SiteDataManager`.
 pub struct NetworkManager {
     public_resource_threads: ResourceThreads,
-    private_resource_threads: ResourceThreads,
 }
 
 impl NetworkManager {
-    pub(crate) fn new(
-        public_resource_threads: ResourceThreads,
-        private_resource_threads: ResourceThreads,
-    ) -> Self {
+    pub(crate) fn new(public_resource_threads: ResourceThreads) -> Self {
         Self {
             public_resource_threads,
-            private_resource_threads,
         }
     }
 
@@ -48,19 +43,13 @@ impl NetworkManager {
     /// (URL) for which the networking layer currently maintains cached
     /// responses.
     ///
-    /// Both public and private browsing contexts are included in the result.
+    /// Only this manager's partition is included in the result.
     ///
-    /// Note: The networking layer currently only implements an in-memory HTTP
-    /// cache. Support for an on-disk cache is under development.
     pub fn cache_entries(&self) -> Vec<CacheEntry> {
         let public_entries = self.public_resource_threads.cache_entries();
-        let private_entries = self.private_resource_threads.cache_entries();
 
-        let unique_keys: HashSet<String> = public_entries
-            .into_iter()
-            .chain(private_entries)
-            .map(|entry| entry.key)
-            .collect();
+        let unique_keys: HashSet<String> =
+            public_entries.into_iter().map(|entry| entry.key).collect();
 
         unique_keys.into_iter().map(CacheEntry::new).collect()
     }
@@ -68,12 +57,9 @@ impl NetworkManager {
     /// Clears the network (HTTP) cache.
     ///
     /// This removes all cached network responses maintained by the networking
-    /// layer for both public and private browsing contexts.
+    /// layer for this manager's partition.
     ///
-    /// Note: The networking layer currently only implements an in-memory HTTP
-    /// cache. Support for an on-disk cache is under development.
     pub fn clear_cache(&self) {
         self.public_resource_threads.clear_cache();
-        self.private_resource_threads.clear_cache();
     }
 }

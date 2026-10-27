@@ -545,9 +545,9 @@ impl Activatable for HTMLAreaElement {
     fn activation_behavior(
         &self,
         cx: &mut js::context::JSContext,
-        _event: &Event,
+        event: &Event,
         _target: &EventTarget,
     ) {
-        follow_hyperlink(cx, self.as_element(), self.relations.get(), None);
+        follow_hyperlink(cx, self.as_element(), self.relations.get(), None, event);
     }
 }

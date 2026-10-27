@@ -18,7 +18,7 @@ use media::WindowGLContext;
 use script_traits::{InitialScriptState, ScriptThreadMessage};
 use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::{GenericReceiver, GenericSender, SendError};
-use servo_base::id::ScriptEventLoopId;
+use servo_base::id::{ScriptEventLoopId, StoragePartitionId};
 #[cfg(feature = "multiprocess")]
 use servo_config::opts::{self, Opts};
 #[cfg(feature = "multiprocess")]
@@ -29,6 +29,7 @@ use crate::Constellation;
 
 /// <https://html.spec.whatwg.org/multipage/#event-loop>
 pub struct EventLoop {
+    pub(crate) storage_partition_id: StoragePartitionId,
     script_chan: GenericSender<ScriptThreadMessage>,
     id: ScriptEventLoopId,
     /// When running in another process, this is an `IpcSender` to the BackgroundHangMonitor
@@ -65,7 +66,7 @@ impl Drop for EventLoop {
 impl EventLoop {
     pub(crate) fn spawn<STF: ScriptThreadFactory, SWF: ServiceWorkerManagerFactory>(
         constellation: &mut Constellation<STF, SWF>,
-        is_private: bool,
+        storage_partition_id: StoragePartitionId,
     ) -> Result<Rc<Self>, SendError> {
         let (script_chan, script_port) =
             servo_base::generic_channel::channel().expect("Pipeline script chan");
@@ -74,16 +75,15 @@ impl EventLoop {
         let eventloop_waker = constellation.embedder_proxy.event_loop_waker.clone();
         let script_to_embedder_sender = ScriptToEmbedderChan::new(embedder_chan, eventloop_waker);
 
-        let resource_threads = if is_private {
-            constellation.private_resource_threads.clone()
-        } else {
-            constellation.public_resource_threads.clone()
-        };
-        let storage_threads = if is_private {
-            constellation.private_storage_threads.clone()
-        } else {
-            constellation.public_storage_threads.clone()
-        };
+        let (resource_threads, storage_threads) = constellation
+            .partitions
+            .get(&storage_partition_id)
+            .ok_or(SendError::Disconnected)?
+            .clone();
+        assert_eq!(
+            resource_threads.partition_id(),
+            storage_threads.partition_id()
+        );
 
         let event_loop_id = ScriptEventLoopId::new();
         let initial_script_state = InitialScriptState {
@@ -134,6 +134,7 @@ impl EventLoop {
     ) -> Self {
         let script_chan = initial_script_state.constellation_to_script_sender.clone();
         let id = initial_script_state.id;
+        let storage_partition_id = initial_script_state.resource_threads.partition_id();
         let background_hang_monitor_register = constellation
             .background_monitor_register
             .clone()
@@ -149,6 +150,7 @@ impl EventLoop {
         Self {
             script_chan,
             id,
+            storage_partition_id,
             background_hang_monitor_sender: None,
             dont_send_or_sync: PhantomData,
         }
@@ -161,6 +163,7 @@ impl EventLoop {
     ) -> Result<Self, SendError> {
         let script_chan = initial_script_state.constellation_to_script_sender.clone();
         let id = initial_script_state.id;
+        let storage_partition_id = initial_script_state.resource_threads.partition_id();
 
         let (background_hand_monitor_sender, backgrond_hand_monitor_receiver) =
             servo_base::generic_channel::channel().expect("Sampler chan");
@@ -188,6 +191,7 @@ impl EventLoop {
         Ok(Self {
             script_chan,
             id,
+            storage_partition_id,
             background_hang_monitor_sender: Some(background_hand_monitor_sender),
             dont_send_or_sync: PhantomData,
         })
@@ -208,8 +212,8 @@ impl EventLoop {
         &self,
         message: &BackgroundHangMonitorControlMsg,
     ) {
-        if let Some(background_hang_monitor_sender) = &self.background_hang_monitor_sender &&
-            let Err(error) = background_hang_monitor_sender.send(message.clone())
+        if let Some(background_hang_monitor_sender) = &self.background_hang_monitor_sender
+            && let Err(error) = background_hang_monitor_sender.send(message.clone())
         {
             error!("Could not send message ({message:?}) to BHM: {error}");
         }

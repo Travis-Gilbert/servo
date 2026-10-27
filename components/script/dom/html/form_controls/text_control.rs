@@ -11,6 +11,7 @@ use std::cell::{Ref, RefMut};
 
 use embedder_traits::EditingAction;
 use js::context::JSContext;
+use keyboard_types::Modifiers;
 use script_bindings::inheritance::Castable;
 use script_bindings::refcounted::Trusted;
 use servo_base::text::Utf16CodeUnits;
@@ -45,7 +46,7 @@ pub(crate) trait TextControlElement {
     fn value_text(&self) -> DOMString;
     fn read_only_or_disabled(&self) -> bool;
     fn handle_text_content_changed(&self, cx: &mut JSContext);
-    fn handle_key_reaction(&self, cx: &mut JSContext, action: KeyReaction);
+    fn handle_key_reaction(&self, cx: &mut JSContext, action: KeyReaction, modifiers: Modifiers);
 
     fn insert_content(&self, cx: &mut JSContext, text_content: &str) {
         self.text_input_mut().insert(text_content);
@@ -57,13 +58,18 @@ pub(crate) trait TextControlElement {
         self.handle_text_content_changed(cx);
     }
 
-    fn perform_editing_action(&self, cx: &mut JSContext, action: EditingAction) -> bool {
+    fn perform_editing_action(
+        &self,
+        cx: &mut JSContext,
+        action: EditingAction,
+        modifiers: Modifiers,
+    ) -> bool {
         let key_reaction = self.text_input_mut().perform_editing_action(action);
         if key_reaction == KeyReaction::Nothing {
             return false;
         }
 
-        self.handle_key_reaction(cx, key_reaction);
+        self.handle_key_reaction(cx, key_reaction, modifiers);
         true // TODO: Return true if the action can have any effect.
     }
 

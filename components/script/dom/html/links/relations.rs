@@ -4,13 +4,16 @@
 
 //! Defines shared hyperlink behaviour for `<link>`, `<a>`, `<area>` and `<form>` elements.
 
+use embedder_traits::NavigationType;
 use html5ever::local_name;
 use js::context::JSContext;
+use keyboard_types::Modifiers;
 use malloc_size_of::malloc_size_of_is_0;
 use net_traits::request::Referrer;
-use servo_constellation_traits::{LoadData, LoadOrigin, NavigationHistoryBehavior};
+use servo_constellation_traits::NavigationHistoryBehavior;
 use style::str::HTML_SPACE_CHARACTERS;
 
+use crate::dom::bindings::codegen::Bindings::EventBinding::EventMethods;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::str::DOMString;
@@ -20,7 +23,7 @@ use crate::dom::html::htmlareaelement::HTMLAreaElement;
 use crate::dom::html::htmlformelement::HTMLFormElement;
 use crate::dom::html::htmllinkelement::HTMLLinkElement;
 use crate::dom::node::NodeTraits;
-use crate::dom::types::Element;
+use crate::dom::types::{Element, Event};
 use crate::navigation::navigate;
 
 bitflags::bitflags! {
@@ -390,6 +393,7 @@ pub(crate) fn follow_hyperlink(
     subject: &Element,
     relations: LinkRelations,
     hyperlink_suffix: Option<String>,
+    event: &Event,
 ) {
     // Step 1: If subject cannot navigate, then return.
     if subject.cannot_navigate() {
@@ -405,12 +409,15 @@ pub(crate) fn follow_hyperlink(
     // Also allow the user to open links in a new WebView by pressing either the meta or
     // control key (depending on the platform).
     let document = subject.owner_document();
+    let modifiers = event.modifiers();
     let target_attribute_value =
         if subject.is::<HTMLAreaElement>() || subject.is::<HTMLAnchorElement>() {
-            if document
-                .event_handler()
-                .alternate_action_keyboard_modifier_active()
-            {
+            let alternate_action_modifier = if cfg!(target_os = "macos") {
+                Modifiers::META
+            } else {
+                Modifiers::CONTROL
+            };
+            if modifiers.contains(alternate_action_modifier) {
                 Some(DOMString::from_static("_blank"))
             } else {
                 get_element_target(subject, None)
@@ -422,7 +429,29 @@ pub(crate) fn follow_hyperlink(
     // Step 4: Let urlRecord be the result of encoding-parsing a URL given subject's href
     //         attribute value, relative to subject's node document.
     // Step 5: If urlRecord is failure, then return.
-    // TODO: Implement this.
+    let mut href = subject
+        .get_attribute_string_value(&local_name!("href"))
+        .unwrap();
+    if let Some(suffix) = hyperlink_suffix {
+        href.push_str(&suffix);
+    }
+    let Ok(url) = document.encoding_parse_a_url(&href) else {
+        return;
+    };
+    let window = document.window();
+    let mut load_data = window.load_data_for_document(url, window.pipeline_id());
+    load_data.navigation_type = if event.IsTrusted() {
+        NavigationType::LinkActivated
+    } else {
+        NavigationType::Other
+    };
+    load_data.modifiers = modifiers;
+    load_data.referrer_policy = referrer_policy_for_element(subject);
+    load_data.referrer = if relations.contains(LinkRelations::NO_REFERRER) {
+        Referrer::NoReferrer
+    } else {
+        window.as_global_scope().get_referrer()
+    };
 
     // Step 6: Let noopener be the result of getting an element's noopener with subject,
     //         urlRecord, and targetAttributeValue.
@@ -431,14 +460,12 @@ pub(crate) fn follow_hyperlink(
     // Step 7: Let targetNavigable be the first return value of applying the rules for
     //         choosing a navigable given targetAttributeValue, subject's node navigable, and
     //         noopener.
-    let window = document.window();
-
     let Some(source) = document.browsing_context() else {
         return;
     };
     let (maybe_chosen, history_handling) = match target_attribute_value {
         Some(name) => {
-            let (maybe_chosen, new) = source.choose_a_navigable(cx, name, noopener);
+            let (maybe_chosen, new) = source.choose_a_navigable(cx, name, noopener, &load_data);
             let history_handling = if new {
                 NavigationHistoryBehavior::Replace
             } else {
@@ -457,49 +484,13 @@ pub(crate) fn follow_hyperlink(
 
     if let Some(target_document) = chosen.document() {
         let target_window = target_document.window();
-        // Step 9: Let urlString be the result of applying the URL serializer to urlRecord.
-        // TODO: Implement this.
-
-        let mut href = subject
-            .get_attribute_string_value(&local_name!("href"))
-            .unwrap();
-
-        // Step 10: If hyperlinkSuffix is non-null, then append it to urlString.
-        if let Some(suffix) = hyperlink_suffix {
-            href.push_str(&suffix);
+        // Steps 9-13: Navigate with the URL, referrer policy, and activation
+        // snapshot captured before choosing the target.
+        load_data.inherited_secure_context =
+            Some(target_window.as_global_scope().is_secure_context());
+        if !relations.contains(LinkRelations::NO_REFERRER) {
+            load_data.referrer = target_window.as_global_scope().get_referrer();
         }
-        let Ok(url) = document.encoding_parse_a_url(&href) else {
-            return;
-        };
-
-        // Step 11: Let referrerPolicy be the current state of subject's referrerpolicy content attribute.
-        let referrer_policy = referrer_policy_for_element(subject);
-
-        // Step 12: If subject's link types includes the noreferrer keyword, then set
-        //          referrerPolicy to "no-referrer".
-        let referrer = if relations.contains(LinkRelations::NO_REFERRER) {
-            Referrer::NoReferrer
-        } else {
-            target_window.as_global_scope().get_referrer()
-        };
-
-        // Step 13: Navigate targetNavigable to urlString using subject's node document,
-        //          with referrerPolicy set to referrerPolicy, userInvolvement set to
-        //          userInvolvement, and sourceElement set to subject.
-        let secure = target_window.as_global_scope().is_secure_context();
-        let load_data = LoadData::new(
-            LoadOrigin::Script(document.origin().snapshot()),
-            Some(document.url()),
-            url,
-            document.about_base_url(),
-            Some(window.pipeline_id()),
-            referrer,
-            referrer_policy,
-            Some(secure),
-            Some(document.insecure_requests_policy()),
-            document.has_trustworthy_ancestor_origin(),
-            document.creation_sandboxing_flag_set_considering_parent_iframe(),
-        );
         let target = Trusted::new(target_window);
         let task = task!(navigate_follow_hyperlink: move |cx| {
             debug!("following hyperlink to {}", load_data.url);
@@ -513,20 +504,6 @@ pub(crate) fn follow_hyperlink(
     } else {
         // The target's active document lives in another script thread, so the
         // navigation is routed through the constellation.
-        let mut href = subject
-            .get_attribute_string_value(&local_name!("href"))
-            .unwrap();
-        if let Some(suffix) = hyperlink_suffix {
-            href.push_str(&suffix);
-        }
-        let Ok(url) = document.encoding_parse_a_url(&href) else {
-            return;
-        };
-        let referrer = if relations.contains(LinkRelations::NO_REFERRER) {
-            Referrer::NoReferrer
-        } else {
-            window.as_global_scope().get_referrer()
-        };
-        chosen.navigate_from_other_thread(&document, url, referrer, history_handling);
+        chosen.navigate_from_other_thread(&document, load_data, history_handling);
     }
 }

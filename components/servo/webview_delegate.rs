@@ -10,9 +10,9 @@ use embedder_traits::{
     ConfirmResponse, ConsoleLogLevel, ContextMenuAction, ContextMenuElementInformation,
     ContextMenuItem, Cursor, EmbedderControlId, EmbedderControlResponse, FilePickerRequest,
     FilterPattern, InputEventId, InputEventResult, InputMethodType, LoadStatus, MediaSessionEvent,
-    NewWebViewDetails, Notification, PermissionFeature, PromptResponse, RgbColor, ScreenGeometry,
-    SelectElementOptionOrOptgroup, SelectElementRequest, SimpleDialogRequest, TraversalId,
-    WebResourceRequest, WebResourceResponse, WebResourceResponseMsg,
+    NavigationAction, NewWebViewDetails, Notification, PermissionFeature, PromptResponse, RgbColor,
+    ScreenGeometry, SelectElementOptionOrOptgroup, SelectElementRequest, SimpleDialogRequest,
+    TraversalId, WebResourceRequest, WebResourceResponse, WebResourceResponseMsg,
 };
 use paint_api::rendering_context::RenderingContext;
 use servo_base::generic_channel::{GenericCallback, GenericSender, SendError};
@@ -30,7 +30,10 @@ use crate::{RegisterOrUnregister, Servo, WebView, WebViewBuilder};
 /// A request to navigate a [`WebView`] or one of its inner frames. This can be handled
 /// asynchronously. If not handled, the request will automatically be allowed.
 pub struct NavigationRequest {
+    /// The destination URL.
     pub url: Url,
+    /// The destination frame, navigation type, activating modifiers, and HTTP method.
+    pub action: NavigationAction,
     pub(crate) pipeline_id: PipelineId,
     pub(crate) constellation_proxy: ConstellationProxy,
     pub(crate) response_sent: bool,
@@ -326,8 +329,8 @@ impl InterceptedWebResourceLoad {
 
 impl Drop for InterceptedWebResourceLoad {
     fn drop(&mut self) {
-        if !self.finished &&
-            let Err(error) = self
+        if !self.finished
+            && let Err(error) = self
                 .response_sender
                 .send(WebResourceResponseMsg::FinishLoad)
         {
@@ -900,6 +903,11 @@ impl PromptDialog {
 ///
 /// Refer to the documentation of [`WebViewDelegate::request_create_new`] for more information.
 pub struct CreateNewWebViewRequest {
+    /// The requested destination URL, before creating the initial about:blank document.
+    pub url: Url,
+    /// The navigation that requested this auxiliary `WebView`.
+    pub action: NavigationAction,
+    pub(crate) storage_partition: crate::StoragePartition,
     pub(crate) servo: Servo,
     pub(crate) responder: AutomaticResponder<Option<NewWebViewDetails>>,
 }
@@ -907,7 +915,12 @@ pub struct CreateNewWebViewRequest {
 impl CreateNewWebViewRequest {
     /// Returns a [`WebViewBuilder`] that can be used to create a new auxiliary [`WebView`].
     pub fn builder(self, rendering_context: Rc<dyn RenderingContext>) -> WebViewBuilder {
-        WebViewBuilder::new_for_create_request(&self.servo, rendering_context, self.responder)
+        WebViewBuilder::new_for_create_request(
+            &self.servo,
+            rendering_context,
+            self.responder,
+            self.storage_partition,
+        )
     }
 }
 

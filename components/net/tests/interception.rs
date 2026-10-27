@@ -1173,7 +1173,7 @@ fn finish_and_cancellation_race_completes_boundedly() {
         } else {
             send(&sender, WebResourceResponseMsg::FinishLoad);
             if attempt % 3 == 2 {
-                spawn_blocking_task::<_, ()>(async {
+                spawn_blocking_task(async {
                     tokio::time::timeout(TEST_TIMEOUT, sender.closed())
                         .await
                         .expect("completed interceptor must close its channel");

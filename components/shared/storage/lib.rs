@@ -7,6 +7,7 @@ use std::sync::Arc;
 use malloc_size_of::malloc_size_of_is_0;
 use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::{self, GenericCallback, GenericSend, GenericSender, SendResult};
+use servo_base::id::StoragePartitionId;
 use servo_url::ImmutableOrigin;
 
 use crate::cache_storage::{CacheStorageEngineFactory, CacheStorageThreadMessage};
@@ -55,6 +56,7 @@ impl StorageEngines {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StorageThreads {
+    partition_id: StoragePartitionId,
     client_storage_thread: GenericSender<ClientStorageThreadMessage>,
     idb_thread: GenericSender<IndexedDBThreadMsg>,
     web_storage_thread: GenericSender<WebStorageThreadMsg>,
@@ -68,12 +70,83 @@ impl StorageThreads {
         web_storage_thread: GenericSender<WebStorageThreadMsg>,
         cache_storage_thread: GenericSender<CacheStorageThreadMessage>,
     ) -> StorageThreads {
-        StorageThreads {
+        Self::for_partition(
+            StoragePartitionId::DEFAULT,
+            client_storage_thread,
+            idb_thread,
+            web_storage_thread,
+            cache_storage_thread,
+        )
+    }
+
+    pub fn for_partition(
+        partition_id: StoragePartitionId,
+        client_storage_thread: GenericSender<ClientStorageThreadMessage>,
+        idb_thread: GenericSender<IndexedDBThreadMsg>,
+        web_storage_thread: GenericSender<WebStorageThreadMsg>,
+        cache_storage_thread: GenericSender<CacheStorageThreadMessage>,
+    ) -> Self {
+        Self {
+            partition_id,
             client_storage_thread,
             idb_thread,
             web_storage_thread,
             cache_storage_thread,
         }
+    }
+
+    /// Wait for each factory to initialize, using read-only operations on its
+    /// normal queue. A disconnected owner is a creation error, never a fallback.
+    pub fn wait_until_ready(&self) -> Result<(), String> {
+        let origin = ImmutableOrigin::new_opaque();
+        let (callback, receiver) = GenericCallback::new_blocking().map_err(|e| e.to_string())?;
+        self.persisted(origin.clone(), callback)
+            .map_err(|e| e.to_string())?;
+        // Opaque origins deliberately cannot acquire a shelf; a reply proves startup.
+        let _ = receiver.recv().map_err(|e| e.to_string())?;
+
+        let (sender, receiver) =
+            generic_channel::channel().ok_or("Web Storage readiness channel")?;
+        self.web_storage_thread
+            .send(WebStorageThreadMsg::ListOrigins(
+                sender,
+                WebStorageType::Local,
+            ))
+            .map_err(|e| e.to_string())?;
+        receiver.recv().map_err(|e| e.to_string())?;
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let callback = profile_traits::generic_callback::GenericCallback::new(move |reply| {
+            let _ = sender.send(reply);
+        })
+        .map_err(|e| e.to_string())?;
+        self.idb_thread
+            .send(IndexedDBThreadMsg::Sync(SyncOperation::GetDatabases(
+                callback,
+                origin.clone(),
+            )))
+            .map_err(|e| e.to_string())?;
+        receiver
+            .recv()
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("IndexedDB initialization: {e:?}"))?;
+
+        let (callback, receiver) = GenericCallback::new_blocking().map_err(|e| e.to_string())?;
+        self.cache_storage_thread
+            .send(CacheStorageThreadMessage::Keys {
+                cache_name: String::new(),
+                callback,
+                origin,
+            })
+            .map_err(|e| e.to_string())?;
+        // An absent cache is expected. Receipt proves the engine was initialized.
+        receiver.recv().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn partition_id(&self) -> StoragePartitionId {
+        self.partition_id
     }
 
     /// Stop storage consumers before their registry, after script event loops join.

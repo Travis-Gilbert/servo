@@ -26,6 +26,7 @@ use content_security_policy::Destination;
 use crossbeam_channel::Sender;
 use euclid::{Box2D, Point2D, Scale, Size2D, Vector2D};
 use http::{HeaderMap, Method, StatusCode};
+pub use keyboard_types::Modifiers;
 use log::warn;
 use malloc_size_of::malloc_size_of_is_0;
 use malloc_size_of_derive::MallocSizeOf;
@@ -53,6 +54,43 @@ pub use crate::embedder_controls::*;
 pub use crate::input_events::*;
 use crate::user_contents::UserContentManagerId;
 pub use crate::webdriver::*;
+
+/// The operation that initiated a navigation, following WebKit's navigation types.
+///
+/// There is no `BackForward` variant: host history traversals do not pass through
+/// the embedder's navigation approval callback.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum NavigationType {
+    /// User activation of an anchor or area, including keyboard activation.
+    /// Script-generated clicks are classified as `Other`.
+    LinkActivated,
+    /// Submission of a form.
+    FormSubmitted,
+    /// Reloading the current document, by script or by the host.
+    Reload,
+    /// Any other navigation, including script changes to `location`.
+    #[default]
+    Other,
+}
+
+/// Describes a navigation before the embedder decides whether to allow it.
+/// This is also supplied when a navigation requests a new auxiliary `WebView`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NavigationAction {
+    /// Whether the destination is the `WebView`'s top-level browsing context.
+    /// This is always true for a request to create an auxiliary `WebView`.
+    pub is_main_frame: bool,
+    /// The operation that initiated the navigation.
+    pub navigation_type: NavigationType,
+    /// Modifier keys captured from the activating event, or empty if there was none.
+    pub modifiers: Modifiers,
+    /// The HTTP method of the navigation request.
+    #[serde(
+        deserialize_with = "::hyper_serde::deserialize",
+        serialize_with = "::hyper_serde::serialize"
+    )]
+    pub method: Method,
+}
 
 /// A point in a `WebView`, either expressed in device pixels or page pixels.
 /// Page pixels are CSS pixels, which take into account device pixel scale,
@@ -1299,6 +1337,7 @@ impl ScriptToEmbedderChan {
 /// back to the constellation.
 #[derive(Deserialize, Serialize)]
 pub struct NewWebViewDetails {
+    pub storage_partition_id: servo_base::id::StoragePartitionId,
     pub webview_id: WebViewId,
     pub viewport_details: ViewportDetails,
     pub user_content_manager_id: Option<UserContentManagerId>,

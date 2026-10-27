@@ -5,7 +5,9 @@
 use embedder_traits::ViewportDetails;
 use log::warn;
 use rustc_hash::{FxHashMap, FxHashSet};
-use servo_base::id::{BrowsingContextGroupId, BrowsingContextId, PipelineId, WebViewId};
+use servo_base::id::{
+    BrowsingContextGroupId, BrowsingContextId, PipelineId, StoragePartitionId, WebViewId,
+};
 
 use crate::pipeline::Pipeline;
 
@@ -17,6 +19,7 @@ use crate::pipeline::Pipeline;
 /// context are stored here so that they may be available later.
 #[derive(Debug)]
 pub struct NewBrowsingContextInfo {
+    pub storage_partition_id: StoragePartitionId,
     /// The parent pipeline that contains this browsing context. `None` if this
     /// is a top level browsing context.
     pub parent_pipeline_id: Option<PipelineId>,
@@ -35,6 +38,7 @@ pub struct NewBrowsingContextInfo {
 /// sorted reverse chronologically: in particular prev.pop() is the latest
 /// past entry, and next.pop() is the earliest future entry.
 pub struct BrowsingContext {
+    pub storage_partition_id: StoragePartitionId,
     /// The browsing context group id where the top-level of this bc is found.
     pub bc_group_id: BrowsingContextGroupId,
 
@@ -74,6 +78,7 @@ impl BrowsingContext {
     /// Note this just creates the browsing context, it doesn't add it to the constellation's set of browsing contexts.
     #[expect(clippy::too_many_arguments)]
     pub fn new(
+        storage_partition_id: StoragePartitionId,
         bc_group_id: BrowsingContextGroupId,
         id: BrowsingContextId,
         webview_id: WebViewId,
@@ -86,6 +91,7 @@ impl BrowsingContext {
         let mut pipelines = FxHashSet::default();
         pipelines.insert(pipeline_id);
         BrowsingContext {
+            storage_partition_id,
             bc_group_id,
             id,
             name: String::new(),

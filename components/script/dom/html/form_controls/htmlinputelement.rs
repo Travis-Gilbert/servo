@@ -17,6 +17,7 @@ use js::rust::wrappers2::{
     NewDateObject, NewUCRegExpObject, ObjectIsDate, ObjectIsRegExp,
 };
 use js::rust::{HandleObject, MutableHandleObject};
+use keyboard_types::Modifiers;
 use num_traits::ToPrimitive;
 use script_bindings::cell::{DomRefCell, Ref};
 use script_bindings::codegen::GenericBindings::SelectionBinding::SelectionMethods;
@@ -1029,10 +1030,10 @@ impl TextControlElement for HTMLInputElement {
             .dirty(cx.no_gc(), NodeDamage::ContentOrHeritage);
     }
 
-    fn handle_key_reaction(&self, cx: &mut JSContext, action: KeyReaction) {
+    fn handle_key_reaction(&self, cx: &mut JSContext, action: KeyReaction, modifiers: Modifiers) {
         match action {
             KeyReaction::TriggerDefaultAction => {
-                self.implicit_submission(cx);
+                self.implicit_submission(cx, modifiers);
             },
             KeyReaction::DispatchInput(text, is_composing, input_type) => {
                 self.queue_input_event(text, is_composing, input_type);
@@ -1845,7 +1846,7 @@ impl HTMLInputElement {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#implicit-submission>
-    fn implicit_submission(&self, cx: &mut JSContext) {
+    fn implicit_submission(&self, cx: &mut JSContext, modifiers: Modifiers) {
         let doc = self.owner_document();
         let node = doc.upcast::<Node>();
         let owner = self.form_owner();
@@ -1865,11 +1866,13 @@ impl HTMLInputElement {
         match submit_button {
             Some(ref button) => {
                 if button.is_instance_activatable() {
-                    // spec does not actually say to set the not trusted flag,
-                    // but we can get here from synthetic keydown events
-                    button
-                        .upcast::<Node>()
-                        .fire_synthetic_pointer_event_not_trusted(cx, atom!("click"));
+                    // Implicit submission is driven by trusted keyboard or composition input.
+                    button.upcast::<Node>().fire_synthetic_pointer_event(
+                        cx,
+                        atom!("click"),
+                        modifiers,
+                        true,
+                    );
                 }
             },
             None => {
@@ -1903,6 +1906,7 @@ impl HTMLInputElement {
                     cx,
                     SubmittedFrom::NotFromForm,
                     FormSubmitterElement::Form(form),
+                    modifiers,
                 );
             },
         }
@@ -2336,7 +2340,7 @@ impl VirtualMethods for HTMLInputElement {
                         .text_input
                         .borrow_mut()
                         .handle_compositionend(compositionevent);
-                    self.handle_key_reaction(cx, action);
+                    self.handle_key_reaction(cx, action, event.modifiers());
                     self.upcast::<Node>().dirty(cx.no_gc(), NodeDamage::Other);
                     self.update_placeholder_shown_state();
                 } else if event.type_() == atom!("compositionupdate") {
@@ -2344,7 +2348,7 @@ impl VirtualMethods for HTMLInputElement {
                         .text_input
                         .borrow_mut()
                         .handle_compositionupdate(compositionevent);
-                    self.handle_key_reaction(cx, action);
+                    self.handle_key_reaction(cx, action, event.modifiers());
                     self.upcast::<Node>().dirty(cx.no_gc(), NodeDamage::Other);
                     self.update_placeholder_shown_state();
                 } else if event.type_() == atom!("compositionstart") {

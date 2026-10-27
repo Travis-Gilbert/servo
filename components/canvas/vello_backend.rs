@@ -422,6 +422,13 @@ impl GenericDrawTarget for VelloDrawTarget {
             for text_run in text_runs.iter() {
                 SHARED_FONT_CACHE.with(|font_cache| {
                     let identifier = &text_run.font.identifier;
+                    // A URL does not identify font bytes across storage partitions.
+                    let web_font = RefCell::new(HashMap::new());
+                    let font_cache = if matches!(identifier, FontIdentifier::Web(_)) {
+                        &web_font
+                    } else {
+                        font_cache
+                    };
                     if !font_cache.borrow().contains_key(identifier) {
                         let Some(font_data_and_index) = text_run.font.font_data_and_index() else {
                             return;
@@ -541,6 +548,13 @@ impl GenericDrawTarget for VelloDrawTarget {
             for text_run in text_runs.iter() {
                 SHARED_FONT_CACHE.with(|font_cache| {
                     let identifier = &text_run.font.identifier;
+                    // A URL does not identify font bytes across storage partitions.
+                    let web_font = RefCell::new(HashMap::new());
+                    let font_cache = if matches!(identifier, FontIdentifier::Web(_)) {
+                        &web_font
+                    } else {
+                        font_cache
+                    };
                     if !font_cache.borrow().contains_key(identifier) {
                         let Some(font_data_and_index) = text_run.font.font_data_and_index() else {
                             return;

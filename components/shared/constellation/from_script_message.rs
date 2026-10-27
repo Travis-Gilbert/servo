@@ -11,7 +11,8 @@ use devtools_traits::{DevtoolScriptControlMsg, ScriptToDevtoolsControlMsg, Worke
 use embedder_traits::user_contents::UserContentManagerId;
 use embedder_traits::{
     AnimationState, FocusSequenceNumber, JSValue, JavaScriptEvaluationError,
-    JavaScriptEvaluationId, MediaSessionEvent, ScriptToEmbedderChan, ViewportDetails, WakeLockType,
+    JavaScriptEvaluationId, MediaSessionEvent, Modifiers, NavigationAction, NavigationType,
+    ScriptToEmbedderChan, ViewportDetails, WakeLockType,
 };
 use encoding_rs::Encoding;
 use euclid::default::Size2D as UntypedSize2D;
@@ -31,7 +32,7 @@ use servo_base::generic_channel::{GenericCallback, GenericReceiver, GenericSende
 use servo_base::id::{
     BroadcastChannelRouterId, BrowsingContextId, HistoryStateId, MessagePortId,
     MessagePortRouterId, PipelineId, ScriptEventLoopId, ServiceWorkerId,
-    ServiceWorkerRegistrationId, WebViewId,
+    ServiceWorkerRegistrationId, StoragePartitionId, WebViewId,
 };
 use servo_canvas_traits::canvas::{CanvasId, CanvasMsg};
 #[cfg(feature = "webgl")]
@@ -49,12 +50,17 @@ use crate::{
     WindowSizeType,
 };
 
-pub type ScriptToConstellationSender =
-    GenericSender<(WebViewId, PipelineId, ScriptToConstellationMessage)>;
+pub type ScriptToConstellationSender = GenericSender<(
+    Option<StoragePartitionId>,
+    WebViewId,
+    PipelineId,
+    ScriptToConstellationMessage,
+)>;
 
 /// A Script to Constellation channel.
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct ScriptToConstellationChan {
+    pub storage_partition_id: StoragePartitionId,
     /// Sender for communicating with constellation thread.
     pub sender: ScriptToConstellationSender,
     /// Used to identify the origin `WebView` of the message.
@@ -66,7 +72,12 @@ pub struct ScriptToConstellationChan {
 impl ScriptToConstellationChan {
     /// Send ScriptMsg and attach the pipeline_id to the message.
     pub fn send(&self, msg: ScriptToConstellationMessage) -> SendResult {
-        self.sender.send((self.webview_id, self.pipeline_id, msg))
+        self.sender.send((
+            Some(self.storage_partition_id),
+            self.webview_id,
+            self.pipeline_id,
+            msg,
+        ))
     }
 }
 
@@ -102,6 +113,10 @@ pub struct LoadData {
         serialize_with = "::hyper_serde::serialize"
     )]
     pub method: Method,
+    /// The operation that initiated this load.
+    pub navigation_type: NavigationType,
+    /// Modifier keys captured at activation time.
+    pub modifiers: Modifiers,
     /// The headers.
     #[serde(
         deserialize_with = "::hyper_serde::deserialize",
@@ -149,6 +164,16 @@ pub struct LoadData {
 }
 
 impl LoadData {
+    /// Describe this load for the embedder using the resolved destination frame.
+    pub fn navigation_action(&self, is_main_frame: bool) -> NavigationAction {
+        NavigationAction {
+            is_main_frame,
+            navigation_type: self.navigation_type,
+            modifiers: self.modifiers,
+            method: self.method.clone(),
+        }
+    }
+
     /// Create a new `LoadData` object.
     #[expect(clippy::too_many_arguments)]
     pub fn new(
@@ -171,6 +196,8 @@ impl LoadData {
             about_base_url,
             creator_pipeline_id,
             method: Method::GET,
+            navigation_type: NavigationType::Other,
+            modifiers: Modifiers::empty(),
             headers: HeaderMap::new(),
             data: None,
             reload_navigation: false,
@@ -284,8 +311,8 @@ pub enum ServiceWorkerMsg {
     },
     /// <https://w3c.github.io/ServiceWorker/#algorithms>
     HandleAlgorithm(ServiceWorkerAlgorithm),
-    /// Exit the service worker manager
-    Exit,
+    /// Exit after stopping and joining workers.
+    Exit(GenericSender<()>),
 }
 
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, PartialEq, Serialize)]
@@ -529,6 +556,10 @@ pub trait ServiceWorkerManagerFactory {
 /// Specifies the information required to load an auxiliary browsing context.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AuxiliaryWebViewCreationRequest {
+    /// The requested navigation, distinct from the initial about:blank load.
+    pub navigation_url: ServoUrl,
+    /// The action that requested the new top-level browsing context.
+    pub navigation_action: NavigationAction,
     /// Load data containing the url to load
     pub load_data: LoadData,
     /// The webview that caused this request.
