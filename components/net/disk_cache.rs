@@ -16,9 +16,7 @@ use servo_config::pref;
 use servo_url::ServoUrl;
 use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock};
 
-use crate::http_cache::{
-    CacheEntry, CacheKey, CachedResource, HttpCacheAssignment, MemoryCacheLifecycle,
-};
+use crate::http_cache::{CacheEntry, CacheKey, CachedResource, MemoryCacheLifecycle};
 
 #[derive(MallocSizeOf)]
 pub(crate) struct DiskCacheMetadata {
@@ -37,7 +35,7 @@ impl From<&Row<'_>> for DiskCacheMetadata {
     }
 }
 
-/// This data structure will be per [`HttpCacheAssignment`]. Currently, we only store HttpCacheAssignment::Public and otherwise return zero.
+/// This data structure belongs to one storage partition.
 /// As this data structure stores the state of the cache, if other instances share the same sqlite database, special care has to be taken
 /// to ensure conistency.
 #[derive(MallocSizeOf)]
@@ -46,7 +44,6 @@ struct DiskCacheInner {
     size: usize,
     #[ignore_malloc_size_of = "Find a better way"]
     db: rusqlite::Connection,
-    cache_assignment: HttpCacheAssignment,
 }
 
 #[derive(MallocSizeOf)]
@@ -80,50 +77,21 @@ impl Iden for DiskCacheTable {
     }
 }
 
-/// Get the storage path out of `network_http_disk_cache` preference and `temporary_storage` option.
-fn storage_dir() -> Option<PathBuf> {
-    let disk_storage_path = pref!(network_http_disk_cache);
-    match (
-        servo_config::opts::get().temporary_storage,
-        disk_storage_path.is_empty(),
-    ) {
-        (false, false) => Some(disk_storage_path.into()),
-        (true, true) => {
-            let tmp_dir = tempfile::tempdir().unwrap();
-            let mut path = tmp_dir.path().to_path_buf();
-            path.set_file_name("cache.sqlite3");
-            Some(path)
-        },
-        (true, false) => {
-            error!(
-                "Temporary storage cannot be set with explicit disk storage path. Disabling http_disk_cache"
-            );
-            None
-        },
-        (false, true) => None,
-    }
-}
-
 impl DiskCache {
-    /// Creates a new [`DiskCache`] if the preference if set.
+    /// Creates a new [`DiskCache`] at the explicitly supplied partition path.
     /// Creates the sqlite table if it does not exist and starts the db connection.
     /// TODO: Implement WAL and other sqlite pragma.
     pub(crate) fn new(
-        cache_assignment: HttpCacheAssignment,
-    ) -> (Option<Arc<DiskCache>>, MemoryCacheLifecycle) {
-        // For private browsing we currently do not want to store any disk cache.
-        let disk_cache_path = storage_dir();
-
-        if let Some(disk_cache_path) = disk_cache_path &&
-            cache_assignment == HttpCacheAssignment::Public
-        {
+        disk_cache_path: Option<PathBuf>,
+    ) -> Result<(Option<Arc<DiskCache>>, MemoryCacheLifecycle), String> {
+        if let Some(disk_cache_path) = disk_cache_path {
             let Ok(max_disk_cache_size) = pref!(network_http_disk_cache_size).try_into() else {
-                return (None, MemoryCacheLifecycle::empty());
+                return Err("Failed to initialize partition disk cache".into());
             };
 
             let Ok(db) = rusqlite::Connection::open(&disk_cache_path) else {
                 error!("Could not open disk cache database");
-                return (None, MemoryCacheLifecycle::empty());
+                return Err("Failed to initialize partition disk cache".into());
             };
 
             let _ = db.execute("PRAGMA journal_mode = WAL;", ());
@@ -146,7 +114,7 @@ impl DiskCache {
                 .build(SqliteQueryBuilder);
             if let Err(e) = db.execute(query.as_str(), ()) {
                 error!("Could not create table. DB Error {:?}", e);
-                return (None, MemoryCacheLifecycle::empty());
+                return Err("Failed to initialize partition disk cache".into());
             }
 
             let (query, values) = Query::select()
@@ -157,37 +125,32 @@ impl DiskCache {
             let (entries, size) = {
                 let Ok(mut st) = db.prepare(query.as_str()) else {
                     error!("Could not get disk data");
-                    return (None, MemoryCacheLifecycle::empty());
+                    return Err("Failed to initialize partition disk cache".into());
                 };
                 let entries = st
                     .query_map(&*values.as_params(), |row| Ok(DiskCacheMetadata::from(row)))
-                    .unwrap()
-                    .map(|entry| entry.unwrap())
-                    .collect::<VecDeque<_>>();
+                    .map_err(|error| error.to_string())?
+                    .collect::<Result<VecDeque<_>, _>>()
+                    .map_err(|error| error.to_string())?;
 
                 let size = entries.iter().map(|entry| entry.size).sum();
                 (entries, size)
             };
-            let inner = DiskCacheInner {
-                entries,
-                size,
-                db,
-                cache_assignment,
-            };
+            let inner = DiskCacheInner { entries, size, db };
             let disk_cache_data = std::sync::Arc::new(DiskCache {
                 inner: TokioMutex::new(inner),
                 path: disk_cache_path,
                 max_size: max_disk_cache_size,
             });
 
-            (
+            Ok((
                 Some(disk_cache_data.clone()),
                 MemoryCacheLifecycle {
                     disk_cache: Some(disk_cache_data),
                 },
-            )
+            ))
         } else {
-            (None, MemoryCacheLifecycle::empty())
+            Ok((None, MemoryCacheLifecycle::empty()))
         }
     }
 

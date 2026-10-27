@@ -19,9 +19,9 @@ use embedder_traits::user_contents::{
     UserContentManagerId, UserScript, UserScriptId, UserStyleSheet, UserStyleSheetId,
 };
 use embedder_traits::{
-    MediaSessionActionType, NewWebViewDetails, PaintHitTestResult, Theme, TraversalId, UrlRequest,
     DocumentLayoutSnapshot, DocumentLayoutSnapshotError, EmbedderControlId,
     EmbedderControlResponse, HitTestResult, InputEventAndId, JavaScriptEvaluationId,
+    MediaSessionActionType, NewWebViewDetails, PaintHitTestResult, Theme, TraversalId, UrlRequest,
     ViewportDetails, WebDriverCommandMsg, WebViewPoint,
 };
 pub use from_script_message::*;
@@ -44,6 +44,11 @@ use webrender_api::{ExternalScrollId, ImageKey};
 /// from `libservo` itself.
 #[derive(IntoStaticStr)]
 pub enum EmbedderToConstellationMessage {
+    RegisterStoragePartition {
+        resources: net_traits::ResourceThreads,
+        storage: storage_traits::StorageThreads,
+        response: std::sync::mpsc::Sender<Result<(), String>>,
+    },
     /// Exit the constellation.
     Exit,
     /// Whether to allow script to navigate.

@@ -60,7 +60,14 @@ impl CoreTextFontCache {
             variations: Vec::new(),
         };
 
-        let cache = CACHE.0.get_or_init(Default::default);
+        // Web identifiers contain a URL, not partition identity or font content.
+        // Preserve caching for local fonts and uniquely identified array-buffer fonts.
+        let web_cache = parking_lot::RwLock::new(HashMap::new());
+        let cache = if matches!(font_identifier, FontIdentifier::Web(_)) {
+            &web_cache
+        } else {
+            CACHE.0.get_or_init(Default::default)
+        };
         {
             let cache = cache.read();
             if let Some(platform_font) = cache
@@ -149,7 +156,14 @@ impl CoreTextFontCache {
             variations: specified_variations.to_owned(),
         };
 
-        let cache = CACHE.0.get_or_init(Default::default);
+        // Web identifiers contain a URL, not partition identity or font content.
+        // Preserve caching for local fonts and uniquely identified array-buffer fonts.
+        let web_cache = parking_lot::RwLock::new(HashMap::new());
+        let cache = if matches!(font_identifier, FontIdentifier::Web(_)) {
+            &web_cache
+        } else {
+            CACHE.0.get_or_init(Default::default)
+        };
         {
             let cache = cache.read();
             if let Some(platform_font) = cache

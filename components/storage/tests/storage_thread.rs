@@ -8,10 +8,12 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
-use profile_traits::generic_callback::GenericCallback as ProfiledCallback;
 use profile::mem as profile_mem;
+use profile_traits::generic_callback::GenericCallback as ProfiledCallback;
 use servo_base::generic_channel::{self, GenericCallback, GenericSend, ReceiveError};
-use servo_base::id::{BrowsingContextId, Index, PipelineNamespaceId, TEST_WEBVIEW_ID, WebViewId};
+use servo_base::id::{
+    BrowsingContextId, Index, PipelineNamespaceId, StoragePartitionId, TEST_WEBVIEW_ID, WebViewId,
+};
 use servo_url::ServoUrl;
 use storage_traits::cache_storage::{
     CacheStorageEngine, CacheStorageEngineFactory, CacheStorageError, CacheStorageThreadMessage,
@@ -181,7 +183,9 @@ impl CacheStorageEngine for AlwaysPresentCache {
         {
             Ok(())
         } else {
-            Err(CacheStorageError::Internal("unexpected open arguments".to_owned()))
+            Err(CacheStorageError::Internal(
+                "unexpected open arguments".to_owned(),
+            ))
         }
     }
 
@@ -193,7 +197,9 @@ impl CacheStorageEngine for AlwaysPresentCache {
         if origin.ascii_serialization() == "https://example.com" && cache_name == "selected" {
             Ok(vec!["https://example.com/resource".to_owned()])
         } else {
-            Err(CacheStorageError::Internal("unexpected keys arguments".to_owned()))
+            Err(CacheStorageError::Internal(
+                "unexpected keys arguments".to_owned(),
+            ))
         }
     }
 
@@ -878,7 +884,7 @@ fn test_indexeddb_engine_factory_serves_the_connection() {
     let callback = ProfiledCallback::new(move |reply| {
         let _ = reply_sender.send(reply.expect("the open reply did not survive the channel"));
     })
-        .expect("failed to build the open callback");
+    .expect("failed to build the open callback");
     GenericSend::send(
         &public_storage_threads,
         IndexedDBThreadMsg::Sync(SyncOperation::OpenDatabase(
@@ -945,4 +951,251 @@ fn test_indexeddb_engine_factory_serves_the_connection() {
 
     shutdown_storage_group(&public_storage_threads);
     shutdown_storage_group(&private_storage_threads);
+}
+
+#[test]
+fn test_partition_roots_reopen_and_pending_registry_work() {
+    let roots = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+    let origin = ServoUrl::parse("https://same.example.com")
+        .unwrap()
+        .origin();
+    let make_group = |root: &std::path::Path| {
+        storage::new_partition_storage_threads(
+            StoragePartitionId::new(),
+            profile_mem::Profiler::create(),
+            Some(root.to_owned()),
+            false,
+            "partition-test",
+            &StorageEngines::default(),
+        )
+    };
+    let groups = roots.each_ref().map(|root| make_group(root.path()));
+    let mut pending = Vec::new();
+    let mut paths = Vec::new();
+    for (index, group) in groups.iter().enumerate() {
+        group.wait_until_ready().unwrap();
+        set_web_storage(
+            group,
+            WebStorageType::Local,
+            TEST_WEBVIEW_ID,
+            &origin,
+            &index.to_string(),
+        );
+        let proxy = group
+            .client_storage_handle()
+            .obtain_a_storage_bottle_map(
+                StorageType::Local,
+                None,
+                StorageIdentifier::IndexedDB,
+                origin.clone(),
+            )
+            .recv()
+            .unwrap()
+            .unwrap();
+        let (path, created) = proxy
+            .handle
+            .create_database(proxy.bottle_id, "same-idb".into())
+            .recv()
+            .unwrap()
+            .unwrap();
+        assert!(created);
+        assert!(path.starts_with(roots[index].path()));
+        paths.push(path);
+        // Queue registry work without receiving replies, then exit all owners.
+        pending.push(
+            proxy
+                .handle
+                .create_database(proxy.bottle_id, "queued-idb".into()),
+        );
+    }
+    assert_ne!(paths[0], paths[1]);
+    for group in &groups {
+        group.exit().unwrap();
+    }
+    for reply in pending {
+        assert!(reply.recv().unwrap().is_ok());
+    }
+    for (index, root) in roots.iter().enumerate() {
+        let group = make_group(root.path());
+        assert_eq!(
+            get_web_storage(&group, WebStorageType::Local, TEST_WEBVIEW_ID, &origin),
+            Some(index.to_string())
+        );
+        let proxy = group
+            .client_storage_handle()
+            .obtain_a_storage_bottle_map(
+                StorageType::Local,
+                None,
+                StorageIdentifier::IndexedDB,
+                origin.clone(),
+            )
+            .recv()
+            .unwrap()
+            .unwrap();
+        let (path, created) = proxy
+            .handle
+            .create_database(proxy.bottle_id, "same-idb".into())
+            .recv()
+            .unwrap()
+            .unwrap();
+        assert!(!created);
+        assert_eq!(path, paths[index]);
+        group.exit().unwrap();
+    }
+}
+
+#[test]
+fn test_temporary_legacy_group_does_not_touch_persistent_root() {
+    let persistent = tempfile::tempdir().unwrap();
+    std::fs::write(persistent.path().join("sentinel"), b"unchanged").unwrap();
+    let (private, public) = storage::new_storage_threads(
+        profile_mem::Profiler::create(),
+        Some(persistent.path().to_owned()),
+        true,
+        StorageEngines::default(),
+    );
+    let origin = ServoUrl::parse("https://example.com").unwrap().origin();
+    for group in [&private, &public] {
+        set_web_storage(
+            group,
+            WebStorageType::Local,
+            TEST_WEBVIEW_ID,
+            &origin,
+            "temporary",
+        );
+        group.exit().unwrap();
+    }
+    assert_eq!(std::fs::read_dir(persistent.path()).unwrap().count(), 1);
+    assert_eq!(
+        std::fs::read(persistent.path().join("sentinel")).unwrap(),
+        b"unchanged"
+    );
+}
+
+#[test]
+fn test_partition_custom_factories_receive_distinct_roots() {
+    struct RecordingCacheFactory(Arc<Mutex<Vec<PathBuf>>>);
+    impl CacheStorageEngineFactory for RecordingCacheFactory {
+        fn open(&self, path: PathBuf) -> Result<Box<dyn CacheStorageEngine>, String> {
+            self.0.lock().unwrap().push(path);
+            Ok(Box::new(AlwaysPresentCache))
+        }
+    }
+    let paths = Arc::new(Mutex::new(Vec::new()));
+    let engines = StorageEngines {
+        cache: Some(Arc::new(RecordingCacheFactory(paths.clone()))),
+        ..Default::default()
+    };
+    let roots = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+    for root in &roots {
+        let group = storage::new_partition_storage_threads(
+            servo_base::id::StoragePartitionId::new(),
+            profile_mem::Profiler::create(),
+            Some(root.path().to_owned()),
+            false,
+            "factory-partition",
+            &engines,
+        );
+        group.wait_until_ready().unwrap();
+        group.exit().unwrap();
+    }
+    let paths = paths.lock().unwrap();
+    assert_eq!(paths.len(), 2);
+    assert_eq!(paths[0], roots[0].path().join("cachestorage/default_v1"));
+    assert_eq!(paths[1], roots[1].path().join("cachestorage/default_v1"));
+}
+
+#[test]
+fn test_pending_indexeddb_opens_finish_before_each_partition_registry_exits() {
+    struct PathRecordingIdbFactory {
+        paths: Arc<Mutex<Vec<PathBuf>>>,
+        calls: EngineCalls,
+    }
+    impl IndexedDbEngineFactory for PathRecordingIdbFactory {
+        fn open(
+            &self,
+            path: PathBuf,
+            _created: bool,
+            _description: &IndexedDBDescription,
+        ) -> BackendResult<Box<dyn KvsEngine>> {
+            self.paths.lock().unwrap().push(path);
+            Ok(Box::new(RecordingIdbEngine {
+                calls: self.calls.clone(),
+            }))
+        }
+    }
+    let paths = Arc::new(Mutex::new(Vec::new()));
+    let engines = StorageEngines {
+        indexeddb: Some(Arc::new(PathRecordingIdbFactory {
+            paths: paths.clone(),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        })),
+        ..Default::default()
+    };
+    let roots = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+    let groups = roots.each_ref().map(|root| {
+        storage::new_partition_storage_threads(
+            servo_base::id::StoragePartitionId::new(),
+            profile_mem::Profiler::create(),
+            Some(root.path().to_owned()),
+            false,
+            "pending-idb-partition",
+            &engines,
+        )
+    });
+    let origin = ServoUrl::parse("https://same.example.com")
+        .unwrap()
+        .origin();
+    let mut replies = Vec::new();
+    for group in &groups {
+        let proxy = group
+            .client_storage_handle()
+            .obtain_a_storage_bottle_map(
+                StorageType::Local,
+                None,
+                StorageIdentifier::IndexedDB,
+                origin.clone(),
+            )
+            .recv()
+            .unwrap()
+            .unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let callback = ProfiledCallback::new(move |reply| {
+            let _ = sender.send(reply.unwrap());
+        })
+        .unwrap();
+        GenericSend::send(
+            group,
+            IndexedDBThreadMsg::Sync(SyncOperation::OpenDatabase(
+                callback,
+                origin.clone(),
+                "same-db".into(),
+                Some(CUSTOM_ENGINE_VERSION),
+                Uuid::new_v4(),
+                proxy,
+            )),
+        )
+        .unwrap();
+        replies.push(receiver);
+    }
+    for group in &groups {
+        group.exit().unwrap();
+    }
+    for reply in replies {
+        assert!(matches!(
+            reply.recv().unwrap(),
+            ConnectionMsg::Connection {
+                version: CUSTOM_ENGINE_VERSION,
+                ..
+            }
+        ));
+    }
+    let paths = paths.lock().unwrap();
+    assert_eq!(paths.len(), 2);
+    assert!(
+        roots
+            .iter()
+            .all(|root| paths.iter().any(|path| path.starts_with(root.path())))
+    );
+    assert_ne!(paths[0], paths[1]);
 }

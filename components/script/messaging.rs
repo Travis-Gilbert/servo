@@ -18,10 +18,9 @@ use profile_traits::time::{self as profile_time};
 use rustc_hash::FxHashSet;
 use script_traits::{Painter, ScriptThreadMessage};
 use servo_base::generic_channel::{GenericCallback, GenericSender, RoutedReceiver};
-use servo_base::id::{PipelineId, WebViewId};
+use servo_base::id::PipelineId;
 #[cfg(feature = "bluetooth")]
 use servo_bluetooth_traits::BluetoothRequest;
-use servo_constellation_traits::ScriptToConstellationMessage;
 use stylo_atoms::Atom;
 use timers::TimerScheduler;
 #[cfg(feature = "webgpu")]
@@ -381,6 +380,8 @@ impl OpaqueSender<CommonScriptMsg> for ScriptEventLoopSender {
 
 #[derive(Clone, JSTraceable)]
 pub(crate) struct ScriptThreadSenders {
+    #[no_trace]
+    pub(crate) storage_partition_id: servo_base::id::StoragePartitionId,
     /// A channel to hand out to script thread-based entities that need to be able to enqueue
     /// events in the event queue.
     pub(crate) self_sender: Sender<MainThreadScriptMsg>,
@@ -398,7 +399,7 @@ pub(crate) struct ScriptThreadSenders {
     /// particular pipelines.
     #[no_trace]
     pub(crate) pipeline_to_constellation_sender:
-        GenericSender<(WebViewId, PipelineId, ScriptToConstellationMessage)>,
+        servo_constellation_traits::ScriptToConstellationSender,
 
     /// A channel to send messages to the Embedder.
     #[no_trace]

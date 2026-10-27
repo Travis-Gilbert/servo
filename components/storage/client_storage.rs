@@ -601,8 +601,8 @@ impl RegistryBackend for SqliteEngine {
         // otherwise false.
         // It will be false when there’s an internal error.
         let persisted = bucket_mode(shelf.default_bucket_id, &tx)
-            .is_ok_and(|mode| mode == Mode::Persistent) &&
-            tx.commit().is_ok();
+            .is_ok_and(|mode| mode == Mode::Persistent)
+            && tx.commit().is_ok();
 
         Ok(persisted)
     }
@@ -787,7 +787,7 @@ impl ClientStorageThreadFactory for ClientStorageThreadHandle {
             .name("ClientStorageThread".to_owned())
             .spawn(move || {
                 // Keep temp_dir alive while the thread runs.
-                let _ = temp_dir;
+                let _temporary_root = temp_dir;
                 let factory = factory.unwrap_or_else(|| Arc::new(SqliteRegistryEngineFactory));
                 let Ok(engine) = factory.open(storage_dir) else {
                     warn!("Failed to initialize ClientStorage engine");

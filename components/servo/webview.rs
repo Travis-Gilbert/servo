@@ -12,11 +12,11 @@ use accesskit::{
 };
 use dpi::PhysicalSize;
 use embedder_traits::{
+    ContextMenuAction, ContextMenuItem, Cursor, DocumentLayoutSnapshot,
+    DocumentLayoutSnapshotError, EmbedderControlId, EmbedderControlRequest, HitTestResult, Image,
     InputEvent, InputEventAndId, InputEventId, JSValue, JavaScriptEvaluationError, LoadStatus,
     MediaSessionActionType, NewWebViewDetails, ScreenGeometry, ScreenshotCaptureError, Scroll,
     Theme, TraversalId, UrlRequest, ViewportDetails, WebViewPoint, WebViewRect,
-    ContextMenuAction, ContextMenuItem, Cursor, DocumentLayoutSnapshot,
-    DocumentLayoutSnapshotError, EmbedderControlId, EmbedderControlRequest, HitTestResult, Image,
 };
 use euclid::{Scale, Size2D};
 use image::RgbaImage;
@@ -24,6 +24,7 @@ use log::debug;
 use paint_api::WebViewTrait;
 use paint_api::rendering_context::RenderingContext;
 use servo_base::Epoch;
+use servo_base::generic_channel::{GenericCallback, GenericSender};
 use servo_base::id::WebViewId;
 use servo_config::pref;
 use servo_constellation_traits::{
@@ -33,7 +34,6 @@ use servo_constellation_traits::{
 use servo_geometry::DeviceIndependentPixel;
 use servo_url::ServoUrl;
 use style_traits::CSSPixel;
-use servo_base::generic_channel::{GenericCallback, GenericSender};
 use url::Url;
 use webrender_api::units::{DeviceIntRect, DevicePixel, DevicePoint, DeviceSize};
 
@@ -47,6 +47,7 @@ use crate::{
     ColorPicker, ContextMenu, EmbedderControl, InputMethodControl, SelectElement, Servo,
     UserContentManager, WebRenderDebugOption,
 };
+use crate::{StoragePartition, StoragePartitionError};
 
 pub(crate) const MINIMUM_WEBVIEW_SIZE: Size2D<i32, DevicePixel> = Size2D::new(1, 1);
 
@@ -97,6 +98,7 @@ impl Hash for WebView {
 }
 
 pub(crate) struct WebViewInner {
+    storage_partition: StoragePartition,
     pub(crate) id: WebViewId,
     pub(crate) servo: Servo,
     pub(crate) delegate: Rc<dyn WebViewDelegate>,
@@ -161,6 +163,7 @@ impl WebView {
         let id = WebViewId::new(painter_id);
         let webview = Self(Rc::new(RefCell::new(WebViewInner {
             id,
+            storage_partition: builder.storage_partition.clone(),
             servo: servo.clone(),
             rendering_context: builder.rendering_context,
             delegate: builder.delegate,
@@ -207,6 +210,7 @@ impl WebView {
             .map(|user_content_manager| user_content_manager.id());
 
         let new_webview_details = NewWebViewDetails {
+            storage_partition_id: builder.storage_partition.id(),
             webview_id: webview.id(),
             viewport_details,
             user_content_manager_id,
@@ -239,6 +243,10 @@ impl WebView {
         webview
     }
 
+    pub fn storage_partition(&self) -> StoragePartition {
+        self.inner().storage_partition.clone()
+    }
+
     fn inner(&self) -> Ref<'_, WebViewInner> {
         self.0.borrow()
     }
@@ -256,6 +264,7 @@ impl WebView {
         response_sender: GenericSender<Option<NewWebViewDetails>>,
     ) {
         let request = CreateNewWebViewRequest {
+            storage_partition: self.storage_partition(),
             servo: self.servo(),
             responder: AutomaticResponder::new(response_sender, None),
         };
@@ -1118,6 +1127,8 @@ impl WebViewTrait for ServoRendererWebView {
 
 /// Builder for creating a [`WebView`].
 pub struct WebViewBuilder {
+    storage_partition: StoragePartition,
+    opener_partition: Option<servo_base::id::StoragePartitionId>,
     servo: Servo,
     rendering_context: Rc<dyn RenderingContext>,
     delegate: Rc<dyn WebViewDelegate>,
@@ -1137,6 +1148,8 @@ impl WebViewBuilder {
     /// use `rendering_context` to paint its contents.
     pub fn new(servo: &Servo, rendering_context: Rc<dyn RenderingContext>) -> Self {
         Self {
+            storage_partition: servo.default_storage_partition(),
+            opener_partition: None,
             servo: servo.clone(),
             rendering_context,
             url: None,
@@ -1154,8 +1167,11 @@ impl WebViewBuilder {
         servo: &Servo,
         rendering_context: Rc<dyn RenderingContext>,
         responder: AutomaticResponder<Option<NewWebViewDetails>>,
+        storage_partition: StoragePartition,
     ) -> Self {
         let mut builder = Self::new(servo, rendering_context);
+        builder.opener_partition = Some(storage_partition.id());
+        builder.storage_partition = storage_partition;
         builder.create_new_webview_responder = Some(responder);
         builder
     }
@@ -1205,8 +1221,30 @@ impl WebViewBuilder {
         self
     }
 
-    /// Create the [`WebView`] using the configuration specified in this [`WebViewBuilder`].
+    /// Select the immutable storage owner for this WebView.
+    /// Auxiliary WebViews must keep the partition inherited from their opener.
+    pub fn storage_partition(mut self, partition: StoragePartition) -> Self {
+        self.storage_partition = partition;
+        self
+    }
+
+    /// Create a WebView, rejecting a foreign Servo handle or a conflicting popup partition.
+    pub fn try_build(self) -> Result<WebView, StoragePartitionError> {
+        if !self.servo.owns_storage_partition(&self.storage_partition) {
+            return Err(StoragePartitionError::WrongServo);
+        }
+        if self
+            .opener_partition
+            .is_some_and(|id| id != self.storage_partition.id())
+        {
+            return Err(StoragePartitionError::PopupPartitionConflict);
+        }
+        Ok(WebView::new(self))
+    }
+
+    /// Create the WebView, panicking if its storage partition selection is invalid.
+    /// Use [`Self::try_build`] to handle selection errors.
     pub fn build(self) -> WebView {
-        WebView::new(self)
+        self.try_build().expect("Invalid WebView storage partition")
     }
 }

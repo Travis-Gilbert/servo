@@ -592,3 +592,20 @@ impl fmt::Display for ScriptEventLoopId {
 /// layout time.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, MallocSizeOf, PartialEq, Serialize)]
 pub struct LCPCandidateID(pub u64);
+
+/// Identity of a storage owner. Origins and browsing context groups are scoped
+/// inside this identity; it is never derived from website-controlled data.
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Eq, Hash, MallocSizeOf, PartialEq, Serialize,
+)]
+pub struct StoragePartitionId(u64);
+
+impl StoragePartitionId {
+    pub const DEFAULT: Self = Self(0);
+    pub const PRIVATE: Self = Self(1);
+
+    pub fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(2);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}

@@ -775,7 +775,12 @@ impl ScriptThread {
             script_thread
                 .senders
                 .pipeline_to_constellation_sender
-                .send((source.webview_id(), global_to_clone.pipeline_id(), msg))
+                .send((
+                    Some(script_thread.resource_threads.partition_id()),
+                    source.webview_id(),
+                    global_to_clone.pipeline_id(),
+                    msg,
+                ))
                 .ok()?;
             let found = result_receiver.recv().ok()??;
             if let Some(window_proxy) = script_thread
@@ -935,7 +940,12 @@ impl ScriptThread {
         };
 
         let opts = opts::get();
+        assert_eq!(
+            state.resource_threads.partition_id(),
+            state.storage_threads.partition_id()
+        );
         let senders = ScriptThreadSenders {
+            storage_partition_id: state.resource_threads.partition_id(),
             self_sender,
             #[cfg(feature = "bluetooth")]
             bluetooth_sender: state.bluetooth_sender,
@@ -1326,10 +1336,10 @@ impl ScriptThread {
             .iter()
             .any(|(_, document)| document.needs_rendering_update(no_gc));
         let running_animations = self.documents.borrow().iter().any(|(_, document)| {
-            document.is_fully_active() &&
-                !document.window().throttled() &&
-                (document.animation_manager().running_animation_count() != 0 ||
-                    document.has_active_request_animation_frame_callbacks())
+            document.is_fully_active()
+                && !document.window().throttled()
+                && (document.animation_manager().running_animation_count() != 0
+                    || document.has_active_request_animation_frame_callbacks())
         });
 
         // If we are not running animations and no rendering update is
@@ -1753,9 +1763,9 @@ impl ScriptThread {
         };
         let task_duration = start.elapsed();
         for (doc_id, doc) in self.documents.borrow().iter() {
-            if let Some(pipeline_id) = pipeline_id &&
-                pipeline_id == doc_id &&
-                task_duration.as_nanos() > MAX_TASK_NS
+            if let Some(pipeline_id) = pipeline_id
+                && pipeline_id == doc_id
+                && task_duration.as_nanos() > MAX_TASK_NS
             {
                 if opts::get()
                     .debug
@@ -1931,9 +1941,9 @@ impl ScriptThread {
                     document.handle_no_longer_waiting_on_asynchronous_image_updates();
                 }
             },
-            msg @ ScriptThreadMessage::SpawnPipeline(..) |
-            msg @ ScriptThreadMessage::ExitFullScreen(..) |
-            msg @ ScriptThreadMessage::ExitScriptThread => {
+            msg @ ScriptThreadMessage::SpawnPipeline(..)
+            | msg @ ScriptThreadMessage::ExitFullScreen(..)
+            | msg @ ScriptThreadMessage::ExitScriptThread => {
                 panic!("should have handled {:?} already", msg)
             },
             ScriptThreadMessage::SetScrollStates(pipeline_id, scroll_states) => {
@@ -3227,6 +3237,7 @@ impl ScriptThread {
             self.senders
                 .pipeline_to_constellation_sender
                 .send((
+                    Some(self.resource_threads.partition_id()),
                     webview_id,
                     pipeline_id,
                     ScriptToConstellationMessage::AbortLoadUrl,
@@ -3311,6 +3322,7 @@ impl ScriptThread {
         self.senders
             .pipeline_to_constellation_sender
             .send((
+                Some(self.resource_threads.partition_id()),
                 webview_id,
                 pipeline_id,
                 ScriptToConstellationMessage::PipelineExited,
@@ -3455,7 +3467,12 @@ impl ScriptThread {
         );
         self.senders
             .pipeline_to_constellation_sender
-            .send((sender_webview_id, sender_pipeline_id, msg))
+            .send((
+                Some(self.resource_threads.partition_id()),
+                sender_webview_id,
+                sender_pipeline_id,
+                msg,
+            ))
             .expect("Failed to send to constellation.");
         result_receiver
             .recv()
@@ -3473,6 +3490,7 @@ impl ScriptThread {
     ) -> DomRoot<Document> {
         let webview_id = incomplete.webview_id();
         let script_to_constellation_chan = ScriptToConstellationChan {
+            storage_partition_id: self.resource_threads.partition_id(),
             sender: self.senders.pipeline_to_constellation_sender.clone(),
             webview_id,
             pipeline_id: incomplete.pipeline_id,
@@ -3736,8 +3754,8 @@ impl ScriptThread {
         // hence we filter it out here.
         let iframe_in_this_script_thread = iframe.is_some();
         let parent_info = incomplete.parent_info.filter(|parent_id| {
-            iframe_in_this_script_thread ||
-                self.documents.borrow().find_document(*parent_id).is_none()
+            iframe_in_this_script_thread
+                || self.documents.borrow().find_document(*parent_id).is_none()
         });
 
         // Initialize the browsing context for the window.
@@ -3788,7 +3806,12 @@ impl ScriptThread {
                 );
                 self.senders
                     .pipeline_to_constellation_sender
-                    .send((webview_id, incomplete.pipeline_id, msg))
+                    .send((
+                        Some(self.resource_threads.partition_id()),
+                        webview_id,
+                        incomplete.pipeline_id,
+                        msg,
+                    ))
                     .expect("Failed to send to constellation.");
                 let is_parent_fully_active = result_receiver
                     .recv()
@@ -3818,6 +3841,7 @@ impl ScriptThread {
         self.senders
             .pipeline_to_constellation_sender
             .send((
+                Some(self.resource_threads.partition_id()),
                 webview_id,
                 incomplete.pipeline_id,
                 ScriptToConstellationMessage::ActivateDocument,
@@ -4263,8 +4287,8 @@ impl ScriptThread {
             // we need to register an iframe entry to the performance timeline if present
             if let Some(window_proxy) = context
                 .get_document()
-                .and_then(|document| document.browsing_context()) &&
-                let Some(frame_element) = window_proxy.frame_element()
+                .and_then(|document| document.browsing_context())
+                && let Some(frame_element) = window_proxy.frame_element()
             {
                 let iframe_ctx = IframeContext::new(
                     frame_element
@@ -4463,8 +4487,8 @@ impl ScriptThread {
             return;
         };
 
-        if let Some(window) = self.documents.borrow().find_window(pipeline_id) &&
-            window.live_devtools_updates()
+        if let Some(window) = self.documents.borrow().find_window(pipeline_id)
+            && window.live_devtools_updates()
         {
             let css_error = CSSError {
                 filename,
@@ -4484,6 +4508,7 @@ impl ScriptThread {
             self.senders
                 .pipeline_to_constellation_sender
                 .send((
+                    Some(self.resource_threads.partition_id()),
                     document.webview_id(),
                     pipeline_id,
                     ScriptToConstellationMessage::LoadUrl(
@@ -4504,6 +4529,7 @@ impl ScriptThread {
             self.senders
                 .pipeline_to_constellation_sender
                 .send((
+                    Some(self.resource_threads.partition_id()),
                     webview_id,
                     pipeline_id,
                     ScriptToConstellationMessage::TraverseHistory(
@@ -4616,6 +4642,7 @@ impl ScriptThread {
     ) {
         let Some(window) = self.documents.borrow().find_window(pipeline_id) else {
             let _ = self.senders.pipeline_to_constellation_sender.send((
+                Some(self.resource_threads.partition_id()),
                 webview_id,
                 pipeline_id,
                 ScriptToConstellationMessage::FinishJavaScriptEvaluation(
@@ -4639,6 +4666,7 @@ impl ScriptThread {
             Some(return_value.handle_mut()),
         ) {
             _ = self.senders.pipeline_to_constellation_sender.send((
+                Some(self.resource_threads.partition_id()),
                 webview_id,
                 pipeline_id,
                 ScriptToConstellationMessage::FinishJavaScriptEvaluation(evaluation_id, Err(err)),
@@ -4648,6 +4676,7 @@ impl ScriptThread {
 
         let result = jsval_to_webdriver(cx, global_scope, return_value.handle());
         let _ = self.senders.pipeline_to_constellation_sender.send((
+            Some(self.resource_threads.partition_id()),
             webview_id,
             pipeline_id,
             ScriptToConstellationMessage::FinishJavaScriptEvaluation(evaluation_id, result),
@@ -4673,6 +4702,7 @@ impl ScriptThread {
     ) {
         let Some(window) = self.documents.borrow().find_window(pipeline_id) else {
             let _ = self.senders.pipeline_to_constellation_sender.send((
+                Some(self.resource_threads.partition_id()),
                 webview_id,
                 pipeline_id,
                 ScriptToConstellationMessage::RespondToScreenshotReadinessRequest(

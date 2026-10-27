@@ -326,8 +326,8 @@ impl InterceptedWebResourceLoad {
 
 impl Drop for InterceptedWebResourceLoad {
     fn drop(&mut self) {
-        if !self.finished &&
-            let Err(error) = self
+        if !self.finished
+            && let Err(error) = self
                 .response_sender
                 .send(WebResourceResponseMsg::FinishLoad)
         {
@@ -900,6 +900,7 @@ impl PromptDialog {
 ///
 /// Refer to the documentation of [`WebViewDelegate::request_create_new`] for more information.
 pub struct CreateNewWebViewRequest {
+    pub(crate) storage_partition: crate::StoragePartition,
     pub(crate) servo: Servo,
     pub(crate) responder: AutomaticResponder<Option<NewWebViewDetails>>,
 }
@@ -907,7 +908,12 @@ pub struct CreateNewWebViewRequest {
 impl CreateNewWebViewRequest {
     /// Returns a [`WebViewBuilder`] that can be used to create a new auxiliary [`WebView`].
     pub fn builder(self, rendering_context: Rc<dyn RenderingContext>) -> WebViewBuilder {
-        WebViewBuilder::new_for_create_request(&self.servo, rendering_context, self.responder)
+        WebViewBuilder::new_for_create_request(
+            &self.servo,
+            rendering_context,
+            self.responder,
+            self.storage_partition,
+        )
     }
 }
 

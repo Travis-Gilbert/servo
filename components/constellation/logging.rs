@@ -58,6 +58,7 @@ impl Log for FromScriptLogger {
                 // messages that definitely do not need these fields to avoid having to use the
                 // TEST_* values here.
                 (
+                    None, // Diagnostics carry no storage authority.
                     TEST_WEBVIEW_ID,
                     TEST_PIPELINE_ID,
                     ScriptToConstellationMessage::LogEntry(

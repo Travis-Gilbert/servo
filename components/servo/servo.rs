@@ -4,6 +4,7 @@
 
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::cmp::max;
+use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,11 +33,12 @@ use layout::LayoutFactoryImpl;
 use layout_api::ScriptThreadFactory;
 use log::{Log, Metadata, Record, debug, warn};
 use media::{GlApi, NativeDisplay, WindowGLContext};
+use net::connector::CACertificates;
 use net::embedder::NetToEmbedderMsg;
 #[cfg(feature = "multiprocess")]
 use net::image_cache::ImageCacheFactoryImpl;
 use net::protocols::ProtocolRegistry;
-use net::resource_thread::new_resource_threads;
+use net::resource_thread::{load_root_cert_store_from_file, new_partition_resource_threads};
 #[cfg(feature = "multiprocess")]
 use net_traits::FetchThread;
 use net_traits::ResourceThreads;
@@ -58,7 +60,7 @@ use servo_background_hang_monitor::HangMonitorRegister;
 use servo_base::generic_channel::GenericSender;
 use servo_base::generic_channel::{GenericCallback, RoutedReceiver, SendError};
 pub use servo_base::id::WebViewId;
-use servo_base::id::{EMBEDDER_PIPELINE_NAMESPACE_ID, PipelineNamespace};
+use servo_base::id::{EMBEDDER_PIPELINE_NAMESPACE_ID, PipelineNamespace, StoragePartitionId};
 #[cfg(feature = "bluetooth")]
 use servo_bluetooth::BluetoothThreadFactory;
 #[cfg(feature = "bluetooth")]
@@ -94,7 +96,7 @@ use servo_geometry::{
 use servo_media::ServoMedia;
 use servo_media::player::context::GlContext;
 use servo_wakelock::DefaultWakeLockDelegate;
-use storage::new_storage_threads;
+use storage::new_partition_storage_threads;
 use storage_traits::{StorageEngines, StorageThreads};
 #[cfg(feature = "multiprocess")]
 use style::global_style_data::StyleThreadPool;
@@ -109,7 +111,7 @@ use crate::network_manager::NetworkManager;
 use crate::proxies::ConstellationProxy;
 use crate::responders::ServoErrorChannel;
 use crate::servo_delegate::{DefaultServoDelegate, ServoDelegate, ServoError};
-use crate::site_data_manager::{CookieOperationResponse, SiteDataManager};
+use crate::site_data_manager::{CookieCallbacks, CookieOperationResponse, SiteDataManager};
 use crate::webview::{MINIMUM_WEBVIEW_SIZE, WebView, WebViewInner};
 use crate::webview_delegate::{
     AllowOrDenyRequest, AuthenticationRequest, BluetoothDeviceSelectionRequest, EmbedderControl,
@@ -242,7 +244,200 @@ pub struct PendingHandledInputEvent {
     pub webview_id: WebViewId,
 }
 
+/// A Servo-owned storage partition. Cloning this handle reuses its owners.
+/// Dropping a handle does not unload or delete the partition.
+#[derive(Clone)]
+pub struct StoragePartition(Rc<StoragePartitionInner>);
+
+struct StoragePartitionInner {
+    id: StoragePartitionId,
+    root: Option<PathBuf>,
+    resources: ResourceThreads,
+    storage: StorageThreads,
+    site_data: SiteDataManager,
+    network: NetworkManager,
+    // Kept by Servo until all partition owners have stopped.
+    _temporary_root: RefCell<Option<tempfile::TempDir>>,
+}
+
+impl std::fmt::Debug for StoragePartition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoragePartition")
+            .field("id", &self.id())
+            .field("root", &self.root())
+            .finish_non_exhaustive()
+    }
+}
+
+impl StoragePartition {
+    /// The immutable identity carried by this partition's owner channels.
+    pub fn id(&self) -> StoragePartitionId {
+        self.0.id
+    }
+    /// The canonical persistent root, or `None` for an ephemeral partition.
+    pub fn root(&self) -> Option<&Path> {
+        self.0.root.as_deref()
+    }
+    /// Manage site data belonging to this partition only.
+    pub fn site_data_manager(&self) -> &SiteDataManager {
+        &self.0.site_data
+    }
+    /// Manage the HTTP cache belonging to this partition only.
+    pub fn network_manager(&self) -> &NetworkManager {
+        &self.0.network
+    }
+}
+
+/// Partition creation or WebView selection failed without selecting another owner.
+#[derive(Debug)]
+pub enum StoragePartitionError {
+    Io(std::io::Error),
+    DuplicateRoot(PathBuf),
+    Registration(String),
+    WrongServo,
+    PopupPartitionConflict,
+    ShuttingDown,
+}
+
+impl std::fmt::Display for StoragePartitionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "Partition directory: {error}"),
+            Self::DuplicateRoot(root) => {
+                write!(f, "Partition root already registered: {}", root.display())
+            },
+            Self::Registration(error) => write!(f, "Partition registration: {error}"),
+            Self::WrongServo => f.write_str("Partition does not belong to this Servo"),
+            Self::PopupPartitionConflict => {
+                f.write_str("An auxiliary WebView must inherit its opener's partition")
+            },
+            Self::ShuttingDown => f.write_str("Servo is shutting down"),
+        }
+    }
+}
+impl std::error::Error for StoragePartitionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+impl From<std::io::Error> for StoragePartitionError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+struct PartitionFactory {
+    devtools_sender: Option<Sender<devtools_traits::DevtoolsControlMsg>>,
+    time_profiler: time::ProfilerChan,
+    mem_profiler: mem::ProfilerChan,
+    embedder_proxy: GenericEmbedderProxy<NetToEmbedderMsg>,
+    certificates: CACertificates<'static>,
+    ignore_certificate_errors: bool,
+    protocols: Arc<ProtocolRegistry>,
+    engines: StorageEngines,
+    cookie_callbacks: Rc<CookieCallbacks>,
+}
+
+impl PartitionFactory {
+    fn create(
+        &self,
+        id: StoragePartitionId,
+        root: Option<PathBuf>,
+    ) -> Result<StoragePartition, StoragePartitionError> {
+        let root = root
+            .map(|root| {
+                std::fs::create_dir_all(&root)?;
+                std::fs::canonicalize(root)
+            })
+            .transpose()?;
+        let temporary_root = if root.is_none() {
+            Some(tempfile::tempdir()?)
+        } else {
+            None
+        };
+        let storage_root = root
+            .clone()
+            .or_else(|| temporary_root.as_ref().map(|dir| dir.path().to_owned()));
+        let disk_cache_path = if !pref!(network_http_disk_cache).is_empty() {
+            root.as_ref()
+                .map(|root| root.join("http-cache/cache.sqlite3"))
+        } else {
+            None
+        };
+        if let Some(path) = &disk_cache_path {
+            std::fs::create_dir_all(path.parent().unwrap())?;
+        }
+        // Fail directory errors before starting any owner threads.
+        if let Some(root) = &storage_root {
+            for directory in [
+                "clientstorage/default_v1",
+                "cachestorage/default_v1",
+                "webstorage",
+            ] {
+                std::fs::create_dir_all(root.join(directory))?;
+            }
+        }
+        let resources = new_partition_resource_threads(
+            id,
+            self.devtools_sender.clone(),
+            self.time_profiler.clone(),
+            self.mem_profiler.clone(),
+            self.embedder_proxy.clone(),
+            root.clone(),
+            disk_cache_path,
+            self.certificates.clone(),
+            self.ignore_certificate_errors,
+            self.protocols.clone(),
+        );
+        let storage = new_partition_storage_threads(
+            id,
+            self.mem_profiler.clone(),
+            storage_root,
+            root.is_none(),
+            &format!("{id:?}"),
+            &self.engines,
+        );
+        let (sender, receiver) = servo_base::generic_channel::channel().unwrap();
+        let network_ready = resources
+            .core_thread
+            .send(net_traits::CoreResourceMsg::ListCookies(sender))
+            .map_err(|e| e.to_string())
+            .and_then(|_| receiver.recv().map(|_| ()).map_err(|e| e.to_string()));
+        if let Err(error) = network_ready.and_then(|_| storage.wait_until_ready()) {
+            let _ = storage.exit();
+            let (sender, receiver) = servo_base::generic_channel::oneshot().unwrap();
+            if resources
+                .core_thread
+                .send(net_traits::CoreResourceMsg::Exit(sender))
+                .is_ok()
+            {
+                let _ = receiver.recv();
+            }
+            return Err(StoragePartitionError::Registration(error));
+        }
+        Ok(StoragePartition(Rc::new(StoragePartitionInner {
+            id,
+            root,
+            site_data: SiteDataManager::new(
+                resources.clone(),
+                storage.clone(),
+                self.cookie_callbacks.clone(),
+            ),
+            network: NetworkManager::new(resources.clone()),
+            resources,
+            storage,
+            _temporary_root: RefCell::new(temporary_root),
+        })))
+    }
+}
+
 struct ServoInner {
+    partitions: RefCell<FxHashMap<StoragePartitionId, StoragePartition>>,
+    partition_factory: PartitionFactory,
+    default_partition: StoragePartition,
     delegate: RefCell<Rc<dyn ServoDelegate>>,
     paint: Rc<RefCell<Paint>>,
     constellation_proxy: ConstellationProxy,
@@ -411,6 +606,9 @@ impl ServoInner {
     fn finish_shutting_down(&self) {
         debug!("Servo received message that Constellation shutdown is complete");
         self.shutdown_state.set(ShutdownState::FinishedShuttingDown);
+        for partition in self.partitions.borrow().values() {
+            partition.0._temporary_root.borrow_mut().take();
+        }
         self.paint.borrow_mut().finish_shutting_down();
     }
 
@@ -991,24 +1189,38 @@ impl Servo {
         });
 
         let protocols = Arc::new(protocols);
-        let (public_resource_threads, private_resource_threads, async_runtime) =
-            new_resource_threads(
-                devtools_sender.clone(),
-                time_profiler_chan.clone(),
-                mem_profiler_chan.clone(),
-                net_embedder_proxy,
-                opts.config_dir.clone(),
-                opts.certificate_path.clone(),
-                opts.ignore_certificate_errors,
-                protocols.clone(),
-            );
-
-        let (private_storage_threads, public_storage_threads) = new_storage_threads(
-            mem_profiler_chan.clone(),
-            opts.config_dir.clone(),
-            opts.temporary_storage,
-            builder.storage_engines,
-        );
+        let async_runtime = net::async_runtime::init_async_runtime();
+        let partition_factory = PartitionFactory {
+            devtools_sender: devtools_sender.clone(),
+            time_profiler: time_profiler_chan.clone(),
+            mem_profiler: mem_profiler_chan.clone(),
+            embedder_proxy: net_embedder_proxy,
+            certificates: opts
+                .certificate_path
+                .clone()
+                .and_then(|path| {
+                    load_root_cert_store_from_file(path)
+                        .ok()
+                        .map(CACertificates::Override)
+                })
+                .unwrap_or_default(),
+            ignore_certificate_errors: opts.ignore_certificate_errors,
+            protocols: protocols.clone(),
+            engines: builder.storage_engines,
+            cookie_callbacks: Rc::new(CookieCallbacks::default()),
+        };
+        let default_partition = partition_factory
+            .create(
+                StoragePartitionId::DEFAULT,
+                if opts.temporary_storage {
+                    None
+                } else {
+                    opts.config_dir.clone()
+                },
+            )
+            .expect("Failed to initialize default storage partition");
+        let public_resource_threads = default_partition.0.resources.clone();
+        let public_storage_threads = default_partition.0.storage.clone();
 
         create_constellation(
             embedder_to_constellation_receiver,
@@ -1021,10 +1233,8 @@ impl Servo {
             devtools_sender,
             protocols,
             public_resource_threads.clone(),
-            private_resource_threads.clone(),
             async_runtime,
             public_storage_threads.clone(),
-            private_storage_threads.clone(),
         );
 
         net::connector::prewarm_tls();
@@ -1035,18 +1245,23 @@ impl Servo {
         }
 
         Servo(Rc::new(ServoInner {
+            partitions: RefCell::new(
+                [(default_partition.id(), default_partition.clone())]
+                    .into_iter()
+                    .collect(),
+            ),
+            default_partition,
             delegate: RefCell::new(Rc::new(DefaultServoDelegate)),
             paint,
             network_manager: Rc::new(RefCell::new(NetworkManager::new(
                 public_resource_threads.clone(),
-                private_resource_threads.clone(),
             ))),
             site_data_manager: SiteDataManager::new(
                 public_resource_threads,
-                private_resource_threads,
                 public_storage_threads,
-                private_storage_threads,
+                Rc::clone(&partition_factory.cookie_callbacks),
             ),
+            partition_factory,
             javascript_evaluator: Rc::new(RefCell::new(JavaScriptEvaluator::new(
                 constellation_proxy.clone(),
             ))),
@@ -1121,8 +1336,99 @@ impl Servo {
         self.0.network_manager.borrow()
     }
 
+    /// Manage the default partition (the legacy config_dir owner).
     pub fn site_data_manager(&self) -> &SiteDataManager {
         &self.0.site_data_manager
+    }
+
+    /// The compatibility partition selected by `config_dir` and `temporary_storage`.
+    pub fn default_storage_partition(&self) -> StoragePartition {
+        self.0.default_partition.clone()
+    }
+
+    /// Look up a registered owner without creating another owner for its root.
+    pub fn storage_partition(&self, id: StoragePartitionId) -> Option<StoragePartition> {
+        self.0.partitions.borrow().get(&id).cloned()
+    }
+
+    pub(crate) fn owns_storage_partition(&self, partition: &StoragePartition) -> bool {
+        self.0
+            .partitions
+            .borrow()
+            .get(&partition.id())
+            .is_some_and(|owned| Rc::ptr_eq(&owned.0, &partition.0))
+    }
+
+    /// Create an independent owner. Reuse the returned handle for other WebViews;
+    /// aliases of an already registered canonical root are rejected. This waits for
+    /// initialization and constellation registration before returning the handle.
+    pub fn create_storage_partition(
+        &self,
+        root: impl AsRef<Path>,
+    ) -> Result<StoragePartition, StoragePartitionError> {
+        std::fs::create_dir_all(root.as_ref())?;
+        let root = std::fs::canonicalize(root)?;
+        if self
+            .0
+            .partitions
+            .borrow()
+            .values()
+            .any(|partition| partition.root() == Some(root.as_path()))
+        {
+            return Err(StoragePartitionError::DuplicateRoot(root));
+        }
+        self.register_storage_partition(Some(root))
+    }
+
+    /// Create an owner with no persistent profile data. Temporary SQLite files live
+    /// until Servo shuts down; dropping the handle does not unload the partition.
+    pub fn create_ephemeral_storage_partition(
+        &self,
+    ) -> Result<StoragePartition, StoragePartitionError> {
+        self.register_storage_partition(None)
+    }
+
+    fn register_storage_partition(
+        &self,
+        root: Option<PathBuf>,
+    ) -> Result<StoragePartition, StoragePartitionError> {
+        if self.0.shutdown_state.get() != ShutdownState::NotShuttingDown {
+            return Err(StoragePartitionError::ShuttingDown);
+        }
+        let partition = self
+            .0
+            .partition_factory
+            .create(StoragePartitionId::new(), root)?;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.constellation_proxy()
+            .send(EmbedderToConstellationMessage::RegisterStoragePartition {
+                resources: partition.0.resources.clone(),
+                storage: partition.0.storage.clone(),
+                response: sender,
+            });
+        let result = receiver
+            .recv()
+            .map_err(|error| error.to_string())
+            .and_then(|result| result);
+        if let Err(error) = result {
+            let _ = partition.0.storage.exit();
+            let (sender, receiver) = servo_base::generic_channel::oneshot().unwrap();
+            if partition
+                .0
+                .resources
+                .core_thread
+                .send(net_traits::CoreResourceMsg::Exit(sender))
+                .is_ok()
+            {
+                let _ = receiver.recv();
+            }
+            return Err(StoragePartitionError::Registration(error));
+        }
+        self.0
+            .partitions
+            .borrow_mut()
+            .insert(partition.id(), partition.clone());
+        Ok(partition)
     }
 
     /// When an [`ActionRequest`] is received from AccessKit, forward it to the appropriate document
@@ -1242,10 +1548,8 @@ fn create_constellation(
     devtools_sender: Option<Sender<devtools_traits::DevtoolsControlMsg>>,
     protocols: Arc<ProtocolRegistry>,
     public_resource_threads: ResourceThreads,
-    private_resource_threads: ResourceThreads,
     async_runtime: Box<dyn net_traits::AsyncRuntime>,
     public_storage_threads: StorageThreads,
-    private_storage_threads: StorageThreads,
 ) {
     // Global configuration options, parsed from the command line.
     let opts = opts::get();
@@ -1273,9 +1577,7 @@ fn create_constellation(
         bluetooth_thread,
         system_font_service,
         public_resource_threads,
-        private_resource_threads,
         public_storage_threads,
-        private_storage_threads,
         time_profiler_chan,
         mem_profiler_chan,
         #[cfg(feature = "webxr")]

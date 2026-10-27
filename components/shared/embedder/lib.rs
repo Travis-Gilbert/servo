@@ -1299,6 +1299,7 @@ impl ScriptToEmbedderChan {
 /// back to the constellation.
 #[derive(Deserialize, Serialize)]
 pub struct NewWebViewDetails {
+    pub storage_partition_id: servo_base::id::StoragePartitionId,
     pub webview_id: WebViewId,
     pub viewport_details: ViewportDetails,
     pub user_content_manager_id: Option<UserContentManagerId>,

@@ -13,8 +13,8 @@ use net_traits::response::Response;
 use servo_base::generic_channel::{self, GenericReceiver, GenericSender};
 use servo_url::ImmutableOrigin;
 use storage_traits::cache_storage::{
-    CacheStorageEngine, CacheStorageEngineFactory, CacheStorageError,
-    CacheStorageThreadHandle, CacheStorageThreadMessage, CacheStorageThreadResponse,
+    CacheStorageEngine, CacheStorageEngineFactory, CacheStorageError, CacheStorageThreadHandle,
+    CacheStorageThreadMessage, CacheStorageThreadResponse,
 };
 use storage_traits::client_storage::StorageProxyMap;
 
@@ -222,7 +222,7 @@ impl CacheStorageThreadFactory for CacheStorageThreadHandle {
             .name("CacheStorageThread".to_owned())
             .spawn(move || {
                 // Keep temp_dir alive while the thread runs.
-                let _ = temp_dir;
+                let _temporary_root = temp_dir;
                 let factory = factory.unwrap_or_else(|| Arc::new(DefaultCacheStorageEngineFactory));
                 let engine = match factory.open(storage_dir) {
                     Ok(engine) => engine,
@@ -231,11 +231,8 @@ impl CacheStorageThreadFactory for CacheStorageThreadHandle {
                         return;
                     },
                 };
-                let mut cache_storage_thread = CacheStorageThread::new(
-                    sender_clone,
-                    generic_receiver,
-                    engine,
-                );
+                let mut cache_storage_thread =
+                    CacheStorageThread::new(sender_clone, generic_receiver, engine);
                 cache_storage_thread.start();
             })
             .expect("Thread spawning failed");
@@ -289,9 +286,7 @@ impl CacheStorageThread {
                     proxy,
                     origin,
                 } => {
-                    let result = self
-                        .engine
-                        .open_cache(&origin, cache_name.clone(), &proxy);
+                    let result = self.engine.open_cache(&origin, cache_name.clone(), &proxy);
                     if callback
                         .send(CacheStorageThreadResponse::OpenCacheResult {
                             result: result.map_err(|e| format!("{:?}", e)),
@@ -323,9 +318,7 @@ impl CacheStorageThread {
                     proxy,
                     origin,
                 } => {
-                    let result = self
-                        .engine
-                        .delete_cache(&origin, &cache_name, &proxy);
+                    let result = self.engine.delete_cache(&origin, &cache_name, &proxy);
                     if callback
                         .send(CacheStorageThreadResponse::DeleteCacheResult(
                             result.map_err(|e| format!("{:?}", e)),

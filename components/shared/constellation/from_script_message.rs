@@ -31,7 +31,7 @@ use servo_base::generic_channel::{GenericCallback, GenericReceiver, GenericSende
 use servo_base::id::{
     BroadcastChannelRouterId, BrowsingContextId, HistoryStateId, MessagePortId,
     MessagePortRouterId, PipelineId, ScriptEventLoopId, ServiceWorkerId,
-    ServiceWorkerRegistrationId, WebViewId,
+    ServiceWorkerRegistrationId, StoragePartitionId, WebViewId,
 };
 use servo_canvas_traits::canvas::{CanvasId, CanvasMsg};
 #[cfg(feature = "webgl")]
@@ -49,12 +49,17 @@ use crate::{
     WindowSizeType,
 };
 
-pub type ScriptToConstellationSender =
-    GenericSender<(WebViewId, PipelineId, ScriptToConstellationMessage)>;
+pub type ScriptToConstellationSender = GenericSender<(
+    Option<StoragePartitionId>,
+    WebViewId,
+    PipelineId,
+    ScriptToConstellationMessage,
+)>;
 
 /// A Script to Constellation channel.
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct ScriptToConstellationChan {
+    pub storage_partition_id: StoragePartitionId,
     /// Sender for communicating with constellation thread.
     pub sender: ScriptToConstellationSender,
     /// Used to identify the origin `WebView` of the message.
@@ -66,7 +71,12 @@ pub struct ScriptToConstellationChan {
 impl ScriptToConstellationChan {
     /// Send ScriptMsg and attach the pipeline_id to the message.
     pub fn send(&self, msg: ScriptToConstellationMessage) -> SendResult {
-        self.sender.send((self.webview_id, self.pipeline_id, msg))
+        self.sender.send((
+            Some(self.storage_partition_id),
+            self.webview_id,
+            self.pipeline_id,
+            msg,
+        ))
     }
 }
 
@@ -279,8 +289,8 @@ pub enum ServiceWorkerMsg {
     },
     /// <https://w3c.github.io/ServiceWorker/#algorithms>
     HandleAlgorithm(ServiceWorkerAlgorithm),
-    /// Exit the service worker manager
-    Exit,
+    /// Exit after stopping and joining workers.
+    Exit(GenericSender<()>),
 }
 
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, PartialEq, Serialize)]

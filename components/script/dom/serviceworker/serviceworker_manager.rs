@@ -225,6 +225,7 @@ impl ServiceWorkerRegistration {
 
 /// A structure managing all registrations and workers for a given origin.
 pub struct ServiceWorkerManager {
+    storage_partition_id: servo_base::id::StoragePartitionId,
     /// <https://w3c.github.io/ServiceWorker/#dfn-scope-to-registration-map>
     registrations: HashMap<ServoUrl, ServiceWorkerRegistration>,
     // own sender to send messages here
@@ -239,6 +240,7 @@ pub struct ServiceWorkerManager {
 
 impl ServiceWorkerManager {
     fn new(
+        storage_partition_id: servo_base::id::StoragePartitionId,
         own_sender: GenericSender<ServiceWorkerMsg>,
         from_constellation_receiver: RoutedReceiver<ServiceWorkerMsg>,
         resource_port: RoutedReceiver<CustomResponseMediator>,
@@ -248,6 +250,7 @@ impl ServiceWorkerManager {
         PipelineNamespace::auto_install();
 
         ServiceWorkerManager {
+            storage_partition_id,
             registrations: HashMap::new(),
             own_sender,
             own_port: from_constellation_receiver,
@@ -282,10 +285,10 @@ impl ServiceWorkerManager {
     }
 
     fn handle_message_from_resource(&mut self, mediator: CustomResponseMediator) -> bool {
-        if serviceworker_enabled() &&
-            let Some(scope) = self.get_matching_scope(&mediator.load_url) &&
-            let Some(registration) = self.registrations.get(&scope) &&
-            let Some(ref worker) = registration.active_worker
+        if serviceworker_enabled()
+            && let Some(scope) = self.get_matching_scope(&mediator.load_url)
+            && let Some(registration) = self.registrations.get(&scope)
+            && let Some(ref worker) = registration.active_worker
         {
             worker.send_message(ServiceWorkerScriptMsg::Response(mediator));
             return true;
@@ -366,7 +369,11 @@ impl ServiceWorkerManager {
                     self.handle_match_registration(storage_key, client_url, result_handler);
                 },
             },
-            ServiceWorkerMsg::Exit => return false,
+            ServiceWorkerMsg::Exit(sender) => {
+                self.registrations.clear(); // Drops join all worker threads.
+                let _ = sender.send(());
+                return false;
+            },
         }
         true
     }
@@ -510,6 +517,19 @@ impl ServiceWorkerManager {
 
     /// <https://w3c.github.io/ServiceWorker/#register-algorithm>
     fn handle_register_job(&mut self, mut job: Job) {
+        // Reject before creating a registration or resolving an existing one.
+        if job.scope_things.as_ref().is_none_or(|scope| {
+            scope.init.resource_threads.partition_id() != self.storage_partition_id
+                || scope.init.storage_threads.partition_id() != self.storage_partition_id
+        }) {
+            let _ = job
+                .client
+                .send(ServiceWorkerAlgorithmResult::Job(JobResult::RejectPromise(
+                    JobError::SecurityError,
+                )));
+            return;
+        }
+
         // Step 1: If the result of running potentially trustworthy origin with the origin of job’s script url as the argument is Not Trusted, then:
         if !job.script_url.origin().is_potentially_trustworthy() {
             // Step 1.1: Invoke Reject Job Promise with job and "SecurityError" DOMException.
@@ -531,8 +551,8 @@ impl ServiceWorkerManager {
         // Step 2: If job’s script url’s origin and job’s referrer’s origin are not same origin, then:
         // Step 3: If job’s scope url’s origin and job’s referrer’s origin are not same origin, then:
         // Note: both steps done in one conditional.
-        if job.script_url.origin() != job.referrer.origin() ||
-            job.scope_url.origin() != job.referrer.origin()
+        if job.script_url.origin() != job.referrer.origin()
+            || job.scope_url.origin() != job.referrer.origin()
         {
             // Step 2.1: Invoke Reject Job Promise with job and "SecurityError" DOMException
             if job
@@ -662,8 +682,8 @@ impl ServiceWorkerManager {
                 let newest_worker = registration.get_newest_worker();
 
                 // Step 4.
-                if let Some(worker) = newest_worker &&
-                    worker.script_url != job.script_url
+                if let Some(worker) = newest_worker
+                    && worker.script_url != job.script_url
                 {
                     let _ = job.client.send(ServiceWorkerAlgorithmResult::Job(
                         JobResult::RejectPromise(JobError::TypeError),
@@ -721,8 +741,8 @@ fn update_serviceworker(
     let (devtools_sender, devtools_receiver) = generic_channel::channel().unwrap();
     scope_things.init.from_devtools_sender = Some(devtools_sender);
 
-    if let Some(ref chan) = scope_things.devtools_chan &&
-        let Some(ref sender) = scope_things.init.from_devtools_sender
+    if let Some(ref chan) = scope_things.devtools_chan
+        && let Some(ref sender) = scope_things.init.from_devtools_sender
     {
         let page_info = DevtoolsPageInfo {
             title: format!("Service Worker for {}", scope_things.script_url),
@@ -793,6 +813,7 @@ impl ServiceWorkerManagerFactory for ServiceWorkerManager {
             .core_thread
             .send(CoreResourceMsg::NetworkMediator(resource_chan, origin));
 
+        let storage_partition_id = resource_threads.partition_id();
         let font_context = Arc::new(FontContext::new(
             Arc::new(system_font_service_sender.to_proxy()),
             paint_api,
@@ -800,8 +821,14 @@ impl ServiceWorkerManagerFactory for ServiceWorkerManager {
         ));
 
         let swmanager_thread = move || {
-            ServiceWorkerManager::new(own_sender, from_constellation, resource_port, font_context)
-                .handle_message()
+            ServiceWorkerManager::new(
+                storage_partition_id,
+                own_sender,
+                from_constellation,
+                resource_port,
+                font_context,
+            )
+            .handle_message()
         };
         if thread::Builder::new()
             .name("SvcWorkerManager".to_owned())
