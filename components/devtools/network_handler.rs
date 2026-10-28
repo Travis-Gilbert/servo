@@ -96,5 +96,6 @@ pub(crate) fn handle_network_event(
                 );
             }
         },
+        NetworkEvent::Failed { .. } => {},
     }
 }

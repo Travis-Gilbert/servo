@@ -287,6 +287,8 @@ pub(crate) mod media;
 pub(crate) use self::media::*;
 pub(crate) mod mimetype;
 pub(crate) use self::mimetype::*;
+pub(crate) mod modelcontext;
+pub(crate) use self::modelcontext::*;
 pub(crate) mod mutationobserver;
 pub(crate) use self::mutationobserver::*;
 pub(crate) mod navigator;

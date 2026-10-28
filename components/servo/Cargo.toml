@@ -115,6 +115,7 @@ webxr = [
 accesskit = { workspace = true }
 bitflags = { workspace = true }
 cookie = { workspace = true }
+cdp = { workspace = true }
 crossbeam-channel = { workspace = true }
 devtools = { workspace = true }
 devtools_traits = { workspace = true }

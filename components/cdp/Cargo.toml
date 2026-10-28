@@ -1,0 +1,32 @@
+[package]
+name = "servo-cdp"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Chrome DevTools Protocol endpoint over Servo's inspection channel."
+
+[lib]
+name = "cdp"
+path = "lib.rs"
+
+[dependencies]
+base64 = { workspace = true }
+bytes = { workspace = true }
+crossbeam-channel = { workspace = true }
+devtools_traits = { workspace = true }
+embedder_traits = { workspace = true }
+http = { workspace = true }
+log = { workspace = true }
+net_traits = { workspace = true }
+serde_json = { workspace = true }
+servo-base = { workspace = true }
+servo-config = { workspace = true }
+servo-url = { workspace = true }
+sha1 = { workspace = true }
+
+[lints]
+workspace = true
