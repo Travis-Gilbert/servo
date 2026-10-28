@@ -231,6 +231,62 @@ fn test_create_webview_http_custom_host() {
 }
 
 #[test]
+fn test_create_webview_with_request_headers() {
+    let servo_test = ServoTest::new();
+
+    let navigation_headers: Arc<Mutex<Option<HeaderMap>>> = Arc::default();
+    let navigation_headers_clone = navigation_headers.clone();
+    static MESSAGE: &'static [u8] = b"<!DOCTYPE html>\nHello";
+    let handler =
+        move |request: HyperRequest<Incoming>,
+              response: &mut HyperResponse<BoxBody<Bytes, hyper::Error>>| {
+            navigation_headers_clone
+                .lock()
+                .unwrap()
+                .get_or_insert_with(|| request.headers().clone());
+            *response.body_mut() = make_body(MESSAGE.to_vec());
+        };
+    let (server, url) = make_server(handler);
+    let url = url.url().into_url();
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        HeaderName::from_static("sec-purpose"),
+        HeaderValue::from_static("prefetch;prerender"),
+    );
+
+    let delegate = Rc::new(WebViewDelegateImpl::default());
+    let webview = WebViewBuilder::new(servo_test.servo(), servo_test.rendering_context.clone())
+        .delegate(delegate.clone())
+        .request(UrlRequest::new(url.clone()).headers(headers))
+        .build();
+
+    {
+        let webview = webview.clone();
+        let url = url.clone();
+        servo_test.spin(move || {
+            !delegate.load_status_changed.get() || webview.url() != Some(url.clone())
+        });
+    }
+    let _ = server.close();
+
+    // The first navigation carries the request's headers.
+    let navigation_headers = navigation_headers
+        .lock()
+        .unwrap()
+        .take()
+        .expect("The server should have received the navigation request");
+    assert_eq!(
+        navigation_headers.get("sec-purpose"),
+        Some(&HeaderValue::from_static("prefetch;prerender"))
+    );
+
+    // It is also the only session history entry: no initial about:blank sits behind it.
+    assert!(!webview.can_go_back());
+    assert!(!webview.can_go_forward());
+}
+
+#[test]
 fn test_create_webview_and_immediately_drop_webview_before_shutdown() {
     let servo_test = ServoTest::new();
     WebViewBuilder::new(servo_test.servo(), servo_test.rendering_context.clone()).build();

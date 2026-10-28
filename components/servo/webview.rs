@@ -222,15 +222,17 @@ impl WebView {
                 let _ = responder.send(Some(new_webview_details));
             },
             None => {
-                let url = builder.url.unwrap_or(
-                    Url::parse("about:blank")
-                        .expect("Should always be able to parse 'about:blank'."),
-                );
+                let url_request = builder.request.unwrap_or_else(|| {
+                    UrlRequest::new(
+                        Url::parse("about:blank")
+                            .expect("Should always be able to parse 'about:blank'."),
+                    )
+                });
 
                 servo
                     .constellation_proxy()
                     .send(EmbedderToConstellationMessage::NewWebView(
-                        url.into(),
+                        url_request,
                         new_webview_details,
                     ));
             },
@@ -1121,7 +1123,7 @@ pub struct WebViewBuilder {
     servo: Servo,
     rendering_context: Rc<dyn RenderingContext>,
     delegate: Rc<dyn WebViewDelegate>,
-    url: Option<Url>,
+    request: Option<UrlRequest>,
     hidpi_scale_factor: Scale<f32, DeviceIndependentPixel, DevicePixel>,
     create_new_webview_responder: Option<AutomaticResponder<Option<NewWebViewDetails>>>,
     user_content_manager: Option<Rc<UserContentManager>>,
@@ -1139,7 +1141,7 @@ impl WebViewBuilder {
         Self {
             servo: servo.clone(),
             rendering_context,
-            url: None,
+            request: None,
             hidpi_scale_factor: Scale::new(1.0),
             delegate: Rc::new(DefaultWebViewDelegate),
             create_new_webview_responder: None,
@@ -1168,8 +1170,15 @@ impl WebViewBuilder {
     }
 
     /// Set the initial URL to load in the [`WebView`] being created.
-    pub fn url(mut self, url: Url) -> Self {
-        self.url = Some(url);
+    pub fn url(self, url: Url) -> Self {
+        self.request(UrlRequest::new(url))
+    }
+
+    /// Set the initial [`UrlRequest`] to load in the [`WebView`] being created. Unlike
+    /// calling [`WebView::load_request`] after creation, its headers apply to the first
+    /// navigation and the session history starts with that page alone.
+    pub fn request(mut self, url_request: UrlRequest) -> Self {
+        self.request = Some(url_request);
         self
     }
 
