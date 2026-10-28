@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::cell::{Cell, Ref, RefCell, RefMut};
+use std::collections::HashSet;
 use std::hash::Hash;
 use std::rc::{Rc, Weak};
 
@@ -21,6 +22,7 @@ use embedder_traits::{
 use euclid::{Scale, Size2D};
 use image::RgbaImage;
 use log::debug;
+use net_traits::request::RequestId;
 use paint_api::WebViewTrait;
 use paint_api::rendering_context::RenderingContext;
 use servo_base::Epoch;
@@ -97,6 +99,30 @@ impl Hash for WebView {
     }
 }
 
+impl Drop for WebView {
+    fn drop(&mut self) {
+        // `Rc` has not been decremented yet. This is the last handle when the
+        // count is 1, and the delegate can still be called with a `WebView`.
+        if Rc::strong_count(&self.0) != 1 {
+            return;
+        }
+        let ids: Vec<RequestId> = {
+            let Ok(inner) = self.0.try_borrow() else {
+                return;
+            };
+            inner.in_flight_requests.borrow_mut().drain().collect()
+        };
+        if ids.is_empty() {
+            return;
+        }
+        let webview = WebView(Rc::clone(&self.0));
+        let delegate = webview.delegate();
+        for id in ids {
+            delegate.notify_request_finished(webview.clone(), id);
+        }
+    }
+}
+
 pub(crate) struct WebViewInner {
     storage_partition: StoragePartition,
     pub(crate) id: WebViewId,
@@ -130,6 +156,10 @@ pub(crate) struct WebViewInner {
     user_content_manager: Option<Rc<UserContentManager>>,
     hidpi_scale_factor: Scale<f32, DeviceIndependentPixel, DevicePixel>,
     load_status: LoadStatus,
+    /// Requests this webview has reported as started and not yet finished.
+    /// The last [`WebView`] handle reports the rest as finished, because a
+    /// later message can no longer reach the delegate.
+    in_flight_requests: RefCell<HashSet<RequestId>>,
     status_text: Option<String>,
     page_title: Option<String>,
     favicon: Option<Image>,
@@ -180,6 +210,7 @@ impl WebView {
             accessibility_viewport_changed: Cell::new(false),
             hidpi_scale_factor: builder.hidpi_scale_factor,
             load_status: LoadStatus::Started,
+            in_flight_requests: RefCell::default(),
             status_text: None,
             page_title: None,
             favicon: None,
@@ -304,6 +335,15 @@ impl WebView {
     /// Get the [`WebViewDelegate`] associated with this [`WebView`].
     pub fn delegate(&self) -> Rc<dyn WebViewDelegate> {
         self.inner().delegate.clone()
+    }
+
+    pub(crate) fn record_request_started(&self, id: RequestId) {
+        self.inner().in_flight_requests.borrow_mut().insert(id);
+    }
+
+    /// Returns whether this webview had reported `id` as in flight.
+    pub(crate) fn record_request_finished(&self, id: RequestId) -> bool {
+        self.inner().in_flight_requests.borrow_mut().remove(&id)
     }
 
     /// Get the [`ClipboardDelegate`] associated with this [`WebView`].

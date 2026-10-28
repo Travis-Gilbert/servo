@@ -3272,6 +3272,10 @@ impl ScriptThread {
         // to prevent any further incoming networking messages from being handled.
         let document = self.documents.borrow_mut().remove(pipeline_id);
         if let Some(document) = document {
+            // Unload already cancels fetches. Exit without an unload (the webview
+            // was closed) still has to, or the fetch task outlives the document.
+            document.cancel_outstanding_fetches();
+
             // We should never have a pipeline that's still an incomplete load, but also has a Document.
             debug_assert!(
                 !self

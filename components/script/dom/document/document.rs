@@ -2376,11 +2376,27 @@ impl Document {
         can_unload
     }
 
+    /// Cancel fetches still running for this document.
+    ///
+    /// Script navigation does this from [`Self::abort`]. `WebView::load` commits
+    /// by unloading the old document and never reaches that step, and closing a
+    /// webview exits the pipeline the same way. Without this, the fetch task
+    /// keeps running after the document is gone.
+    pub(crate) fn cancel_outstanding_fetches(&self) {
+        if self.window_detached() {
+            return;
+        }
+        let global = self.window.as_global_scope();
+        let _ = global.fetch_group_mut().terminate(global);
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#unload-a-document>
     pub(crate) fn unload(&self, cx: &mut JSContext, recursive_flag: bool) {
         if self.window_detached() {
             return;
         }
+
+        self.cancel_outstanding_fetches();
 
         // TODO: Step 1, increase the event loop's termination nesting level by 1.
         // Step 2

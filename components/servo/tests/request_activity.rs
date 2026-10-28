@@ -516,16 +516,32 @@ fn test_navigate_away_during_upload() {
         fetch_upload_script(&server.url("/upload")),
     );
     let id = wait_for_single_open_post(&servo_test, &delegate);
-    // Script navigation aborts the document, which cancels this fetch.
-    // `WebView::load` goes straight to constellation `load_url` and does not.
-    let next = server.url("/next");
+    // Embedder navigation unloads the previous document, which cancels this fetch.
+    webview.load(Url::parse(&server.url("/next")).expect("next page"));
+    wait_for_single_finish(&servo_test, &delegate, id);
+    wait_until_settled(&servo_test, &webview, &delegate);
+}
+
+#[test]
+fn test_drop_webview_finishes_upload() {
+    let servo_test = ServoTest::new();
+    let delegate = new_delegate();
+    let server = start_loopback();
+    let webview = open_page(&servo_test, &delegate, &server.url("/"));
     run_script(
         &servo_test,
         &webview,
-        format!("location.href = {next:?}; true;"),
+        fetch_upload_script(&server.url("/upload")),
     );
-    wait_for_single_finish(&servo_test, &delegate, id);
-    wait_until_settled(&servo_test, &webview, &delegate);
+    let id = wait_for_single_open_post(&servo_test, &delegate);
+    drop(webview);
+    assert_eq!(
+        delegate.finished_count(id),
+        1,
+        "dropping the webview left the upload unfinished\n{}",
+        delegate.summary()
+    );
+    delegate.assert_consistent(true);
 }
 
 #[test]

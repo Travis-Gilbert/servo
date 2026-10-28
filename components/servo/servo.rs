@@ -657,13 +657,16 @@ impl ServoInner {
             },
             NetToEmbedderMsg::RequestStarted(webview_id, request_id, request) => {
                 if let Some(webview) = self.get_webview_handle(webview_id) {
+                    webview.record_request_started(request_id);
                     webview
                         .delegate()
                         .notify_request_started(webview, request_id, request);
                 }
             },
             NetToEmbedderMsg::RequestFinished(webview_id, request_id) => {
-                if let Some(webview) = self.get_webview_handle(webview_id) {
+                if let Some(webview) = self.get_webview_handle(webview_id) &&
+                    webview.record_request_finished(request_id)
+                {
                     webview
                         .delegate()
                         .notify_request_finished(webview, request_id);
