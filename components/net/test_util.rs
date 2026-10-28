@@ -5,14 +5,17 @@
 use core::convert::Infallible;
 use std::io::{self, Cursor};
 use std::net::TcpListener as StdTcpListener;
+use std::pin::Pin;
 use std::sync::{Arc, LazyLock, Mutex};
+use std::task::{Context, Poll};
 
 use crossbeam_channel::unbounded;
 use embedder_traits::{EmbedderMsg, EmbedderProxy, EventLoopWaker, GenericEmbedderProxy};
+use futures::Stream;
 use futures::future::ready;
 use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, Empty, Full};
-use hyper::body::{Bytes, Incoming};
+use http_body_util::{BodyExt, Empty, Full, StreamBody};
+use hyper::body::{Bytes, Frame, Incoming};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request as HyperRequest, Response as HyperResponse};
@@ -24,6 +27,7 @@ use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use servo_default_resources as _;
 use servo_url::ServoUrl;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_rustls::{self, TlsAcceptor};
 
 use crate::async_runtime::{
@@ -88,16 +92,40 @@ where
         + Sync
         + 'static,
 {
+    make_http_server(handler, "0.0.0.0:0", "localhost")
+}
+
+/// Like [`make_server`], but binds `127.0.0.1` and returns a `http://127.0.0.1` URL.
+pub fn make_loopback_server<H>(handler: H) -> (Server, UrlWithBlobClaim)
+where
+    H: Fn(HyperRequest<Incoming>, &mut HyperResponse<BoxBody<Bytes, hyper::Error>>)
+        + Send
+        + Sync
+        + 'static,
+{
+    make_http_server(handler, "127.0.0.1:0", "127.0.0.1")
+}
+
+fn make_http_server<H>(handler: H, bind_addr: &str, url_host: &str) -> (Server, UrlWithBlobClaim)
+where
+    H: Fn(HyperRequest<Incoming>, &mut HyperResponse<BoxBody<Bytes, hyper::Error>>)
+        + Send
+        + Sync
+        + 'static,
+{
     if !async_runtime_initialized() {
         let _ = &*ASYNC_RUNTIME;
     }
     let handler = Arc::new(handler);
 
-    let listener = StdTcpListener::bind("0.0.0.0:0").unwrap();
+    let listener = StdTcpListener::bind(bind_addr).unwrap();
     listener.set_nonblocking(true).unwrap();
     let listener = spawn_blocking_task(async move { TcpListener::from_std(listener).unwrap() });
 
-    let url_string = format!("http://localhost:{}", listener.local_addr().unwrap().port());
+    let url_string = format!(
+        "http://{url_host}:{}",
+        listener.local_addr().unwrap().port()
+    );
     let url = UrlWithBlobClaim::new(ServoUrl::parse(&url_string).unwrap(), None);
 
     let graceful = hyper_util::server::graceful::GracefulShutdown::new();
@@ -251,4 +279,49 @@ pub fn make_body(bytes: Vec<u8>) -> BoxBody<Bytes, hyper::Error> {
     Full::new(Bytes::from(bytes))
         .map_err(|_| unreachable!())
         .boxed()
+}
+
+/// A response body that stays open until [`HeldResponseBody::release`].
+///
+/// Keep this value alive while the response should stay in flight. Dropping it
+/// ends the body, the same as `release`.
+pub struct HeldResponseBody {
+    sender: Option<UnboundedSender<Bytes>>,
+}
+
+impl HeldResponseBody {
+    /// End the response body so the client can finish reading it.
+    pub fn release(mut self) {
+        drop(self.sender.take());
+    }
+}
+
+/// Headers can be sent immediately. The body ends when `release` drops the sender.
+pub fn held_response_body() -> (HeldResponseBody, BoxBody<Bytes, hyper::Error>) {
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let body = StreamBody::new(HeldBodyStream { receiver })
+        .map_err(|infallible| match infallible {})
+        .boxed();
+    (
+        HeldResponseBody {
+            sender: Some(sender),
+        },
+        body,
+    )
+}
+
+struct HeldBodyStream {
+    receiver: UnboundedReceiver<Bytes>,
+}
+
+impl Stream for HeldBodyStream {
+    type Item = Result<Frame<Bytes>, Infallible>;
+
+    fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.get_mut().receiver.poll_recv(context) {
+            Poll::Ready(Some(bytes)) => Poll::Ready(Some(Ok(Frame::data(bytes)))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
 }

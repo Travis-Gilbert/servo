@@ -22,7 +22,9 @@ use malloc_size_of_derive::MallocSizeOf;
 use net_traits::blob_url_store::{BlobTokenCommunicator, parse_blob_url};
 use net_traits::filemanager_thread::FileTokenCheck;
 use net_traits::pub_domains::public_suffix_list_size_of;
-use net_traits::request::{Destination, PreloadEntry, PreloadId, RequestBuilder, RequestId};
+use net_traits::request::{
+    Destination, PreloadEntry, PreloadId, Request, RequestBuilder, RequestId,
+};
 use net_traits::response::{Response, ResponseInit};
 use net_traits::{
     AsyncRuntime, CookieAsyncResponse, CookieData, CookieSource, CoreResourceMsg,
@@ -46,7 +48,7 @@ use servo_base::generic_channel::{
     self, CallbackSetter, GenericCallback, GenericReceiver, GenericReceiverSet,
     GenericSelectionResult, GenericSender,
 };
-use servo_base::id::{CookieStoreId, StoragePartitionId};
+use servo_base::id::{CookieStoreId, StoragePartitionId, WebViewId};
 use servo_url::{ImmutableOrigin, ServoUrl};
 use tokio::sync::Mutex as TokioMutex;
 
@@ -69,7 +71,7 @@ use crate::hsts::{self, HstsList};
 use crate::http_cache::HttpCache;
 use crate::http_loader::{HttpState, http_redirect_fetch};
 use crate::protocols::ProtocolRegistry;
-use crate::request_interceptor::RequestInterceptor;
+use crate::request_interceptor::{RequestInterceptor, web_resource_request};
 use crate::websocket_loader::create_handshake_request;
 
 /// Load a file with CA certificate and produce a RootCertStore with the results.
@@ -736,6 +738,7 @@ pub struct CoreResourceManager {
     sw_managers: HashMap<ImmutableOrigin, GenericSender<CustomResponseMediator>>,
     filemanager: FileManager,
     request_interceptor: RequestInterceptor,
+    embedder_proxy: GenericEmbedderProxy<NetToEmbedderMsg>,
     ca_certificates: CACertificates<'static>,
     ignore_certificate_errors: bool,
     preloaded_resources: SharedPreloadedResources,
@@ -756,7 +759,8 @@ impl CoreResourceManager {
             devtools_sender,
             sw_managers: Default::default(),
             filemanager: FileManager::new(embedder_proxy.clone(), blob_token_communicator),
-            request_interceptor: RequestInterceptor::new(embedder_proxy),
+            request_interceptor: RequestInterceptor::new(embedder_proxy.clone()),
+            embedder_proxy,
             ca_certificates,
             ignore_certificate_errors,
             preloaded_resources: Default::default(),
@@ -852,6 +856,7 @@ impl CoreResourceManager {
         let ignore_certificate_errors = self.ignore_certificate_errors;
         let in_flight_keep_alive_records = self.in_flight_keep_alive_records.clone();
         let preloaded_resources = self.preloaded_resources.clone();
+        let embedder_proxy = self.embedder_proxy.clone();
         if let Some(ref preload_id) = request.preload_id {
             let mut preloaded_resources = self.preloaded_resources.lock().unwrap();
             let entry = PreloadEntry::new(request.integrity_metadata.clone());
@@ -863,6 +868,12 @@ impl CoreResourceManager {
             // todo load context / mimesniff in fetch
             // todo referrer policy?
             // todo service worker stuff
+            // One pair per fetch task. `fetch` and `http_redirect_fetch` both return
+            // only after `process_response_eof`, so dropping this guard is the body
+            // completing, a failure, or cancellation. Document redirects start a new
+            // task with a new `RequestId` (`RequestBuilder::new`), so the pairs do
+            // not overlap. A followed subresource redirect stays inside this task.
+            let _request_activity = RequestActivity::start(&embedder_proxy, &request);
             let context = FetchContext {
                 state: http_state,
                 user_agent: servo_config::pref!(user_agent),
@@ -986,5 +997,45 @@ impl CoreResourceManager {
                 },
             }
         });
+    }
+}
+
+/// Sends [`NetToEmbedderMsg::RequestFinished`] when the fetch task ends.
+///
+/// Created only after [`NetToEmbedderMsg::RequestStarted`], and only for a
+/// request that has a target webview. `Drop` covers every way out of the
+/// task, including cancellation and unwind.
+struct RequestActivity {
+    embedder_proxy: GenericEmbedderProxy<NetToEmbedderMsg>,
+    webview_id: WebViewId,
+    request_id: RequestId,
+}
+
+impl RequestActivity {
+    fn start(
+        embedder_proxy: &GenericEmbedderProxy<NetToEmbedderMsg>,
+        request: &Request,
+    ) -> Option<Self> {
+        let webview_id = request.target_webview_id?;
+        let request_id = request.id;
+        embedder_proxy.send(NetToEmbedderMsg::RequestStarted(
+            webview_id,
+            request_id,
+            web_resource_request(request),
+        ));
+        Some(Self {
+            embedder_proxy: embedder_proxy.clone(),
+            webview_id,
+            request_id,
+        })
+    }
+}
+
+impl Drop for RequestActivity {
+    fn drop(&mut self) {
+        self.embedder_proxy.send(NetToEmbedderMsg::RequestFinished(
+            self.webview_id,
+            self.request_id,
+        ));
     }
 }

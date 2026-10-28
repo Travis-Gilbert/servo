@@ -2331,6 +2331,8 @@ async fn http_network_fetch(
 
     let done_sender2 = done_sender.clone();
     let done_sender3 = done_sender.clone();
+    let done_sender_for_cancel = done_sender.clone();
+    let cancellation_for_select = cancellation_listener.clone();
     let timing_ptr2 = context.timing.clone();
     let timing_ptr3 = context.timing.clone();
     let devtools_request = request.clone();
@@ -2365,8 +2367,13 @@ async fn http_network_fetch(
     *response_body.lock() = ResponseBody::Receiving(Vec::with_capacity(prealloc_size));
     let response_body2 = response_body.clone();
 
-    spawn_task(
-        response_stream
+    spawn_task(async move {
+        // The fold below only notices cancellation when another chunk arrives.
+        // A body that stays open (an upload whose response is held, a long
+        // poll) never yields that chunk, so race the read against the token.
+        // The fetch task is awaiting this channel and ends after
+        // `process_response_eof`, which is what reports the request finished.
+        let read_body = response_stream
             .into_body()
             .try_fold(response_body, move |response_body_accumulator, chunk| {
                 if cancellation_listener.cancelled() {
@@ -2426,8 +2433,16 @@ async fn http_network_fetch(
                 *body = ResponseBody::Done(completed_body);
                 timing_ptr3.set_attribute(ResourceAttribute::ResponseEnd);
                 let _ = done_sender3.send(Data::Done);
-            }),
-    );
+            });
+
+        tokio::select! {
+            biased;
+            _ = cancellation_for_select.wait_until_cancelled() => {
+                let _ = done_sender_for_cancel.send(Data::Cancelled);
+            },
+            _ = read_body => {},
+        }
+    });
 
     // TODO these substeps aren't possible yet
     // Substep 1

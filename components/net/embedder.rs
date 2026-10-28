@@ -10,6 +10,7 @@ use embedder_traits::{
     WebResourceResponseMsg,
 };
 use net_traits::CookieOperationId;
+use net_traits::request::RequestId;
 use servo_base::id::WebViewId;
 use servo_url::ServoUrl;
 use tokio::sync::mpsc::UnboundedSender as TokioSender;
@@ -28,6 +29,13 @@ pub enum NetToEmbedderMsg {
         WebResourceRequest,
         TokioSender<WebResourceResponseMsg>,
     ),
+    /// A fetch for this webview has started. Sent before the fetch runs, and
+    /// followed by exactly one [`RequestFinished`] with the same id on this
+    /// channel. The embedder drops either message when that webview is gone.
+    RequestStarted(WebViewId, RequestId, WebResourceRequest),
+    /// The fetch reported by [`RequestStarted`] has ended: its response body
+    /// completed, it failed, or it was cancelled.
+    RequestFinished(WebViewId, RequestId),
     /// Request authentication for a load or navigation from the embedder.
     RequestAuthentication(
         WebViewId,

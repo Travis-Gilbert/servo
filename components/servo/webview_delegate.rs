@@ -14,6 +14,7 @@ use embedder_traits::{
     ScreenGeometry, SelectElementOptionOrOptgroup, SelectElementRequest, SimpleDialogRequest,
     TraversalId, WebResourceRequest, WebResourceResponse, WebResourceResponseMsg,
 };
+pub use net_traits::request::RequestId;
 use paint_api::rendering_context::RenderingContext;
 use servo_base::generic_channel::{GenericCallback, GenericSender, SendError};
 use servo_base::id::PipelineId;
@@ -1081,6 +1082,21 @@ pub trait WebViewDelegate {
     /// For loads not associated with a [`WebView`], such as those for service workers, Servo
     /// will call [`crate::ServoDelegate::load_web_resource`].
     fn load_web_resource(&self, _webview: WebView, _load: WebResourceLoad) {}
+
+    /// A request for this webview has started. Each call is followed by exactly
+    /// one `notify_request_finished` with the same id, unless this webview has
+    /// already been destroyed.
+    fn notify_request_started(
+        &self,
+        _webview: WebView,
+        _id: RequestId,
+        _request: WebResourceRequest,
+    ) {
+    }
+
+    /// A request that `notify_request_started` reported has ended: its response
+    /// body completed, it failed, or it was cancelled.
+    fn notify_request_finished(&self, _webview: WebView, _id: RequestId) {}
 
     /// Request to display a notification.
     fn show_notification(&self, _webview: WebView, _notification: Notification) {}

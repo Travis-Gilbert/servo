@@ -43,17 +43,7 @@ impl RequestInterceptor {
         }
 
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let is_for_main_frame = matches!(request.destination, Destination::Document);
-        let web_resource_request = WebResourceRequest {
-            has_body: request.body.is_some(),
-            method: request.method.clone(),
-            url: request.current_url().into_url(),
-            headers: request.headers.clone(),
-            destination: request.destination,
-            referrer_url: request.referrer.to_url().map(|url| url.as_url().clone()),
-            is_for_main_frame,
-            is_redirect: request.redirect_count > 0,
-        };
+        let web_resource_request = web_resource_request(request);
 
         self.embedder_proxy
             .send(NetToEmbedderMsg::WebResourceRequested(
@@ -204,6 +194,21 @@ impl RequestInterceptor {
                 },
             }
         }
+    }
+}
+
+/// The [`WebResourceRequest`] describing `request`, in the shape
+/// [`NetToEmbedderMsg::WebResourceRequested`] already uses.
+pub(crate) fn web_resource_request(request: &Request) -> WebResourceRequest {
+    WebResourceRequest {
+        has_body: request.body.is_some(),
+        method: request.method.clone(),
+        url: request.current_url().into_url(),
+        headers: request.headers.clone(),
+        destination: request.destination,
+        referrer_url: request.referrer.to_url().map(|url| url.as_url().clone()),
+        is_for_main_frame: matches!(request.destination, Destination::Document),
+        is_redirect: request.redirect_count > 0,
     }
 }
 
