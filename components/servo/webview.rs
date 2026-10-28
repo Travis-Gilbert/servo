@@ -476,6 +476,37 @@ impl WebView {
             .resize_rendering_context(self.id(), new_size);
     }
 
+    /// Set the CSS layout viewport and HiDPI scale factor together.
+    ///
+    /// The rendering context is resized to the CSS size multiplied by the scale factor,
+    /// rounded up to whole device pixels (with a minimum of one pixel per dimension).
+    /// Rounding does not affect the layout viewport. Changing only the scale factor
+    /// updates `devicePixelRatio` and resolution media queries without firing a window
+    /// `resize` event.
+    ///
+    /// The explicit layout size takes precedence over page zoom and the viewport meta
+    /// tag's initial scale. Calling [`Self::resize`] or [`Self::set_hidpi_scale_factor`]
+    /// restores deriving the layout size from the device surface.
+    /// As with [`Self::resize`], other WebViews sharing this rendering context are resized.
+    ///
+    /// # Panics
+    ///
+    /// Panics if either dimension or the scale factor is not finite and positive.
+    pub fn set_viewport(
+        &self,
+        css_size: Size2D<f32, CSSPixel>,
+        hidpi_scale_factor: Scale<f32, DeviceIndependentPixel, DevicePixel>,
+    ) {
+        assert!(css_size.width.is_finite() && css_size.width > 0.0);
+        assert!(css_size.height.is_finite() && css_size.height > 0.0);
+        assert!(hidpi_scale_factor.get().is_finite() && hidpi_scale_factor.get() > 0.0);
+
+        self.inner_mut().hidpi_scale_factor = hidpi_scale_factor;
+        self.servo()
+            .paint()
+            .set_viewport(self.id(), css_size, hidpi_scale_factor);
+    }
+
     /// Get the HiDPI scale factor for this [`WebView`].
     pub fn hidpi_scale_factor(&self) -> Scale<f32, DeviceIndependentPixel, DevicePixel> {
         self.inner().hidpi_scale_factor
@@ -489,10 +520,6 @@ impl WebView {
         &self,
         new_scale_factor: Scale<f32, DeviceIndependentPixel, DevicePixel>,
     ) {
-        if self.inner().hidpi_scale_factor == new_scale_factor {
-            return;
-        }
-
         self.inner_mut().hidpi_scale_factor = new_scale_factor;
         self.servo()
             .paint()

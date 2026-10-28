@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use dpi::PhysicalSize;
 use embedder_traits::{RefreshDriver, UrlRequest};
 use euclid::default::Size2D as UntypedSize2D;
-use euclid::{Point2D, Size2D};
+use euclid::{Point2D, Scale, Size2D};
 use http::{HeaderMap, HeaderName, HeaderValue};
 use http_body_util::combinators::BoxBody;
 use hyper::body::{Bytes, Incoming};
@@ -620,6 +620,174 @@ fn test_page_zoom() {
     // Should clamp to maximum
     webview.set_page_zoom(100.0);
     assert_eq!(webview.page_zoom(), 10.0);
+}
+
+fn observe_viewport(servo_test: &ServoTest, webview: &WebView) {
+    assert_eq!(
+        evaluate_javascript(
+            servo_test,
+            webview.clone(),
+            r#"
+            window.viewportSamples = [];
+            window.resizeSamples = [];
+            window.visualResizeSamples = [];
+            window.resolutionChanges = [];
+            window.resolutionQuery = matchMedia('(resolution: 1.25dppx)');
+            const sample = () => [innerWidth, innerHeight, devicePixelRatio];
+            addEventListener('resize', () => resizeSamples.push(sample()));
+            if (window.visualViewport) {
+                visualViewport.addEventListener('resize', () => visualResizeSamples.push(
+                    [visualViewport.width, visualViewport.height]));
+            }
+            resolutionQuery.addEventListener('change', () => resolutionChanges.push(sample()));
+            function frame() {
+                viewportSamples.push(sample());
+                requestAnimationFrame(frame);
+            }
+            requestAnimationFrame(frame);
+            true;
+        "#
+        ),
+        Ok(JSValue::Boolean(true)),
+    );
+}
+
+#[test]
+fn test_set_viewport_scale_only() {
+    let servo_test = ServoTest::new_with_builder(|builder| {
+        let mut preferences = Preferences::default();
+        preferences.dom_visual_viewport_enabled = true;
+        builder.preferences(preferences)
+    });
+    let delegate = Rc::new(WebViewDelegateImpl::default());
+    let webview = WebViewBuilder::new(servo_test.servo(), servo_test.rendering_context.clone())
+        .delegate(delegate.clone())
+        .build();
+    webview.set_viewport(Size2D::new(641.0, 403.0), Scale::new(1.0));
+    show_webview_and_wait_for_rendering_to_be_ready(&servo_test, &webview, &delegate);
+    wait_for_webview_scene_to_be_up_to_date(&servo_test, &webview);
+    observe_viewport(&servo_test, &webview);
+
+    // The first two scales produce the same rounded device surface.
+    for scale in [1.25, 1.2501, 0.7, 2.0, 1.0] {
+        delegate.new_frame_ready.set(false);
+        webview.set_viewport(Size2D::new(641.0, 403.0), Scale::new(scale));
+        assert_eq!(
+            webview.size(),
+            Size2D::new((641.0 * scale).ceil(), (403.0 * scale).ceil()),
+        );
+        wait_for_webview_scene_to_be_up_to_date(&servo_test, &webview);
+        servo_test.spin(|| !delegate.new_frame_ready.get());
+        assert_eq!(
+            evaluate_javascript(
+                &servo_test,
+                webview.clone(),
+                format!(
+                    r#"
+                innerWidth === 641 && innerHeight === 403 &&
+                Math.abs(devicePixelRatio - {scale}) < 0.000001 &&
+                resizeSamples.length === 0 &&
+                visualResizeSamples.length === 0 &&
+                visualViewport.width === 641 && visualViewport.height === 403 &&
+                viewportSamples.length > 0 &&
+                viewportSamples.every(s => s[0] === 641 && s[1] === 403) &&
+                resolutionQuery.matches === ({scale} === 1.25)
+            "#
+                )
+            ),
+            Ok(JSValue::Boolean(true)),
+        );
+    }
+    assert_eq!(
+        evaluate_javascript(
+            &servo_test,
+            webview.clone(),
+            r#"
+            resolutionChanges.length === 2 &&
+            resolutionChanges.every(s => s[0] === 641 && s[1] === 403)
+        "#
+        ),
+        Ok(JSValue::Boolean(true)),
+    );
+}
+
+#[test]
+fn test_set_viewport_css_resize() {
+    let servo_test = ServoTest::new();
+    let delegate = Rc::new(WebViewDelegateImpl::default());
+    let webview = WebViewBuilder::new(servo_test.servo(), servo_test.rendering_context.clone())
+        .delegate(delegate.clone())
+        .build();
+    show_webview_and_wait_for_rendering_to_be_ready(&servo_test, &webview, &delegate);
+    wait_for_webview_scene_to_be_up_to_date(&servo_test, &webview);
+    observe_viewport(&servo_test, &webview);
+
+    webview.set_viewport(Size2D::new(641.0, 403.0), Scale::new(1.25));
+    wait_for_webview_scene_to_be_up_to_date(&servo_test, &webview);
+    assert_eq!(
+        evaluate_javascript(
+            &servo_test,
+            webview.clone(),
+            r#"
+            innerWidth === 641 && innerHeight === 403 && devicePixelRatio === 1.25 &&
+            JSON.stringify(resizeSamples) === '[[641,403,1.25]]' &&
+            viewportSamples.every(s =>
+                (s[0] === 500 && s[1] === 500 && s[2] === 1) ||
+                (s[0] === 641 && s[1] === 403 && s[2] === 1.25))
+        "#
+        ),
+        Ok(JSValue::Boolean(true)),
+    );
+
+    // Repeating the same update must not create another resize event.
+    webview.set_viewport(Size2D::new(641.0, 403.0), Scale::new(1.25));
+    wait_for_webview_scene_to_be_up_to_date(&servo_test, &webview);
+    assert_eq!(
+        evaluate_javascript(&servo_test, webview.clone(), "resizeSamples.length"),
+        Ok(JSValue::Number(1.0)),
+    );
+}
+
+#[test]
+fn test_set_viewport_then_legacy_resize_and_scale() {
+    let servo_test = ServoTest::new();
+    let delegate = Rc::new(WebViewDelegateImpl::default());
+    let webview = WebViewBuilder::new(servo_test.servo(), servo_test.rendering_context.clone())
+        .delegate(delegate.clone())
+        .build();
+    webview.set_viewport(Size2D::new(641.0, 403.0), Scale::new(1.25));
+    show_webview_and_wait_for_rendering_to_be_ready(&servo_test, &webview, &delegate);
+
+    webview.resize(PhysicalSize::new(1000, 750));
+    wait_for_webview_scene_to_be_up_to_date(&servo_test, &webview);
+    assert_eq!(
+        evaluate_javascript(
+            &servo_test,
+            webview.clone(),
+            "[innerWidth, innerHeight, devicePixelRatio]"
+        ),
+        Ok(JSValue::Array(vec![
+            JSValue::Number(800.0),
+            JSValue::Number(600.0),
+            JSValue::Number(1.25)
+        ])),
+    );
+
+    webview.set_viewport(Size2D::new(641.0, 403.0), Scale::new(1.25));
+    webview.set_hidpi_scale_factor(Scale::new(1.0));
+    wait_for_webview_scene_to_be_up_to_date(&servo_test, &webview);
+    assert_eq!(
+        evaluate_javascript(
+            &servo_test,
+            webview.clone(),
+            "[innerWidth, innerHeight, devicePixelRatio]"
+        ),
+        Ok(JSValue::Array(vec![
+            JSValue::Number(802.0),
+            JSValue::Number(504.0),
+            JSValue::Number(1.0)
+        ])),
+    );
 }
 
 #[test]

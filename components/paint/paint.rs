@@ -725,7 +725,20 @@ impl Paint {
             return;
         }
         self.painter_mut(webview_id.into())
-            .resize_rendering_context(new_size);
+            .resize_webview(webview_id, new_size);
+    }
+
+    pub fn set_viewport(
+        &self,
+        webview_id: WebViewId,
+        css_size: Size2D<f32, CSSPixel>,
+        hidpi_scale_factor: Scale<f32, DeviceIndependentPixel, DevicePixel>,
+    ) {
+        if self.shutdown_state() != ShutdownState::NotShuttingDown {
+            return;
+        }
+        self.painter_mut(webview_id.into())
+            .set_viewport(webview_id, css_size, hidpi_scale_factor);
     }
 
     pub fn set_screen_size(&self, webview_id: WebViewId, new_size: Size2D<f32, DevicePixel>) {

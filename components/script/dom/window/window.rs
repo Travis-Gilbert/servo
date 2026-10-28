@@ -3572,7 +3572,8 @@ impl Window {
         // The viewport was already updated in `add_resize_event`, so these steps
         // only fire the event, and only if the viewport differs from the last one.
         let current_viewport = self.viewport_details();
-        if current_viewport == self.viewport_details_at_last_resize_steps.get() {
+        let previous_viewport = self.viewport_details_at_last_resize_steps.get();
+        if current_viewport == previous_viewport {
             return false;
         }
         self.viewport_details_at_last_resize_steps
@@ -3583,8 +3584,10 @@ impl Window {
             self.pipeline_id(),
         );
 
-        // http://dev.w3.org/csswg/cssom-view/#resizing-viewports
-        if size_type == WindowSizeType::Resize {
+        // CSSOM View fires window resize only when the viewport width or height changes.
+        // A scale or screen change still needs media-query and image environment updates,
+        // so return true below even when no resize event is dispatched.
+        if size_type == WindowSizeType::Resize && current_viewport.size != previous_viewport.size {
             let mut realm = enter_auto_realm(cx, self);
             let cx = &mut realm.current_realm();
             let uievent = UIEvent::new(

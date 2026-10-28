@@ -1328,6 +1328,44 @@ impl Painter {
         webview_renderer.set_screen_size(new_size);
     }
 
+    pub(crate) fn resize_webview(&mut self, webview_id: WebViewId, new_size: PhysicalSize<u32>) {
+        if let Some(renderer) = self.webview_renderers.get_mut(&webview_id) {
+            let rect = Rect::from_size(Size2D::new(new_size.width as f32, new_size.height as f32))
+                .to_box2d();
+            if renderer.use_device_viewport(rect) {
+                renderer.webview.notify_viewport_updated();
+            }
+        }
+        self.resize_rendering_context(new_size);
+    }
+
+    pub(crate) fn set_viewport(
+        &mut self,
+        webview_id: WebViewId,
+        css_size: Size2D<f32, CSSPixel>,
+        hidpi_scale_factor: Scale<f32, DeviceIndependentPixel, DevicePixel>,
+    ) {
+        let device_size = (css_size
+            * Scale::<f32, CSSPixel, DevicePixel>::new(hidpi_scale_factor.get()))
+        .ceil()
+        .to_u32()
+        .max(Size2D::new(1, 1));
+        let rect = Rect::from_size(device_size.to_f32()).to_box2d();
+        let Some(renderer) = self.webview_renderers.get_mut(&webview_id) else {
+            return;
+        };
+        if !renderer.set_viewport(css_size, hidpi_scale_factor, rect) {
+            return;
+        }
+        renderer.webview.notify_viewport_updated();
+
+        // The target renderer already has its final rect, CSS size and scale. Resizing
+        // the shared surface cannot send an intermediate viewport for it.
+        self.resize_rendering_context(PhysicalSize::new(device_size.width, device_size.height));
+        self.send_root_pipeline_display_list();
+        self.set_needs_repaint(RepaintReason::Resize);
+    }
+
     pub(crate) fn resize_rendering_context(&mut self, new_size: PhysicalSize<u32>) {
         if self.rendering_context.size() == new_size {
             return;

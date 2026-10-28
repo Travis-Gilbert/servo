@@ -111,6 +111,8 @@ pub(crate) struct WebViewRenderer {
     /// The HiDPI scale factor for the `WebView` associated with this renderer. This is controlled
     /// by the embedding layer.
     hidpi_scale_factor: Scale<f32, DeviceIndependentPixel, DevicePixel>,
+    /// An embedder-specified layout viewport, independent of device-pixel rounding.
+    css_viewport_size: Option<Size2D<f32, CSSPixel>>,
     /// Whether or not this [`WebViewRenderer`] is hidden.
     hidden: bool,
     /// Whether or not this [`WebViewRenderer`] isn't throttled and has a pipeline with
@@ -158,6 +160,7 @@ impl WebViewRenderer {
             page_zoom: DEFAULT_PAGE_ZOOM,
             pinch_zoom: PinchZoom::new(rect),
             hidpi_scale_factor: Scale::new(hidpi_scale_factor.0),
+            css_viewport_size: None,
             hidden: false,
             animating: false,
             viewport_description: Default::default(),
@@ -1049,9 +1052,14 @@ impl WebViewRenderer {
             return;
         };
 
-        let pinch_zoom_infos = self.pinch_zoom.get_pinch_zoom_infos_for_script(
+        let mut pinch_zoom_infos = self.pinch_zoom.get_pinch_zoom_infos_for_script(
             self.device_pixels_per_page_pixel_not_including_pinch_zoom(),
         );
+        if let Some(css_size) = self.css_viewport_size {
+            // The rounded surface can include a fraction of a CSS pixel of padding.
+            // That padding is not part of the visual viewport either.
+            pinch_zoom_infos.rect.size = css_size / self.pinch_zoom.zoom_factor().get();
+        }
 
         let _ = self.embedder_to_constellation_sender.send(
             EmbedderToConstellationMessage::UpdatePinchZoomInfos(pipeline_id, pinch_zoom_infos),
@@ -1125,8 +1133,10 @@ impl WebViewRenderer {
         let device_pixel_ratio = self.device_pixels_per_page_pixel_not_including_pinch_zoom();
         // From <https://www.w3.org/TR/css-viewport-1/#actual-viewport>:
         // This is the viewport you get after processing the viewport <meta> tag.
-        let layout_viewport = self.rect.size().to_f32() /
-            (device_pixel_ratio * Scale::new(self.viewport_description.initial_scale.get()));
+        let layout_viewport = self.css_viewport_size.unwrap_or_else(|| {
+            self.rect.size().to_f32()
+                / (device_pixel_ratio * Scale::new(self.viewport_description.initial_scale.get()))
+        });
         let _ = self.embedder_to_constellation_sender.send(
             EmbedderToConstellationMessage::ChangeViewportDetails(
                 self.id,
@@ -1146,11 +1156,46 @@ impl WebViewRenderer {
         new_scale: Scale<f32, DeviceIndependentPixel, DevicePixel>,
     ) -> bool {
         let old_scale_factor = std::mem::replace(&mut self.hidpi_scale_factor, new_scale);
-        if self.hidpi_scale_factor == old_scale_factor {
+        let had_css_viewport = self.css_viewport_size.take().is_some();
+        if self.hidpi_scale_factor == old_scale_factor && !had_css_viewport {
             return false;
         }
 
         self.send_window_size_message();
+        true
+    }
+
+    pub(crate) fn use_device_viewport(&mut self, rect: DeviceRect) -> bool {
+        let had_css_viewport = self.css_viewport_size.take().is_some();
+        let size_changed = self.rect.size() != rect.size();
+        self.set_rect(rect);
+        // set_rect sends the final viewport if the surface size changes. Switching
+        // back to device-derived sizing also needs an update when the surface is unchanged.
+        if had_css_viewport && !size_changed {
+            self.send_window_size_message();
+        }
+        had_css_viewport || size_changed
+    }
+
+    /// Update all viewport inputs before sending any message to script.
+    pub(crate) fn set_viewport(
+        &mut self,
+        css_size: Size2D<f32, CSSPixel>,
+        hidpi_scale_factor: Scale<f32, DeviceIndependentPixel, DevicePixel>,
+        rect: DeviceRect,
+    ) -> bool {
+        if self.css_viewport_size == Some(css_size)
+            && self.hidpi_scale_factor == hidpi_scale_factor
+            && self.rect == rect
+        {
+            return false;
+        }
+        self.css_viewport_size = Some(css_size);
+        self.hidpi_scale_factor = hidpi_scale_factor;
+        self.rect = rect;
+        self.send_window_size_message();
+        self.pinch_zoom.resize_unscaled_viewport(rect);
+        self.send_pinch_zoom_infos_to_script();
         true
     }
 
