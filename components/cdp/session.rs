@@ -29,6 +29,8 @@ use crate::ScriptRequest;
 
 const CONSOLE_BUFFER: usize = 200;
 const NETWORK_BODY_CAP: usize = 1024 * 1024;
+const MAX_REQUESTS: usize = 100;
+const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Domains {
@@ -68,6 +70,7 @@ struct Target {
     node_ids: HashMap<String, i64>,
     next_node: i64,
     requests: HashMap<String, NetRequest>,
+    request_order: VecDeque<String>,
     tools: Vec<WebMcpToolRecord>,
 }
 
@@ -91,6 +94,9 @@ pub(crate) struct Session {
     next_context: i64,
     /// Invocation ids whose cancel arrived before the script reply.
     cancelled: HashMap<String, bool>,
+    /// External listener, when one is bound. Discovery URLs use this port.
+    listen_port: u16,
+    token: String,
 }
 
 pub(crate) enum CommandOutcome {
@@ -111,7 +117,14 @@ impl Session {
             next_client: 1,
             next_context: 1,
             cancelled: HashMap::new(),
+            listen_port: 0,
+            token: String::new(),
         }
+    }
+
+    pub(crate) fn set_listen(&mut self, port: u16, token: String) {
+        self.listen_port = port;
+        self.token = token;
     }
 
     pub(crate) fn targets(&self) -> Vec<Value> {
@@ -124,8 +137,10 @@ impl Session {
                     "url": target.url,
                     "type": "page",
                     "webSocketDebuggerUrl": format!(
-                        "ws://127.0.0.1/devtools/page/{}",
-                        crate::websocket::encode_segment(&target_key(target.webview))
+                        "ws://127.0.0.1:{}/devtools/page/{}?token={}",
+                        self.listen_port,
+                        crate::websocket::encode_segment(&target_key(target.webview)),
+                        self.token
                     ),
                 })
             })
@@ -146,7 +161,21 @@ impl Session {
     }
 
     pub(crate) fn detach(&mut self, client: u64) {
+        let target = self
+            .clients
+            .get(&client)
+            .map(|client| client.target.clone());
         self.clients.remove(&client);
+        let Some(key) = target else {
+            return;
+        };
+        if self.network_open(&key) {
+            return;
+        }
+        if let Some(target) = self.targets.get_mut(&key) {
+            target.requests.clear();
+            target.request_order.clear();
+        }
     }
 
     pub(crate) fn control(&mut self, message: DevtoolsControlMsg) -> Vec<(u64, Value)> {
@@ -304,15 +333,23 @@ impl Session {
             ScriptReply::Empty => success(Some(id), json!({})),
             ScriptReply::Tool(invocation, result) => {
                 let cancelled = self.cancelled.remove(&invocation).unwrap_or(false);
+                let status = if cancelled {
+                    "cancelled"
+                } else if result.ok {
+                    "success"
+                } else {
+                    "error"
+                };
+                let output = serde_json::from_str::<Value>(&result.result)
+                    .unwrap_or_else(|_| Value::String(result.result.clone()));
                 let mut messages = success(Some(id), json!({ "invocationId": invocation }));
                 messages.push(event(
                     "WebMCP.toolResponded",
                     json!({
                         "invocationId": invocation,
-                        "cancelled": cancelled,
-                        "success": result.ok && !cancelled,
-                        "result": result.result,
-                        "error": result.error,
+                        "status": status,
+                        "output": output,
+                        "errorText": result.error,
                     }),
                 ));
                 messages
@@ -409,6 +446,11 @@ impl Session {
         sender: GenericSender<devtools_traits::DevtoolScriptControlMsg>,
         info: DevtoolsPageInfo,
     ) -> Vec<(u64, Value)> {
+        if !info.is_top_level_global {
+            // A child frame shares the webview id. Adopting it would replace
+            // the page the inspector is attached to.
+            return Vec::new();
+        }
         let key = target_key(webview);
         let origin = origin_of(&info.url);
         let fresh = !self.targets.contains_key(&key);
@@ -427,6 +469,7 @@ impl Session {
             node_ids: HashMap::new(),
             next_node: 1,
             requests: HashMap::new(),
+            request_order: VecDeque::new(),
             tools: Vec::new(),
         });
         target.sender = Some(sender);
@@ -462,6 +505,9 @@ impl Session {
         pipeline: PipelineId,
         info: DevtoolsPageInfo,
     ) -> Vec<(u64, Value)> {
+        if !info.is_top_level_global {
+            return Vec::new();
+        }
         let Some(target) = self.targets.get_mut(key) else {
             return Vec::new();
         };
@@ -481,6 +527,8 @@ impl Session {
         target.nodes.clear();
         target.node_ids.clear();
         target.tools.clear();
+        target.requests.clear();
+        target.request_order.clear();
         let context = self.next_context;
         self.next_context += 1;
         target.context_id = Some(context);
@@ -622,11 +670,11 @@ impl Session {
             return Vec::new();
         };
         let frame = pipeline.to_string();
-        let previous: Vec<String> = target
+        let previous: Vec<(String, String)> = target
             .tools
             .iter()
             .filter(|tool| tool.origin == target.origin && tool.frame_id == frame)
-            .map(|tool| tool.name.clone())
+            .map(|tool| (tool.name.clone(), tool.frame_id.clone()))
             .collect();
         target.tools.retain(|tool| tool.frame_id != frame);
         target.tools.extend(tools);
@@ -653,9 +701,15 @@ impl Session {
         else {
             return Vec::new();
         };
+        if !self.network_open(&key) {
+            return Vec::new();
+        }
         let messages = match event {
             NetworkEvent::HttpRequest(request) | NetworkEvent::HttpRequestUpdate(request) => {
                 let target = self.targets.get_mut(&key).unwrap();
+                if !target.requests.contains_key(&id) {
+                    target.request_order.push_back(id.clone());
+                }
                 let entry = target.requests.entry(id.clone()).or_insert(NetRequest {
                     events_sent: false,
                     response_sent: false,
@@ -688,6 +742,9 @@ impl Session {
             },
             NetworkEvent::HttpResponse(response) => {
                 let target = self.targets.get_mut(&key).unwrap();
+                if !target.requests.contains_key(&id) {
+                    target.request_order.push_back(id.clone());
+                }
                 let entry = target.requests.entry(id.clone()).or_insert(NetRequest {
                     events_sent: true,
                     response_sent: false,
@@ -745,13 +802,35 @@ impl Session {
             },
             NetworkEvent::SecurityInfo(_) => Vec::new(),
         };
+        if let Some(target) = self.targets.get_mut(&key) {
+            evict_requests(target);
+        }
         self.fanout(&key, messages, |domains, _| domains.network)
+    }
+
+    fn network_open(&self, key: &str) -> bool {
+        self.clients
+            .values()
+            .any(|client| client.target == key && client.domains.network)
     }
 
     fn evaluate(&mut self, id: Option<i64>, target_key: &str, params: &Value) -> CommandOutcome {
         let Some(id) = id else {
             return CommandOutcome::Messages(Vec::new());
         };
+        if let Some(requested) = params.get("contextId").and_then(Value::as_i64) {
+            let current = self
+                .targets
+                .get(target_key)
+                .and_then(|target| target.context_id);
+            if current != Some(requested) {
+                return CommandOutcome::Messages(error(
+                    Some(id),
+                    -32000,
+                    "execution context destroyed",
+                ));
+            }
+        }
         let expression = params
             .get("expression")
             .and_then(Value::as_str)
@@ -768,19 +847,27 @@ impl Session {
             return CommandOutcome::Messages(Vec::new());
         };
         let name = params
-            .get("name")
+            .get("toolName")
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned();
+        if let Some(frame) = params.get("frameId").and_then(Value::as_str) {
+            let top = self
+                .targets
+                .get(target_key)
+                .and_then(|target| target.pipeline)
+                .map(|pipeline| pipeline.to_string());
+            if top.as_deref() != Some(frame) {
+                return CommandOutcome::Messages(error(
+                    Some(id),
+                    -32000,
+                    "only the top-level document is inspected",
+                ));
+            }
+        }
         let arguments = params
-            .get("arguments")
-            .map(|value| {
-                if let Some(text) = value.as_str() {
-                    text.to_owned()
-                } else {
-                    value.to_string()
-                }
-            })
+            .get("input")
+            .map(|value| value.to_string())
             .unwrap_or_else(|| "{}".to_owned());
         let invocation = format!("invoke-{id}");
         // The command result arrives with the script reply.
@@ -918,7 +1005,7 @@ fn self_node(session: &Session, target: &str, node: i64) -> String {
         .unwrap_or_default()
 }
 
-fn tool_events(target: &Target, previous: &[String]) -> Vec<Value> {
+fn tool_events(target: &Target, previous: &[(String, String)]) -> Vec<Value> {
     let visible: Vec<&WebMcpToolRecord> = target
         .tools
         .iter()
@@ -926,22 +1013,26 @@ fn tool_events(target: &Target, previous: &[String]) -> Vec<Value> {
         .collect();
     let names: Vec<&str> = visible.iter().map(|tool| tool.name.as_str()).collect();
     let mut messages = Vec::new();
-    let removed: Vec<&str> = previous
+    let removed: Vec<&(String, String)> = previous
         .iter()
-        .map(String::as_str)
-        .filter(|name| !names.contains(name))
+        .filter(|(name, _)| !names.contains(&name.as_str()))
         .collect();
     if !removed.is_empty() {
-        messages.push(event("WebMCP.toolsRemoved", json!({ "names": removed })));
+        let tools: Vec<Value> = removed
+            .iter()
+            .map(|(name, frame)| json!({ "name": name, "frameId": frame }))
+            .collect();
+        messages.push(event("WebMCP.toolsRemoved", json!({ "tools": tools })));
     }
     let added: Vec<Value> = visible
         .iter()
-        .filter(|tool| !previous.iter().any(|name| name == &tool.name))
+        .filter(|tool| !previous.iter().any(|(name, _)| name == &tool.name))
         .map(|tool| {
+            let schema = serde_json::from_str::<Value>(&tool.input_schema).unwrap_or(Value::Null);
             json!({
                 "name": tool.name,
                 "description": tool.description,
-                "inputSchema": tool.input_schema,
+                "inputSchema": schema,
                 "frameId": tool.frame_id,
             })
         })
@@ -1135,6 +1226,22 @@ fn resource_type(destination: Destination, is_xhr: bool) -> &'static str {
         Destination::Image => "Image",
         Destination::Font => "Font",
         _ => "Other",
+    }
+}
+
+fn evict_requests(target: &mut Target) {
+    let mut bytes: usize = target
+        .requests
+        .values()
+        .map(|request| request.body.as_ref().map(Vec::len).unwrap_or(0))
+        .sum();
+    while target.requests.len() > MAX_REQUESTS || bytes > MAX_BODY_BYTES {
+        let Some(id) = target.request_order.pop_front() else {
+            break;
+        };
+        if let Some(old) = target.requests.remove(&id) {
+            bytes = bytes.saturating_sub(old.body.as_ref().map(Vec::len).unwrap_or(0));
+        }
     }
 }
 
@@ -1342,6 +1449,97 @@ mod tests {
             .unwrap();
         assert_eq!(added.1["params"]["tools"].as_array().unwrap().len(), 1);
         assert_eq!(added.1["params"]["tools"][0]["name"], "search_flights");
+        assert_eq!(
+            added.1["params"]["tools"][0]["inputSchema"]["type"],
+            "object"
+        );
+        assert_eq!(
+            added.1["params"]["tools"][0]["frameId"],
+            TEST_PIPELINE_ID.to_string()
+        );
+    }
+
+    #[test]
+    fn an_iframe_does_not_replace_the_top_level_document() {
+        let (sender, _receiver) = generic_channel::channel().unwrap();
+        let mut session = Session::new();
+        session.set_listen(9333, "secret".into());
+        let client = session.attach(TEST_WEBVIEW_ID.to_string());
+        session.control(global(TEST_PIPELINE_ID, sender.clone()));
+        session.command(client, &json!({ "id": 1, "method": "Runtime.enable" }));
+        let mut frame = page("https://example.com/embed");
+        frame.title = "Embed".into();
+        frame.is_top_level_global = false;
+        let events = session.control(DevtoolsControlMsg::FromScript(
+            ScriptToDevtoolsControlMsg::NewGlobal(
+                (
+                    TEST_BROWSING_CONTEXT_ID,
+                    other_pipeline(),
+                    None,
+                    TEST_WEBVIEW_ID,
+                ),
+                sender,
+                frame,
+            ),
+        ));
+        assert!(events.is_empty());
+        let listed = session.targets();
+        assert_eq!(listed[0]["url"], "https://example.com/");
+        assert_eq!(listed[0]["title"], "Example");
+        assert!(
+            listed[0]["webSocketDebuggerUrl"]
+                .as_str()
+                .unwrap()
+                .contains("ws://127.0.0.1:9333/devtools/page/")
+        );
+        assert!(
+            listed[0]["webSocketDebuggerUrl"]
+                .as_str()
+                .unwrap()
+                .contains("token=secret")
+        );
+        let stale = session.command(
+            client,
+            &json!({
+                "id": 4,
+                "method": "Runtime.evaluate",
+                "params": { "expression": "document.title", "contextId": 999 }
+            }),
+        );
+        let CommandOutcome::Messages(messages) = stale else {
+            panic!("stale context is rejected immediately");
+        };
+        assert_eq!(messages[0]["error"]["code"], -32000);
+    }
+
+    #[test]
+    fn network_is_not_retained_until_a_client_is_listening() {
+        let (sender, _receiver) = generic_channel::channel().unwrap();
+        let mut session = Session::new();
+        let client = session.attach(TEST_WEBVIEW_ID.to_string());
+        session.control(global(TEST_PIPELINE_ID, sender));
+        let request = DevtoolsHttpRequest {
+            url: ServoUrl::parse("https://example.com/a").unwrap(),
+            method: Method::GET,
+            headers: HeaderMap::new(),
+            body: None,
+            pipeline_id: TEST_PIPELINE_ID,
+            started_date_time: SystemTime::now(),
+            time_stamp: 0,
+            connect_time: Duration::from_millis(1),
+            send_time: Duration::from_millis(1),
+            destination: Destination::Document,
+            is_xhr: false,
+            browsing_context_id: TEST_BROWSING_CONTEXT_ID,
+        };
+        let ignored = session.control(DevtoolsControlMsg::FromChrome(
+            ChromeToDevtoolsControlMsg::NetworkEvent(
+                "early".into(),
+                NetworkEvent::HttpRequest(request),
+            ),
+        ));
+        assert!(ignored.is_empty());
+        session.detach(client);
     }
 
     #[test]

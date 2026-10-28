@@ -2,12 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-//! A small WebSocket implementation for CDP text frames.
+//! HTTP discovery and the WebSocket upgrade.
 //!
-//! The server accepts one HTTP request per connection. A discovery `GET`
-//! is answered in place. A WebSocket upgrade is answered, and later frames
-//! are unmasked text. Payloads are capped so a client cannot make the
-//! process buffer without limit.
+//! After the 101 response, the connection is a tungstenite socket. This
+//! module only reads the request and writes the handshake.
 
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
@@ -17,7 +15,6 @@ use base64::engine::general_purpose::STANDARD;
 use sha1::{Digest, Sha1};
 
 const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-const MAX_PAYLOAD: usize = 8 * 1024 * 1024;
 
 #[derive(Debug)]
 pub(crate) struct HttpRequest {
@@ -101,95 +98,6 @@ pub(crate) fn write_upgrade(stream: &mut TcpStream, accept: &str) -> io::Result<
     )
 }
 
-pub(crate) fn write_text(stream: &mut TcpStream, text: &str) -> io::Result<()> {
-    let payload = text.as_bytes();
-    if payload.len() > MAX_PAYLOAD {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "frame"));
-    }
-    let mut header = Vec::with_capacity(10);
-    header.push(0x81);
-    if payload.len() < 126 {
-        header.push(payload.len() as u8);
-    } else if payload.len() <= u16::MAX as usize {
-        header.push(126);
-        header.extend_from_slice(&(payload.len() as u16).to_be_bytes());
-    } else {
-        header.push(127);
-        header.extend_from_slice(&(payload.len() as u64).to_be_bytes());
-    }
-    stream.write_all(&header)?;
-    stream.write_all(payload)?;
-    stream.flush()
-}
-
-pub(crate) fn read_text(stream: &mut TcpStream) -> io::Result<Option<String>> {
-    let mut collected = Vec::new();
-    loop {
-        let (opcode, fin, payload) = read_frame(stream)?;
-        if opcode == 0x8 {
-            return Ok(None);
-        }
-        if opcode == 0x9 {
-            write_pong(stream, &payload)?;
-            continue;
-        }
-        if opcode != 0x1 && opcode != 0x0 {
-            continue;
-        }
-        collected.extend(payload);
-        if collected.len() > MAX_PAYLOAD {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "frame"));
-        }
-        if fin {
-            return Ok(Some(String::from_utf8(collected).map_err(|error| {
-                io::Error::new(io::ErrorKind::InvalidData, error)
-            })?));
-        }
-    }
-}
-
-fn write_pong(stream: &mut TcpStream, payload: &[u8]) -> io::Result<()> {
-    stream.write_all(&[0x8A, payload.len() as u8])?;
-    stream.write_all(payload)?;
-    stream.flush()
-}
-
-fn read_frame(stream: &mut TcpStream) -> io::Result<(u8, bool, Vec<u8>)> {
-    let mut header = [0u8; 2];
-    stream.read_exact(&mut header)?;
-    let fin = header[0] & 0x80 != 0;
-    let opcode = header[0] & 0x0F;
-    let masked = header[1] & 0x80 != 0;
-    let mut length = (header[1] & 0x7F) as usize;
-    if length == 126 {
-        let mut extended = [0u8; 2];
-        stream.read_exact(&mut extended)?;
-        length = u16::from_be_bytes(extended) as usize;
-    } else if length == 127 {
-        let mut extended = [0u8; 8];
-        stream.read_exact(&mut extended)?;
-        length = u64::from_be_bytes(extended) as usize;
-    }
-    if length > MAX_PAYLOAD {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "frame"));
-    }
-    let mask = if masked {
-        let mut mask = [0u8; 4];
-        stream.read_exact(&mut mask)?;
-        Some(mask)
-    } else {
-        None
-    };
-    let mut payload = vec![0u8; length];
-    stream.read_exact(&mut payload)?;
-    if let Some(mask) = mask {
-        for (index, byte) in payload.iter_mut().enumerate() {
-            *byte ^= mask[index % 4];
-        }
-    }
-    Ok((opcode, fin, payload))
-}
-
 pub(crate) fn decode_segment(segment: &str) -> String {
     let bytes = segment.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -227,14 +135,17 @@ pub(crate) fn encode_segment(segment: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
+
+    use tungstenite::Message;
+    use tungstenite::protocol::{Role, WebSocket};
 
     use super::*;
 
     #[test]
-    fn text_round_trip_and_path_encoding() {
+    fn upgrade_then_tungstenite_round_trip_and_path_encoding() {
         assert_eq!(decode_segment("a%20b"), "a b");
         assert_eq!(encode_segment("a b"), "a%20b");
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -245,9 +156,11 @@ mod tests {
             assert_eq!(request.path, "/devtools/page/a%20b");
             let key = header(&request, "sec-websocket-key").unwrap();
             write_upgrade(&mut stream, &accept_key(key)).unwrap();
-            let text = read_text(&mut stream).unwrap().unwrap();
-            assert_eq!(text, "hello");
-            write_text(&mut stream, "world").unwrap();
+            let mut socket = WebSocket::from_raw_socket(stream, Role::Server, None);
+            let text = socket.read().unwrap();
+            assert_eq!(text, Message::text("hello"));
+            socket.send(Message::text("world")).unwrap();
+            socket.flush().unwrap();
         });
         let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
         write!(
@@ -255,15 +168,17 @@ mod tests {
             "GET /devtools/page/a%20b HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
         )
         .unwrap();
-        let response = read_http_request_raw(&mut client);
+        let response = read_http_response(&mut client);
         assert!(response.starts_with("HTTP/1.1 101"));
-        write_client_text(&mut client, "hello");
-        let answer = read_text(&mut client).unwrap().unwrap();
-        assert_eq!(answer, "world");
+        let mut socket = WebSocket::from_raw_socket(client, Role::Client, None);
+        socket.send(Message::text("hello")).unwrap();
+        socket.flush().unwrap();
+        let answer = socket.read().unwrap();
+        assert_eq!(answer, Message::text("world"));
         server.join().unwrap();
     }
 
-    fn read_http_request_raw(stream: &mut TcpStream) -> String {
+    fn read_http_response(stream: &mut TcpStream) -> String {
         let mut buffer = Vec::new();
         let mut byte = [0u8; 1];
         loop {
@@ -274,17 +189,5 @@ mod tests {
             }
         }
         String::from_utf8(buffer).unwrap()
-    }
-
-    fn write_client_text(stream: &mut TcpStream, text: &str) {
-        let payload = text.as_bytes();
-        let mask = [1u8, 2, 3, 4];
-        let mut frame = vec![0x81, 0x80 | payload.len() as u8];
-        frame.extend(mask);
-        for (index, byte) in payload.iter().enumerate() {
-            frame.push(byte ^ mask[index % 4]);
-        }
-        stream.write_all(&frame).unwrap();
-        stream.flush().unwrap();
     }
 }

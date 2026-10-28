@@ -248,5 +248,5 @@ partial interface Document {
 // WebMCP, Community Group draft of 27 October 2026.
 // One registry per document. Navigation drops it with the document.
 partial interface Document {
-  [SameObject] readonly attribute ModelContext modelContext;
+  [SameObject, SecureContext, Pref="dom_webmcp_enabled"] readonly attribute ModelContext modelContext;
 };

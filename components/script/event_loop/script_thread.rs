@@ -2336,18 +2336,19 @@ impl ScriptThread {
                 name,
                 arguments,
                 reply,
-            ) => {
-                let result = match documents.find_document(pipeline) {
-                    Some(document) => document
+            ) => match documents.find_document(pipeline) {
+                Some(document) => {
+                    document
                         .model_context(cx)
-                        .invoke(cx, &invocation, &name, &arguments),
-                    None => WebMcpInvokeResult {
+                        .invoke(cx, &invocation, &name, &arguments, reply);
+                },
+                None => {
+                    let _ = reply.send(WebMcpInvokeResult {
                         ok: false,
                         result: String::new(),
                         error: Some("no document".to_owned()),
-                    },
-                };
-                let _ = reply.send(result);
+                    });
+                },
             },
             DevtoolScriptControlMsg::WebMcpCancel(pipeline, invocation) => {
                 if let Some(document) = documents.find_document(pipeline) {

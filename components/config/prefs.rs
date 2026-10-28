@@ -125,6 +125,15 @@ pub struct Preferences {
     pub cdp_server_enabled: bool,
     /// `address:port` for the CDP server. Empty uses 127.0.0.1:9333.
     pub cdp_server_listen_address: String,
+    /// Shared secret required on external CDP HTTP and WebSocket requests.
+    /// The listener does not start while this is empty.
+    pub cdp_server_token: String,
+    /// In-process inspection channel for the embedder. This does not listen
+    /// on a socket.
+    pub cdp_builtin_enabled: bool,
+    /// `document.modelContext`. Off unless a developer turns it on, so pages
+    /// do not see the experimental API during ordinary browsing.
+    pub dom_webmcp_enabled: bool,
     // feature: WebGPU | #24706 | Web/API/WebGPU_API
     pub dom_webgpu_enabled: bool,
     /// List of comma-separated backends to be used by wgpu.
@@ -440,6 +449,9 @@ impl Preferences {
             devtools_server_listen_address: String::new(),
             cdp_server_enabled: false,
             cdp_server_listen_address: String::new(),
+            cdp_server_token: String::new(),
+            cdp_builtin_enabled: false,
+            dom_webmcp_enabled: false,
             dom_adoptedstylesheet_enabled: false,
             dom_allow_preloading_module_descendants: false,
             dom_allow_scripts_to_close_windows: false,

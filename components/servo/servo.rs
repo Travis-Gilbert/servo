@@ -955,10 +955,10 @@ impl Servo {
         );
         let mem_profiler_chan = profile_mem::Profiler::create();
 
-        // One inspection channel. CDP owns it when enabled. The Firefox
-        // server stays available when CDP is off. The message type is not
-        // cloneable, so the two servers are not teed.
-        let devtools_sender = if pref!(cdp_server_enabled) {
+        // One inspection channel. The in-process CDP client and the external
+        // listener share it. The Firefox server stays available when both
+        // are off. The message type is not cloneable, so the servers are not teed.
+        let devtools_sender = if pref!(cdp_builtin_enabled) || pref!(cdp_server_enabled) {
             cdp::start_server()
         } else if pref!(devtools_server_enabled) {
             Some(devtools::start_server(
