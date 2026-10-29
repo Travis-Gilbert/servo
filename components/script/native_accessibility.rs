@@ -6,11 +6,13 @@
 use crate::dom::bindings::codegen::UnionTypes::BooleanOrScrollIntoViewOptions;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::iterators::ShadowIncluding;
-use crate::dom::node::{Node, NodeTraits};
+use crate::dom::node::Node;
+use crate::dom::node::focus::FocusTrigger;
 use crate::dom::types::{
     Element, HTMLInputElement, HTMLSelectElement, HTMLTextAreaElement, Window,
 };
 use js::context::JSContext;
+use layout_api::HitTestFlags;
 use script_bindings::codegen::GenericBindings::{
     DocumentBinding::DocumentMethods,
     ElementBinding::{ElementMethods, ScrollIntoViewOptions, ScrollLogicalPosition},
@@ -147,8 +149,10 @@ fn observe(
     // Current hit testing excludes covered viewport controls. Offscreen rendered
     // nodes expose only reveal/focus and bounded text reads until scrolled in.
     if let Some(point) = point {
-        let hit = window
-            .hit_test_from_point_in_viewport(euclid::point2(point[0] as f32, point[1] as f32))?;
+        let hit = window.hit_test_from_point_in_viewport(
+            HitTestFlags::empty(),
+            euclid::point2(point[0] as f32, point[1] as f32),
+        )?;
         if !node.is_shadow_including_inclusive_ancestor_of(&hit.node) {
             return None;
         }
@@ -499,7 +503,7 @@ pub(crate) fn dispatch(
             if expected.offscreen {
                 reveal(element, cx);
             }
-            if !node.run_the_focusing_steps(cx, None) {
+            if !node.run_the_focusing_steps(cx, None, FocusTrigger::Other) {
                 return Err(NativeTextError::EditRefused);
             }
             if !element.focus_state() {

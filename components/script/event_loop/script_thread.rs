@@ -1992,9 +1992,12 @@ impl ScriptThread {
                     crate::native_text::dispatch(&window, request, &mut realm.current_realm());
                 let _ = callback.send(result);
             },
+            #[cfg(feature = "webgl")]
             ScriptThreadMessage::TheoremWorldTexture(pipeline_id, request, callback) => {
                 let Some(window) = self.documents.borrow().find_window(pipeline_id) else {
-                    let _ = callback.send(Err(servo_base::theorem_world_gpu::TheoremWorldTextureError::DocumentUnavailable));
+                    let _ = callback.send(Err(
+                        servo_base::theorem_world_gpu::TheoremWorldTextureError::DocumentUnavailable,
+                    ));
                     return;
                 };
                 let mut realm = enter_auto_realm(cx, window.as_global_scope());
@@ -2004,6 +2007,12 @@ impl ScriptThread {
                     callback,
                     &mut realm.current_realm(),
                 );
+            },
+            #[cfg(not(feature = "webgl"))]
+            ScriptThreadMessage::TheoremWorldTexture(_, _, callback) => {
+                let _ = callback.send(Err(
+                    servo_base::theorem_world_gpu::TheoremWorldTextureError::Unsupported,
+                ));
             },
             ScriptThreadMessage::DocumentLayoutSnapshot(pipeline_id, callback) => {
                 self.handle_document_layout_snapshot(pipeline_id, callback, cx);
@@ -4738,6 +4747,7 @@ impl ScriptThread {
                 || crate::native_accessibility::document_identity(&window) != *expected
         }) {
             let _ = self.senders.pipeline_to_constellation_sender.send((
+                Some(self.resource_threads.partition_id()),
                 webview_id,
                 pipeline_id,
                 ScriptToConstellationMessage::FinishJavaScriptEvaluation(

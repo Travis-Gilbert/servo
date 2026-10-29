@@ -394,7 +394,7 @@ impl WebGLThread {
                     .and_then(|data| {
                         if data.marked_for_deletion
                             || data.painter_id != binding.webview.into()
-                            || data.state._webgl_version != WebGLVersion::WebGL2
+                            || data.state.webgl_version != WebGLVersion::WebGL2
                         {
                             return Err(Error::StaleBinding);
                         }

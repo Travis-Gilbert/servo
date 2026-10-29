@@ -4,7 +4,7 @@
 //! Native text admission re-reads actual focused-document state. Cached embedder
 //! InputMethodControl notifications are never an edit authority.
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::node::{Node, NodeTraits};
+use crate::dom::node::Node;
 use crate::dom::types::{HTMLInputElement, HTMLTextAreaElement, Window};
 use embedder_traits::{ImeEvent, InputEventResult};
 use js::context::JSContext;

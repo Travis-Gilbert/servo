@@ -7,7 +7,7 @@
 //! Neither the callback nor an engine GPU identifier is installed on the global object.
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use crate::dom::bindings::conversions::{
-    ConversionResult, FromJSValConvertible, SafeToJSValConvertible, get_property_jsval,
+    ConversionResult, FromJSValConvertible, ToJSValConvertible, get_property_jsval,
     root_from_object_static,
 };
 use crate::dom::bindings::inheritance::Castable;
@@ -84,15 +84,15 @@ fn texture_valid(
 
 fn attest_destination(cx: &mut JSContext, args: CallArgs) -> bool {
     let global = {
-        let realm = CurrentRealm::assert(cx);
-        GlobalScope::from_current_realm(&realm)
+        let mut realm = CurrentRealm::assert(cx);
+        GlobalScope::from_current_realm(&mut realm)
     };
     let window = global.as_window();
     let valid = (|| {
         if !window.Document().is_fully_active() || args.argc_ != 5 {
             return false;
         }
-        let callback = unsafe { *args.get(0) };
+        let callback = *args.get(0);
         if !callback.is_object()
             || callback.to_object() != window.theorem_world_gpu().callback.get()
         {
@@ -105,17 +105,15 @@ fn attest_destination(cx: &mut JSContext, args: CallArgs) -> bool {
         pending.owner == crate::native_accessibility::document_identity(window)
             && matches_stamp(cx, &args, 1, pending)
     })();
-    unsafe {
-        args.rval().set(BooleanValue(valid));
-    }
+    args.rval().set(BooleanValue(valid));
     true
 }
 
 fn matches_stamp(cx: &mut JSContext, args: &CallArgs, start: usize, pending: &Pending) -> bool {
-    let challenge_value = unsafe { *args.get(start as u32) };
-    let epoch_value = unsafe { *args.get((start + 1) as u32) };
-    let width_value = unsafe { *args.get((start + 2) as u32) };
-    let height_value = unsafe { *args.get((start + 3) as u32) };
+    let challenge_value = *args.get(start as u32);
+    let epoch_value = *args.get((start + 1) as u32);
+    let width_value = *args.get((start + 2) as u32);
+    let height_value = *args.get((start + 3) as u32);
     if !challenge_value.is_string()
         || !epoch_value.is_string()
         || !width_value.is_number()
@@ -127,8 +125,8 @@ fn matches_stamp(cx: &mut JSContext, args: &CallArgs, start: usize, pending: &Pe
     }
     rooted!(&in(cx) let challenge_value = challenge_value);
     rooted!(&in(cx) let epoch_value = epoch_value);
-    let challenge = String::safe_from_jsval(cx, challenge_value.handle(), ());
-    let epoch = String::safe_from_jsval(cx, epoch_value.handle(), ());
+    let challenge = String::from_jsval(cx, challenge_value.handle(), ());
+    let epoch = String::from_jsval(cx, epoch_value.handle(), ());
     matches!(challenge, Ok(ConversionResult::Success(ref value)) if value == &pending.challenge)
         && matches!(epoch, Ok(ConversionResult::Success(ref value)) if value == &pending.epoch.to_string())
 }
@@ -136,8 +134,8 @@ fn matches_stamp(cx: &mut JSContext, args: &CallArgs, start: usize, pending: &Pe
 fn receive_destination(cx: &mut JSContext, args: CallArgs) -> bool {
     // A callback retained by page code becomes inert as soon as the synchronous bootstrap ends.
     let global = {
-        let realm = CurrentRealm::assert(cx);
-        GlobalScope::from_current_realm(&realm)
+        let mut realm = CurrentRealm::assert(cx);
+        GlobalScope::from_current_realm(&mut realm)
     };
     let window = global.as_window();
     if args.callee() != window.theorem_world_gpu().callback.get() {
@@ -145,9 +143,7 @@ fn receive_destination(cx: &mut JSContext, args: CallArgs) -> bool {
         return true;
     }
     let Some(pending) = window.theorem_world_gpu().pending.borrow_mut().take() else {
-        unsafe {
-            args.rval().set(BooleanValue(false));
-        }
+        args.rval().set(BooleanValue(false));
         return true;
     };
     let result = (|| {
@@ -160,8 +156,8 @@ fn receive_destination(cx: &mut JSContext, args: CallArgs) -> bool {
         if args.argc_ != 6 {
             return Err(TheoremWorldTextureError::InvalidBootstrap);
         }
-        rooted!(&in(cx) let context_value = unsafe { *args.get(0) });
-        rooted!(&in(cx) let texture_value = unsafe { *args.get(1) });
+        rooted!(&in(cx) let context_value = *args.get(0));
+        rooted!(&in(cx) let texture_value = *args.get(1));
         if !context_value.is_object()
             || !texture_value.is_object()
             || !matches_stamp(cx, &args, 2, &pending)
@@ -201,9 +197,7 @@ fn receive_destination(cx: &mut JSContext, args: CallArgs) -> bool {
             });
         Ok(binding)
     })();
-    unsafe {
-        args.rval().set(BooleanValue(result.is_ok()));
-    }
+    args.rval().set(BooleanValue(result.is_ok()));
     *window.theorem_world_gpu().registration.borrow_mut() = Some(result);
     true
 }
@@ -348,14 +342,14 @@ fn register(
     }
     rooted!(&in(cx) let native_callback = crate::native_raw_obj_fn!(cx, receive_destination, c"registerTheoremWorldTexture", 6, 0));
     rooted!(&in(cx) let mut challenge_value = UndefinedValue());
-    challenge.safe_to_jsval(cx, challenge_value.handle_mut());
+    challenge.to_jsval(cx, challenge_value.handle_mut());
     rooted_vec!(let mut arguments);
     arguments.push(ObjectValue(native_callback.get()));
     arguments.push(challenge_value.get());
     rooted!(&in(cx) let mut epoch_value = UndefinedValue());
     epoch
         .to_string()
-        .safe_to_jsval(cx, epoch_value.handle_mut());
+        .to_jsval(cx, epoch_value.handle_mut());
     arguments.push(epoch_value.get());
     arguments.push(js::jsval::DoubleValue(f64::from(source.width)));
     arguments.push(js::jsval::DoubleValue(f64::from(source.height)));

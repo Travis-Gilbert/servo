@@ -915,7 +915,7 @@ impl DocumentEventHandler {
             return;
         };
 
-        self.handle_mouse_button_at_hit(cx, event, input_event, &hit_test_result);
+        self.handle_mouse_button_at_hit(cx, mouse_button_event, input_event, &hit_test_result);
     }
 
     /// Native accessibility activation uses the same trusted pointer/default-
@@ -928,12 +928,12 @@ impl DocumentEventHandler {
         expected: &Node,
     ) -> Result<(), servo_base::native_text::NativeTextError> {
         use servo_base::native_text::NativeTextError;
-        if self.mouse_buttons_down.get() != 0 {
+        if !self.mouse_button_state.get().is_empty() {
             return Err(NativeTextError::EditRefused);
         }
         let hit = self
             .window
-            .hit_test_from_point_in_viewport(point)
+            .hit_test_from_point_in_viewport(HitTestFlags::IncludeDomPosition, point)
             .ok_or(NativeTextError::EditRefused)?;
         if !expected.is_shadow_including_inclusive_ancestor_of(&hit.node)
             || !self.window.Document().is_fully_active()
@@ -948,34 +948,36 @@ impl DocumentEventHandler {
         };
         let down = MouseButtonEvent::new(
             MouseButtonAction::Down,
-            MouseButton::Left,
+            MouseButton::Primary,
             point.into(),
         );
-        self.handle_mouse_button_at_hit(cx, down, &native_event(down, 1), &hit);
+        self.handle_mouse_button_at_hit(cx, down, &native_event(down, MouseButtons::Primary), &hit);
         // Down can replace/remove/cover the target. Do not deliver Up or
         // activation to a replacement. Cancel only this synchronous native
         // gesture through the same existing pointer/focus/default-action owner.
-        let current_hit = self.window.hit_test_from_point_in_viewport(point);
+        let current_hit = self
+            .window
+            .hit_test_from_point_in_viewport(HitTestFlags::empty(), point);
         if !self.window.Document().is_fully_active()
             || current_hit
                 .as_ref()
                 .is_none_or(|hit| !expected.is_shadow_including_inclusive_ancestor_of(&hit.node))
         {
             self.last_mouse_button_down_point.take();
-            self.mouse_buttons_down.set(0);
+            self.mouse_button_state.set(MouseButtons::empty());
             self.unset_active_element();
             self.implicit_release_pointer_capture(cx, PointerId::Mouse as i32, "mouse", true);
             return Err(NativeTextError::StaleContext);
         }
-        let up = MouseButtonEvent::new(MouseButtonAction::Up, MouseButton::Left, point.into());
-        self.handle_mouse_button_at_hit(cx, up, &native_event(up, 0), &current_hit.unwrap());
+        let up = MouseButtonEvent::new(MouseButtonAction::Up, MouseButton::Primary, point.into());
+        self.handle_mouse_button_at_hit(cx, up, &native_event(up, MouseButtons::empty()), &current_hit.unwrap());
         Ok(())
     }
 
     fn handle_mouse_button_at_hit(
         &self,
         cx: &mut JSContext,
-        event: MouseButtonEvent,
+        mouse_button_event: MouseButtonEvent,
         input_event: &ConstellationInputEvent,
         hit_test_result: &HitTestResult,
     ) {

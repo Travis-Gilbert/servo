@@ -39,6 +39,7 @@ mod event_loop;
 mod native_accessibility;
 mod native_text;
 mod runtime;
+#[cfg(feature = "webgl")]
 mod theorem_world_gpu;
 mod url;
 

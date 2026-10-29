@@ -390,6 +390,7 @@ pub(crate) struct Window {
     #[cfg(feature = "webgl")]
     webgl_chan: Option<WebGLChan>,
     /// Strong, traced native texture grants scoped to this document.
+    #[cfg(feature = "webgl")]
     theorem_world_gpu: crate::theorem_world_gpu::State,
     native_text: crate::native_text::State,
 
@@ -511,6 +512,7 @@ impl Window {
     pub(crate) fn native_text(&self) -> &crate::native_text::State {
         &self.native_text
     }
+    #[cfg(feature = "webgl")]
     pub(crate) fn theorem_world_gpu(&self) -> &crate::theorem_world_gpu::State {
         &self.theorem_world_gpu
     }
@@ -4030,6 +4032,7 @@ impl Window {
             test_runner: Default::default(),
             #[cfg(feature = "webgl")]
             webgl_chan,
+            #[cfg(feature = "webgl")]
             theorem_world_gpu: Default::default(),
             native_text: Default::default(),
             #[cfg(feature = "webxr")]

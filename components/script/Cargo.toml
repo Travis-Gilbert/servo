@@ -56,7 +56,6 @@ webcrypto = [
     "dep:pkcs8",
     "dep:rsa",
     "dep:sha1",
-    "dep:sha2",
     "dep:sha3",
     "dep:sponge-cursor",
     "dep:x-wing",
@@ -193,7 +192,7 @@ servo-url = { workspace = true }
 servo-webvtt = { workspace = true }
 servo_arc = { workspace = true }
 sha1 = { workspace = true, optional = true }
-sha2 = { workspace = true, optional = true }
+sha2 = { workspace = true }
 sha3 = { workspace = true, optional = true }
 smallvec = { workspace = true }
 sponge-cursor = { workspace = true, optional = true }

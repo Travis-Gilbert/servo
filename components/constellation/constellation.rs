@@ -1457,17 +1457,18 @@ where
                 // Do not strand that construction by aborting its only pipeline.
                 if self.browsing_contexts.contains_key(&context) {
                     let pending: Vec<_> = self
-                        .pending_changes
-                        .iter()
+                        .webviews
+                        .get(&webview_id)
+                        .into_iter()
+                        .flat_map(|webview| webview.pending_changes.iter())
                         .filter(|change| {
-                            change.webview_id == webview_id
-                                && change.browsing_context_id == context
-                                && change.new_browsing_context_info.is_none()
+                            change.browsing_context_id == context &&
+                                change.new_browsing_context_info.is_none()
                         })
                         .map(|change| change.new_pipeline_id)
                         .collect();
                     for pipeline in pending {
-                        self.handle_abort_load_url_msg(pipeline);
+                        self.handle_abort_load_url_msg(webview_id, pipeline);
                     }
                 }
             },

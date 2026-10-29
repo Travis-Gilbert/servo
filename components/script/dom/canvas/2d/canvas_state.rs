@@ -866,6 +866,7 @@ impl CanvasState {
                         self.state.borrow().transform,
                     ));
                 },
+                #[cfg(feature = "webgl")]
                 RenderingContext::WebGL(ref context) => {
                     let Some(snapshot) = context.get_image_data() else {
                         return Ok(());
@@ -880,6 +881,7 @@ impl CanvasState {
                         self.state.borrow().transform,
                     ));
                 },
+                #[cfg(feature = "webgl")]
                 RenderingContext::WebGL2(ref context) => {
                     let Some(snapshot) = context.get_image_data() else {
                         return Ok(());
@@ -979,7 +981,8 @@ impl CanvasState {
                         },
                     }
                 },
-                _ => return Err(Error::InvalidState(None)),
+                #[cfg(feature = "webgpu")]
+                RenderingContext::WebGPU(_) => return Err(Error::InvalidState(None)),
             }
         } else {
             self.send_canvas_command(CanvasCommand::DrawEmptyImage(
