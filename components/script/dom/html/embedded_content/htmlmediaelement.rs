@@ -561,6 +561,11 @@ pub(crate) struct HTMLMediaElement {
     #[conditional_malloc_size_of]
     #[no_trace]
     video_renderer: Arc<Mutex<MediaFrameRenderer>>,
+    /// The image referenced by the last video display-list update. New pixels
+    /// for the same image need a repaint, not another style/layout traversal.
+    #[ignore_malloc_size_of = "WebRender resource handle"]
+    #[no_trace]
+    last_video_image_key: Cell<Option<ImageKey>>,
     #[ignore_malloc_size_of = "servo_media"]
     #[no_trace]
     audio_renderer: DomRefCell<Option<Arc<Mutex<dyn AudioRenderer>>>>,
@@ -704,6 +709,7 @@ impl HTMLMediaElement {
                 document.window().paint_api().clone(),
                 document.window().get_player_context(),
             ))),
+            last_video_image_key: Cell::new(None),
             audio_renderer: Default::default(),
             event_handler: Default::default(),
             show_poster: Cell::new(true),
@@ -3064,16 +3070,22 @@ impl HTMLMediaElement {
         }
 
         if let Some(frame) = self.video_renderer.lock().unwrap().current_frame {
+            let image_changed = self.last_video_image_key.replace(Some(frame.image_key)) != Some(frame.image_key);
             if video_element.set_natural_dimensions(
                 no_gc,
                 Some(frame.width as u32),
                 Some(frame.height as u32),
             ) {
                 self.queue_media_element_task_to_fire_event(atom!("resize"));
-            } else {
-                // If the natural dimensions have not been changed, the node should be marked as
-                // damaged to force a repaint with the new frame contents.
+            } else if image_changed {
+                // A new source/poster transition can replace the image without
+                // changing its dimensions. Rebuild that display-list reference.
                 self.upcast::<Node>().dirty(no_gc, NodeDamage::Other);
+            } else {
+                // MediaFrameRenderer has already queued UpdateImage for these
+                // pixels. Reuse the existing display list and request a frame.
+                let window = self.owner_window();
+                window.paint_api().generate_frame(vec![window.webview_id().into()]);
             }
         }
     }
@@ -3187,13 +3199,17 @@ impl HTMLMediaElement {
         match *state {
             PlaybackState::Paused => {
                 media_session_playback_state = MediaSessionPlaybackState::Paused;
-                if self.ready_state.get() == ReadyState::HaveMetadata {
+                if matches!(self.ready_state.get(), ReadyState::HaveMetadata | ReadyState::HaveCurrentData) &&
+                    !self.ended_playback(LoopCondition::Included)
+                {
                     self.change_ready_state(cx, ReadyState::HaveEnoughData);
                 }
             },
             PlaybackState::Playing => {
                 media_session_playback_state = MediaSessionPlaybackState::Playing;
-                if self.ready_state.get() == ReadyState::HaveMetadata {
+                if matches!(self.ready_state.get(), ReadyState::HaveMetadata | ReadyState::HaveCurrentData) &&
+                    !self.ended_playback(LoopCondition::Included)
+                {
                     self.change_ready_state(cx, ReadyState::HaveEnoughData);
                 }
             },

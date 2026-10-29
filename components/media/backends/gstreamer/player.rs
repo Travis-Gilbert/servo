@@ -231,7 +231,11 @@ impl PlayerInner {
 
         self.paused.set(true);
         self.can_resume.set(true);
-        self.player.pause();
+        // GstPlay's pause() after EOS seeks back to the beginning. The HTML
+        // element must keep its final position until an explicit seek/replay.
+        if self.play_state != gstreamer_play::PlayState::Stopped {
+            self.player.pause();
+        }
         Ok(())
     }
 
@@ -271,6 +275,12 @@ impl PlayerInner {
             return Err(PlayerError::SeekOutOfRange);
         }
 
+        // EOS leaves GstPlay's pipeline target PLAYING. When script seeks an
+        // ended, paused element, restore the PAUSED target before the explicit
+        // seek so it prerolls without silently resuming playback.
+        if self.paused.get() && self.play_state == gstreamer_play::PlayState::Stopped {
+            self.player.pause();
+        }
         let time = time * 1_000_000_000.;
         self.player
             .seek(gstreamer::ClockTime::from_nseconds(time as u64));
@@ -660,7 +670,11 @@ impl GStreamerPlayer {
         let inner = inner.as_ref().unwrap();
         let observer = self.observer.clone();
         // Handle `end-of-stream` signal.
+        let inner_clone = inner.clone();
         signal_adapter.connect_end_of_stream(move |_| {
+            // Mark EOS before notifying script: its pause request can arrive
+            // before GstPlay emits the following Stopped state change.
+            inner_clone.lock().unwrap().play_state = gstreamer_play::PlayState::Stopped;
             let _ = notify!(observer, PlayerEvent::EndOfStream);
         });
 
