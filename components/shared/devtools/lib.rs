@@ -123,6 +123,9 @@ pub enum ScriptToDevtoolsControlMsg {
     /// Report a page title change
     TitleChanged(PipelineId, String),
 
+    /// The document replaced its WebMCP tool list. Tools belong to that document.
+    WebMcpTools(PipelineId, Vec<WebMcpToolRecord>),
+
     /// Get source information from script
     CreateSourceActor(
         GenericSender<DevtoolScriptControlMsg>,
@@ -487,6 +490,17 @@ pub enum DevtoolScriptControlMsg {
     GetEnvironment(GetEnvironmentRequest, GenericSender<String>),
     Blackbox(u32, BlackboxCoverage),
     Unblackbox(u32, BlackboxCoverage),
+    /// Invoke a WebMCP tool registered by the document of this pipeline.
+    /// The strings are the invocation id, the tool name, and the arguments as JSON text.
+    WebMcpInvoke(
+        PipelineId,
+        String,
+        String,
+        String,
+        GenericSender<WebMcpInvokeResult>,
+    ),
+    /// Cancel a WebMCP invocation that has not finished.
+    WebMcpCancel(PipelineId, String),
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -603,6 +617,30 @@ pub enum NetworkEvent {
     HttpRequestUpdate(HttpRequest),
     HttpResponse(HttpResponse),
     SecurityInfo(SecurityInfoUpdate),
+    /// The load failed before a response was available.
+    Failed {
+        pipeline_id: PipelineId,
+        browsing_context_id: BrowsingContextId,
+        error: String,
+    },
+}
+
+/// A tool a document registered through `document.modelContext`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct WebMcpToolRecord {
+    pub name: String,
+    pub description: String,
+    pub input_schema: String,
+    pub origin: String,
+    pub frame_id: String,
+}
+
+/// The string result of invoking a document's WebMCP tool.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct WebMcpInvokeResult {
+    pub ok: bool,
+    pub result: String,
+    pub error: Option<String>,
 }
 
 impl NetworkEvent {
@@ -612,6 +650,7 @@ impl NetworkEvent {
             NetworkEvent::HttpRequestUpdate(_) => true,
             NetworkEvent::HttpResponse(_) => true,
             NetworkEvent::SecurityInfo(_) => true,
+            NetworkEvent::Failed { .. } => true,
         }
     }
 }

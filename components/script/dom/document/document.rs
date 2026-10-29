@@ -169,6 +169,7 @@ use crate::dom::focusevent::FocusEvent;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::hashchangeevent::HashChangeEvent;
 use crate::dom::history::History;
+use crate::dom::modelcontext::ModelContext;
 use crate::dom::html::htmlanchorelement::HTMLAnchorElement;
 use crate::dom::html::htmlareaelement::HTMLAreaElement;
 use crate::dom::html::htmlbaseelement::HTMLBaseElement;
@@ -750,6 +751,9 @@ pub(crate) struct Document {
     /// <https://html.spec.whatwg.org/multipage/#doc-history>
     history: MutNullableDom<History>,
 
+    /// WebMCP tools for this document. The registry dies with the document.
+    model_context: MutNullableDom<ModelContext>,
+
     /// Theme specific for this document, set by a meta element
     #[no_trace]
     theme: Cell<Option<Theme>>,
@@ -791,6 +795,10 @@ impl Document {
 
     pub(crate) fn history(&self, cx: &mut JSContext) -> DomRoot<History> {
         self.history.or_init(|| History::new(cx, &self.window))
+    }
+
+    pub(crate) fn model_context(&self, cx: &mut JSContext) -> DomRoot<ModelContext> {
+        self.model_context.or_init(|| ModelContext::new(cx, self))
     }
 
     pub(crate) fn image_cache(&self) -> StdArc<dyn ImageCache> {
@@ -4248,6 +4256,7 @@ impl Document {
             )),
             image_cache,
             history: Default::default(),
+            model_context: Default::default(),
             theme: Default::default(),
             theme_override: Default::default(),
             default_language: Default::default(),
@@ -7392,6 +7401,10 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
 
     fn Timeline(&self) -> DomRoot<DocumentTimeline> {
         self.timeline.as_rooted()
+    }
+
+    fn ModelContext(&self, cx: &mut JSContext) -> DomRoot<ModelContext> {
+        self.model_context(cx)
     }
 }
 

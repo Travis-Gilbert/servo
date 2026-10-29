@@ -40,7 +40,7 @@ use crossbeam_channel::unbounded;
 use data_url::mime::Mime;
 use devtools_traits::{
     CSSError, DevtoolScriptControlMsg, DevtoolsPageInfo, NavigationState,
-    ScriptToDevtoolsControlMsg, WorkerId,
+    ScriptToDevtoolsControlMsg, WebMcpInvokeResult, WorkerId,
 };
 use embedder_traits::user_contents::{UserContentManagerId, UserContents, UserScript};
 use embedder_traits::{
@@ -2339,6 +2339,31 @@ impl ScriptThread {
             DevtoolScriptControlMsg::Unblackbox(spidermonkey_id, coverage) => {
                 self.debugger_global
                     .fire_unblackbox(cx, spidermonkey_id, coverage);
+            },
+            DevtoolScriptControlMsg::WebMcpInvoke(
+                pipeline,
+                invocation,
+                name,
+                arguments,
+                reply,
+            ) => match documents.find_document(pipeline) {
+                Some(document) => {
+                    document
+                        .model_context(cx)
+                        .invoke(cx, &invocation, &name, &arguments, reply);
+                },
+                None => {
+                    let _ = reply.send(WebMcpInvokeResult {
+                        ok: false,
+                        result: String::new(),
+                        error: Some("no document".to_owned()),
+                    });
+                },
+            },
+            DevtoolScriptControlMsg::WebMcpCancel(pipeline, invocation) => {
+                if let Some(document) = documents.find_document(pipeline) {
+                    document.model_context(cx).cancel(&invocation);
+                }
             },
         }
     }

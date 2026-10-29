@@ -244,3 +244,9 @@ partial interface Document {
   [Throws]
   static Document parseHTML(DOMString html, optional SetHTMLOptions options = {});
 };
+
+// WebMCP, Community Group draft of 27 October 2026.
+// One registry per document. Navigation drops it with the document.
+partial interface Document {
+  [SameObject, SecureContext, Pref="dom_webmcp_enabled"] readonly attribute ModelContext modelContext;
+};

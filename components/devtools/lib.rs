@@ -418,6 +418,9 @@ impl DevtoolsInstance {
                         chan.send(ProcessReports::new(reports));
                     });
                 },
+                // WebMCP is answered by the CDP server. This Firefox server
+                // does not speak it.
+                DevtoolsControlMsg::FromScript(ScriptToDevtoolsControlMsg::WebMcpTools(..)) => {},
                 DevtoolsControlMsg::ClientExited => {
                     if self.connections.lock().unwrap().is_empty() {
                         // Tell every browsing context to stop sending us updates, because we have nowhere to
@@ -689,6 +692,7 @@ impl DevtoolsInstance {
         let browsing_context_id = match &network_event {
             NetworkEvent::HttpRequest(req) => req.browsing_context_id,
             NetworkEvent::HttpRequestUpdate(req) => req.browsing_context_id,
+            NetworkEvent::Failed { browsing_context_id, .. } => *browsing_context_id,
             NetworkEvent::HttpResponse(resp) => resp.browsing_context_id,
             NetworkEvent::SecurityInfo(update) => update.browsing_context_id,
         };

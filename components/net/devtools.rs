@@ -82,7 +82,19 @@ pub(crate) fn send_response_to_devtools(
         Ok(FetchMetadata::Unfiltered(m)) => m,
         Ok(FetchMetadata::Filtered { unsafe_, .. }) => unsafe_,
         Err(_) => {
-            log::warn!("No metadata available, skipping devtools response.");
+            if let (Some(devtools_chan), Some(pipeline_id), Some(webview_id)) = (
+                context.devtools_chan.clone(),
+                request.pipeline_id,
+                request.target_webview_id,
+            ) {
+                let failed = NetworkEvent::Failed {
+                    pipeline_id,
+                    browsing_context_id: webview_id.into(),
+                    error: "network error".to_owned(),
+                };
+                let msg = ChromeToDevtoolsControlMsg::NetworkEvent(request.id.0.to_string(), failed);
+                let _ = devtools_chan.send(DevtoolsControlMsg::FromChrome(msg));
+            }
             return;
         },
     };

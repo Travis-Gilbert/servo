@@ -8182,6 +8182,7 @@ dependencies = [
  "servo-bluetooth",
  "servo-bluetooth-traits",
  "servo-canvas-traits",
+ "servo-cdp",
  "servo-config",
  "servo-constellation",
  "servo-constellation-traits",
@@ -8385,6 +8386,26 @@ name = "servo-capi-tests"
 version = "0.7.0"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "servo-cdp"
+version = "0.7.0"
+dependencies = [
+ "base64 0.23.1",
+ "bytes",
+ "crossbeam-channel",
+ "http",
+ "log",
+ "serde_json",
+ "servo-base",
+ "servo-config",
+ "servo-devtools-traits",
+ "servo-embedder-traits",
+ "servo-net-traits",
+ "servo-url",
+ "sha1 0.11.0",
+ "tungstenite",
 ]
 
 [[package]]
