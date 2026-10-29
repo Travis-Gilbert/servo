@@ -113,8 +113,8 @@ use embedder_traits::{
     HitTestResult, InputEvent, InputEventAndId, InputEventOutcome, JSValue,
     JavaScriptEvaluationError, JavaScriptEvaluationId, KeyboardEvent, MediaSessionActionType,
     MediaSessionEvent, MediaSessionPlaybackState, MouseButtonAction, MouseButtonEvent,
-    NewWebViewDetails, PaintHitTestResult, Theme, ViewportDetails, WakeLockDelegate, WakeLockType,
-    WebDriverCommandMsg, WebDriverLoadStatus, WebDriverScriptCommand, WebViewPoint,
+    NewWebViewDetails, PaintHitTestResult, Theme, UrlRequest, ViewportDetails, WakeLockDelegate,
+    WakeLockType, WebDriverCommandMsg, WebDriverLoadStatus, WebDriverScriptCommand, WebViewPoint,
 };
 use euclid::default::Size2D as UntypedSize2D;
 use fonts::SystemFontServiceProxy;
@@ -1411,8 +1411,8 @@ where
             },
             // Create a new top level browsing context. Will use response_chan to return
             // the browsing context id.
-            EmbedderToConstellationMessage::NewWebView(url, new_webview_details) => {
-                self.handle_new_top_level_browsing_context(url, new_webview_details);
+            EmbedderToConstellationMessage::NewWebView(url_request, new_webview_details) => {
+                self.handle_new_top_level_browsing_context(url_request, new_webview_details);
             },
             // Close a top level browsing context.
             EmbedderToConstellationMessage::CloseWebView(webview_id) => {
@@ -3472,7 +3472,7 @@ where
     #[servo_tracing::instrument(skip_all)]
     fn handle_new_top_level_browsing_context(
         &mut self,
-        url: ServoUrl,
+        url_request: UrlRequest,
         NewWebViewDetails {
             storage_partition_id,
             webview_id,
@@ -3485,7 +3485,8 @@ where
         }
         let pipeline_id = PipelineId::new();
         let browsing_context_id = BrowsingContextId::from(webview_id);
-        let load_data = LoadData::new_for_new_unrelated_webview(url);
+        let mut load_data = LoadData::new_for_new_unrelated_webview(url_request.url);
+        load_data.headers.extend(url_request.headers);
         let is_private = false;
 
         // Register this new top-level browsing context id as a webview and set
