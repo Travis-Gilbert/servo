@@ -24,43 +24,73 @@ pub(crate) struct HttpRequest {
 }
 
 pub(crate) fn read_http_request(stream: &mut TcpStream) -> io::Result<HttpRequest> {
+    let text = read_header_text(stream)?;
+    parse_http_request(&text)
+}
+
+fn read_header_text(stream: &mut TcpStream) -> io::Result<String> {
+    let bytes = read_header_bytes(stream)?;
+    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn read_header_bytes(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
     let mut buffer = Vec::new();
     let mut byte = [0u8; 1];
-    loop {
-        if stream.read(&mut byte)? == 0 {
+    while !buffer.ends_with(b"\r\n\r\n") {
+        if !push_header_byte(stream, &mut buffer, &mut byte)? {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "http header"));
         }
-        buffer.push(byte[0]);
-        if buffer.ends_with(b"\r\n\r\n") {
-            break;
-        }
-        if buffer.len() > 64 * 1024 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "http header"));
-        }
     }
-    let text = String::from_utf8(buffer)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    Ok(buffer)
+}
+
+fn push_header_byte(
+    stream: &mut TcpStream,
+    buffer: &mut Vec<u8>,
+    byte: &mut [u8; 1],
+) -> io::Result<bool> {
+    if stream.read(byte)? == 0 {
+        return Ok(false);
+    }
+    buffer.push(byte[0]);
+    if buffer.len() > 64 * 1024 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "http header"));
+    }
+    Ok(true)
+}
+
+fn parse_http_request(text: &str) -> io::Result<HttpRequest> {
     let mut lines = text.split("\r\n");
     let Some(start) = lines.next() else {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "http start"));
     };
+    Ok(request_from(start, lines))
+}
+
+fn request_from<'a>(start: &str, lines: impl Iterator<Item = &'a str>) -> HttpRequest {
     let mut parts = start.split(' ');
-    let method = parts.next().unwrap_or("").to_owned();
-    let path = parts.next().unwrap_or("/").to_owned();
+    HttpRequest {
+        method: parts.next().unwrap_or("").to_owned(),
+        path: parts.next().unwrap_or("/").to_owned(),
+        headers: header_lines(lines),
+    }
+}
+
+fn header_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<(String, String)> {
     let mut headers = Vec::new();
     for line in lines {
         if line.is_empty() {
             break;
         }
-        if let Some((name, value)) = line.split_once(':') {
-            headers.push((name.trim().to_ascii_lowercase(), value.trim().to_owned()));
-        }
+        push_header(&mut headers, line);
     }
-    Ok(HttpRequest {
-        method,
-        path,
-        headers,
-    })
+    headers
+}
+
+fn push_header(headers: &mut Vec<(String, String)>, line: &str) {
+    if let Some((name, value)) = line.split_once(':') {
+        headers.push((name.trim().to_ascii_lowercase(), value.trim().to_owned()));
+    }
 }
 
 pub(crate) fn header<'a>(request: &'a HttpRequest, name: &str) -> Option<&'a str> {

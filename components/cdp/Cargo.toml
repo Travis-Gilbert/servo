@@ -22,6 +22,7 @@ embedder_traits = { workspace = true }
 http = { workspace = true }
 log = { workspace = true }
 net_traits = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 servo-base = { workspace = true }
 servo-config = { workspace = true }

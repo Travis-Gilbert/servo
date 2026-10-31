@@ -97,20 +97,45 @@ impl ModelContext {
             let _ = reply.send(cancelled_result());
             return;
         }
-        let callback = {
-            let tools = self.tools.borrow();
-            let Some(tool) = tools.iter().find(|tool| tool.name == name) else {
-                let _ = reply.send(error_result("no such tool"));
-                return;
-            };
-            tool.execute.clone()
+        self.invoke_named(cx, invocation, name, arguments, reply);
+    }
+
+    fn invoke_named(
+        &self,
+        cx: &mut JSContext,
+        invocation: &str,
+        name: &str,
+        arguments: &str,
+        reply: GenericSender<WebMcpInvokeResult>,
+    ) {
+        let Some(callback) = self.callback_named(name) else {
+            let _ = reply.send(error_result("no such tool"));
+            return;
         };
-        match call_execute(cx, &callback, arguments) {
-            Ok(promise) => self.follow_promise(cx, invocation, reply, &promise),
-            Err(()) => {
-                let _ = reply.send(error_result("exception"));
-            },
+        self.invoke_callback(cx, invocation, arguments, reply, &callback);
+    }
+
+    fn callback_named(&self, name: &str) -> Option<TracedCallback<ToolExecuteCallback>> {
+        self.tools
+            .borrow()
+            .iter()
+            .find(|tool| tool.name == name)
+            .map(|tool| tool.execute.clone())
+    }
+
+    fn invoke_callback(
+        &self,
+        cx: &mut JSContext,
+        invocation: &str,
+        arguments: &str,
+        reply: GenericSender<WebMcpInvokeResult>,
+        callback: &TracedCallback<ToolExecuteCallback>,
+    ) {
+        if let Ok(promise) = call_execute(cx, callback, arguments) {
+            self.follow_promise(cx, invocation, reply, &promise);
+            return;
         }
+        let _ = reply.send(error_result("exception"));
     }
 
     pub(crate) fn cancel(&self, invocation: &str) {
@@ -167,22 +192,20 @@ impl ModelContext {
         let Some(reply) = self.pending_replies.borrow_mut().remove(invocation) else {
             return;
         };
-        let result = if self.take_cancelled(invocation) {
-            cancelled_result()
-        } else if fulfilled {
-            WebMcpInvokeResult {
-                ok: true,
-                result: fulfillment_json(cx, value),
-                error: None,
-            }
-        } else {
-            WebMcpInvokeResult {
-                ok: false,
-                result: String::new(),
-                error: Some(rejection_text(cx, value)),
-            }
-        };
-        let _ = reply.send(result);
+        let _ = reply.send(self.settled_result(cx, invocation, fulfilled, value));
+    }
+
+    fn settled_result(
+        &self,
+        cx: &mut CurrentRealm,
+        invocation: &str,
+        fulfilled: bool,
+        value: HandleValue,
+    ) -> WebMcpInvokeResult {
+        if self.take_cancelled(invocation) {
+            return cancelled_result();
+        }
+        settled_value(cx, fulfilled, value)
     }
 
     fn publish(&self) {
@@ -219,6 +242,80 @@ impl ModelContext {
             .fire_event(cx, Atom::from("toolchange"));
     }
 
+    fn reject_blank(
+        &self,
+        cx: &mut CurrentRealm,
+        name: &str,
+        description: &str,
+    ) -> Option<RootedPromise> {
+        if name.is_empty() {
+            return Some(self.rejected(cx, "tool name is empty"));
+        }
+        reject_description(self, cx, description)
+    }
+
+    fn register_unique(
+        &self,
+        cx: &mut CurrentRealm,
+        tool: &ModelContextTool,
+        name: String,
+        description: String,
+    ) -> RootedPromise {
+        if self
+            .tools
+            .borrow()
+            .iter()
+            .any(|existing| existing.name == name)
+        {
+            return self.rejected(cx, "a tool with that name is already registered");
+        }
+        self.store_tool(cx, tool, name, description)
+    }
+
+    fn store_tool(
+        &self,
+        cx: &mut CurrentRealm,
+        tool: &ModelContextTool,
+        name: String,
+        description: String,
+    ) -> RootedPromise {
+        let Some(input_schema) = schema_json(cx, tool.inputSchema.get()) else {
+            return self.rejected(cx, "inputSchema is not JSON");
+        };
+        self.tools.borrow_mut().push(Registered {
+            name,
+            description,
+            input_schema,
+            execute: tool.execute.clone(),
+        });
+        self.changed(cx);
+        Promise::new_resolved(cx, &self.global(), &())
+    }
+
+    fn execute_callback(
+        &self,
+        cx: &mut CurrentRealm,
+        callback: &TracedCallback<ToolExecuteCallback>,
+        input: Option<*mut js::jsapi::JSObject>,
+    ) -> RootedPromise {
+        let Some(arguments) = tool_arguments(cx, input) else {
+            return self.rejected(cx, "input is not JSON");
+        };
+        self.run_callback(cx, callback, &arguments)
+    }
+
+    fn run_callback(
+        &self,
+        cx: &mut CurrentRealm,
+        callback: &TracedCallback<ToolExecuteCallback>,
+        arguments: &str,
+    ) -> RootedPromise {
+        if let Ok(promise) = call_execute(cx, callback, arguments) {
+            return promise;
+        }
+        self.rejected(cx, "exception")
+    }
+
     fn rejected(&self, cx: &mut CurrentRealm, message: &str) -> RootedPromise {
         let promise = Promise::new_in_realm(cx);
         let text = CString::new(message).unwrap_or_else(|_| c"invalid tool".to_owned());
@@ -231,31 +328,10 @@ impl ModelContextMethods<crate::DomTypeHolder> for ModelContext {
     fn RegisterTool(&self, cx: &mut CurrentRealm, tool: &ModelContextTool) -> RootedPromise {
         let name = String::from(tool.name.clone());
         let description = String::from(tool.description.clone());
-        if name.is_empty() {
-            return self.rejected(cx, "tool name is empty");
+        if let Some(promise) = self.reject_blank(cx, &name, &description) {
+            return promise;
         }
-        if description.is_empty() {
-            return self.rejected(cx, "tool description is empty");
-        }
-        if self
-            .tools
-            .borrow()
-            .iter()
-            .any(|existing| existing.name == name)
-        {
-            return self.rejected(cx, "a tool with that name is already registered");
-        }
-        let Some(input_schema) = schema_json(cx, tool.inputSchema.get()) else {
-            return self.rejected(cx, "inputSchema is not JSON");
-        };
-        self.tools.borrow_mut().push(Registered {
-            name,
-            description,
-            input_schema,
-            execute: tool.execute.clone(),
-        });
-        self.changed(cx);
-        Promise::new_resolved(cx, &self.global(), &())
+        self.register_unique(cx, tool, name, description)
     }
 
     fn UnregisterTool(&self, cx: &mut JSContext, name: DOMString) {
@@ -300,25 +376,10 @@ impl ModelContextMethods<crate::DomTypeHolder> for ModelContext {
         name: DOMString,
         input: Option<*mut js::jsapi::JSObject>,
     ) -> RootedPromise {
-        let name = String::from(name);
-        let callback = {
-            let tools = self.tools.borrow();
-            let Some(tool) = tools.iter().find(|tool| tool.name == name) else {
-                return self.rejected(cx, "no such tool");
-            };
-            tool.execute.clone()
+        let Some(callback) = self.callback_named(&String::from(name)) else {
+            return self.rejected(cx, "no such tool");
         };
-        let arguments = match input {
-            Some(object) => match object_json(cx, object) {
-                Some(json) => json,
-                None => return self.rejected(cx, "input is not JSON"),
-            },
-            None => "{}".to_owned(),
-        };
-        match call_execute(cx, &callback, &arguments) {
-            Ok(promise) => promise,
-            Err(()) => self.rejected(cx, "exception"),
-        }
+        self.execute_callback(cx, &callback, input)
     }
 
     event_handler!(toolchange, GetOntoolchange, SetOntoolchange);
@@ -342,6 +403,39 @@ impl Callback for InvokeSettled {
     }
 }
 
+fn reject_description(
+    context: &ModelContext,
+    cx: &mut CurrentRealm,
+    description: &str,
+) -> Option<RootedPromise> {
+    if description.is_empty() {
+        return Some(context.rejected(cx, "tool description is empty"));
+    }
+    None
+}
+
+fn tool_arguments(cx: &mut JSContext, input: Option<*mut js::jsapi::JSObject>) -> Option<String> {
+    if let Some(object) = input {
+        return object_json(cx, object);
+    }
+    Some("{}".to_owned())
+}
+
+fn settled_value(cx: &mut CurrentRealm, fulfilled: bool, value: HandleValue) -> WebMcpInvokeResult {
+    if fulfilled {
+        return WebMcpInvokeResult {
+            ok: true,
+            result: fulfillment_json(cx, value),
+            error: None,
+        };
+    }
+    WebMcpInvokeResult {
+        ok: false,
+        result: String::new(),
+        error: Some(rejection_text(cx, value)),
+    }
+}
+
 fn call_execute(
     cx: &mut JSContext,
     callback: &TracedCallback<ToolExecuteCallback>,
@@ -362,9 +456,21 @@ fn json_or_empty(
 ) -> *mut js::jsapi::JSObject {
     let text: Vec<u16> = json.encode_utf16().collect();
     let ok = unsafe { JS_ParseJSON(cx, text.as_ptr(), text.len() as u32, parsed.reborrow()) };
-    if ok && parsed.get().is_object() {
+    if json_object(ok, &parsed) {
         return parsed.get().to_object();
     }
+    empty_object(cx, parsed)
+}
+
+fn json_object(ok: bool, parsed: &js::rust::MutableHandleValue) -> bool {
+    ok && parsed.get().is_object()
+}
+
+#[expect(unsafe_code)]
+fn empty_object(
+    cx: &mut JSContext,
+    mut parsed: js::rust::MutableHandleValue,
+) -> *mut js::jsapi::JSObject {
     unsafe {
         JS_ClearPendingException(cx);
         let object = JS_NewPlainObject(cx);
@@ -400,10 +506,17 @@ fn fulfillment_json(cx: &mut JSContext, value: HandleValue) -> String {
 }
 
 fn rejection_text(cx: &mut JSContext, value: HandleValue) -> String {
-    match String::from_jsval(cx, value, ()) {
-        Ok(ConversionResult::Success(text)) if !text.is_empty() => text,
-        _ => "exception".to_owned(),
+    if let Ok(ConversionResult::Success(text)) = String::from_jsval(cx, value, ()) {
+        return nonempty(text);
     }
+    "exception".to_owned()
+}
+
+fn nonempty(text: String) -> String {
+    if text.is_empty() {
+        return "exception".to_owned();
+    }
+    text
 }
 
 fn error_result(message: &str) -> WebMcpInvokeResult {

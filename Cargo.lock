@@ -8396,6 +8396,7 @@ dependencies = [
  "crossbeam-channel",
  "http",
  "log",
+ "serde",
  "serde_json",
  "servo-base",
  "servo-config",

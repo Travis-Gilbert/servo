@@ -200,96 +200,260 @@ impl Session {
             return CommandOutcome::Messages(error(id, -32600, "no session"));
         };
         if method_enables(method) {
-            self.enable(client, method);
-            let mut messages = success(id, json!({}));
-            messages.extend(self.replay(client));
-            return CommandOutcome::Messages(messages);
+            return self.replay_enable(client, id, method);
         }
-        match method {
-            "Runtime.evaluate" => self.evaluate(id, &target_key, &params),
-            "Page.getFrameTree" => CommandOutcome::Messages(success(
+        self.route(id, &target_key, method, &params)
+    }
+
+    fn replay_enable(&mut self, client: u64, id: Option<i64>, method: &str) -> CommandOutcome {
+        self.enable(client, method);
+        let mut messages = success(id, json!({}));
+        messages.extend(self.replay(client));
+        CommandOutcome::Messages(messages)
+    }
+
+    fn route(
+        &mut self,
+        id: Option<i64>,
+        target_key: &str,
+        method: &str,
+        params: &Value,
+    ) -> CommandOutcome {
+        if method == "Runtime.evaluate" {
+            return self.evaluate(id, target_key, params);
+        }
+        self.route_frame(id, target_key, method, params)
+    }
+
+    fn route_frame(
+        &mut self,
+        id: Option<i64>,
+        target_key: &str,
+        method: &str,
+        params: &Value,
+    ) -> CommandOutcome {
+        if method == "Page.getFrameTree" {
+            return CommandOutcome::Messages(success(
                 id,
-                json!({ "frameTree": self.frame(&target_key) }),
-            )),
-            "DOM.getDocument" => {
-                self.pending(id, &target_key, |pipeline| ScriptRequest::Root { pipeline })
-            },
-            "DOM.requestChildNodes" => {
-                let node = params.get("nodeId").and_then(Value::as_i64).unwrap_or(0);
-                let unique = self_node(self, &target_key, node);
-                self.pending(id, &target_key, move |pipeline| ScriptRequest::Children {
-                    pipeline,
-                    parent: node,
-                    node: unique,
-                })
-            },
-            "DOM.setAttributeValue" => {
-                let node = params.get("nodeId").and_then(Value::as_i64).unwrap_or(0);
-                let name = params
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned();
-                let value = params
-                    .get("value")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned();
-                let unique = self_node(self, &target_key, node);
-                self.pending(id, &target_key, move |pipeline| ScriptRequest::Attribute {
-                    pipeline,
-                    node: unique,
-                    name,
-                    value,
-                })
-            },
-            "CSS.getComputedStyleForNode" => {
-                let node = params.get("nodeId").and_then(Value::as_i64).unwrap_or(0);
-                let unique = self_node(self, &target_key, node);
-                self.pending(id, &target_key, move |pipeline| {
-                    ScriptRequest::ComputedStyle {
-                        pipeline,
-                        node: unique,
-                    }
-                })
-            },
-            "Overlay.highlightNode" => {
-                let node_id = params.get("nodeId").and_then(Value::as_i64);
-                let unique = node_id.map(|node| self_node(self, &target_key, node));
-                self.pending(id, &target_key, move |pipeline| ScriptRequest::Highlight {
-                    pipeline,
-                    node: unique,
-                })
-            },
-            "Overlay.hideHighlight" => {
-                self.pending(id, &target_key, |pipeline| ScriptRequest::Highlight {
-                    pipeline,
-                    node: None,
-                })
-            },
-            "Network.getResponseBody" => {
-                let request_id = params
-                    .get("requestId")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned();
-                CommandOutcome::Messages(success(id, self.response_body(&target_key, &request_id)))
-            },
-            "WebMCP.invokeTool" => self.invoke_tool(id, &target_key, &params),
-            "WebMCP.cancelInvocation" => {
-                let invocation = params
-                    .get("invocationId")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned();
-                self.cancelled.insert(invocation.clone(), true);
-                self.pending(id, &target_key, |pipeline| ScriptRequest::CancelTool {
-                    pipeline,
-                    invocation,
-                })
-            },
-            _ => CommandOutcome::Messages(error(id, -32601, "Method not found")),
+                json!({ "frameTree": self.frame(target_key) }),
+            ));
         }
+        self.route_document(id, target_key, method, params)
+    }
+
+    fn route_document(
+        &mut self,
+        id: Option<i64>,
+        target_key: &str,
+        method: &str,
+        params: &Value,
+    ) -> CommandOutcome {
+        if method == "DOM.getDocument" {
+            return self.pending(id, target_key, |pipeline| ScriptRequest::Root { pipeline });
+        }
+        self.route_children(id, target_key, method, params)
+    }
+
+    fn route_children(
+        &mut self,
+        id: Option<i64>,
+        target_key: &str,
+        method: &str,
+        params: &Value,
+    ) -> CommandOutcome {
+        if method == "DOM.requestChildNodes" {
+            return self.child_nodes(id, target_key, params);
+        }
+        self.route_attribute(id, target_key, method, params)
+    }
+
+    fn child_nodes(&mut self, id: Option<i64>, target_key: &str, params: &Value) -> CommandOutcome {
+        self.pending_node(id, target_key, params, |pipeline, node, unique| {
+            ScriptRequest::Children {
+                pipeline,
+                parent: node,
+                node: unique,
+            }
+        })
+    }
+
+    fn route_attribute(
+        &mut self,
+        id: Option<i64>,
+        target_key: &str,
+        method: &str,
+        params: &Value,
+    ) -> CommandOutcome {
+        if method == "DOM.setAttributeValue" {
+            return self.set_attribute(id, target_key, params);
+        }
+        self.route_style(id, target_key, method, params)
+    }
+
+    fn set_attribute(
+        &mut self,
+        id: Option<i64>,
+        target_key: &str,
+        params: &Value,
+    ) -> CommandOutcome {
+        let node = params.get("nodeId").and_then(Value::as_i64).unwrap_or(0);
+        let name = params
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        let value = params
+            .get("value")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        let unique = self_node(self, target_key, node);
+        self.pending(id, target_key, move |pipeline| ScriptRequest::Attribute {
+            pipeline,
+            node: unique,
+            name,
+            value,
+        })
+    }
+
+    fn route_style(
+        &mut self,
+        id: Option<i64>,
+        target_key: &str,
+        method: &str,
+        params: &Value,
+    ) -> CommandOutcome {
+        if method == "CSS.getComputedStyleForNode" {
+            return self.computed_style(id, target_key, params);
+        }
+        self.route_highlight(id, target_key, method, params)
+    }
+
+    fn computed_style(
+        &mut self,
+        id: Option<i64>,
+        target_key: &str,
+        params: &Value,
+    ) -> CommandOutcome {
+        self.pending_node(id, target_key, params, |pipeline, _node, unique| {
+            ScriptRequest::ComputedStyle {
+                pipeline,
+                node: unique,
+            }
+        })
+    }
+
+    fn pending_node(
+        &mut self,
+        id: Option<i64>,
+        target_key: &str,
+        params: &Value,
+        build: impl FnOnce(PipelineId, i64, String) -> ScriptRequest,
+    ) -> CommandOutcome {
+        let node = params.get("nodeId").and_then(Value::as_i64).unwrap_or(0);
+        let unique = self_node(self, target_key, node);
+        self.pending(id, target_key, move |pipeline| {
+            build(pipeline, node, unique)
+        })
+    }
+
+    fn route_highlight(
+        &mut self,
+        id: Option<i64>,
+        target_key: &str,
+        method: &str,
+        params: &Value,
+    ) -> CommandOutcome {
+        if method == "Overlay.highlightNode" {
+            return self.highlight(id, target_key, params);
+        }
+        self.route_hide(id, target_key, method, params)
+    }
+
+    fn highlight(&mut self, id: Option<i64>, target_key: &str, params: &Value) -> CommandOutcome {
+        let node_id = params.get("nodeId").and_then(Value::as_i64);
+        let unique = node_id.map(|node| self_node(self, target_key, node));
+        self.pending(id, target_key, move |pipeline| ScriptRequest::Highlight {
+            pipeline,
+            node: unique,
+        })
+    }
+
+    fn route_hide(
+        &mut self,
+        id: Option<i64>,
+        target_key: &str,
+        method: &str,
+        params: &Value,
+    ) -> CommandOutcome {
+        if method == "Overlay.hideHighlight" {
+            return self.pending(id, target_key, |pipeline| ScriptRequest::Highlight {
+                pipeline,
+                node: None,
+            });
+        }
+        self.route_body(id, target_key, method, params)
+    }
+
+    fn route_body(
+        &mut self,
+        id: Option<i64>,
+        target_key: &str,
+        method: &str,
+        params: &Value,
+    ) -> CommandOutcome {
+        if method == "Network.getResponseBody" {
+            return self.body_outcome(id, target_key, params);
+        }
+        self.route_invoke(id, target_key, method, params)
+    }
+
+    fn body_outcome(&self, id: Option<i64>, target_key: &str, params: &Value) -> CommandOutcome {
+        let request_id = params
+            .get("requestId")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        CommandOutcome::Messages(success(id, self.response_body(target_key, &request_id)))
+    }
+
+    fn route_invoke(
+        &mut self,
+        id: Option<i64>,
+        target_key: &str,
+        method: &str,
+        params: &Value,
+    ) -> CommandOutcome {
+        if method == "WebMCP.invokeTool" {
+            return self.invoke_tool(id, target_key, params);
+        }
+        self.route_cancel(id, target_key, method, params)
+    }
+
+    fn route_cancel(
+        &mut self,
+        id: Option<i64>,
+        target_key: &str,
+        method: &str,
+        params: &Value,
+    ) -> CommandOutcome {
+        if method == "WebMCP.cancelInvocation" {
+            return self.cancel_tool(id, target_key, params);
+        }
+        CommandOutcome::Messages(error(id, -32601, "Method not found"))
+    }
+
+    fn cancel_tool(&mut self, id: Option<i64>, target_key: &str, params: &Value) -> CommandOutcome {
+        let invocation = params
+            .get("invocationId")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        self.cancelled.insert(invocation.clone(), true);
+        self.pending(id, target_key, |pipeline| ScriptRequest::CancelTool {
+            pipeline,
+            invocation,
+        })
     }
 
     pub(crate) fn complete(&mut self, id: i64, client: u64, reply: ScriptReply) -> Vec<Value> {
@@ -300,62 +464,114 @@ impl Session {
         else {
             return error(Some(id), -32600, "no session");
         };
-        match reply {
-            ScriptReply::Eval(reply) => success(Some(id), eval_result(&reply)),
-            ScriptReply::Children(nodes) => {
-                self.complete(id, client, ScriptReply::ChildrenOf { parent: 0, nodes })
-            },
-            ScriptReply::Root(node) => {
-                let root = node.map(|node| self.adopt_node(&target_key, &node, true));
-                success(Some(id), json!({ "root": root.unwrap_or(Value::Null) }))
-            },
-            ScriptReply::ChildrenOf { parent, nodes } => {
-                let children: Vec<Value> = nodes
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|node| self.adopt_node(&target_key, node, false))
-                    .collect();
-                let mut messages = success(Some(id), json!({}));
-                messages.push(event(
-                    "DOM.setChildNodes",
-                    json!({ "parentId": parent, "nodes": children }),
-                ));
-                messages
-            },
-            ScriptReply::Computed(styles) => {
-                let computed: Vec<Value> = styles
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|style| json!({ "name": style.name, "value": style.value }))
-                    .collect();
-                success(Some(id), json!({ "computedStyle": computed }))
-            },
-            ScriptReply::Empty => success(Some(id), json!({})),
-            ScriptReply::Tool(invocation, result) => {
-                let cancelled = self.cancelled.remove(&invocation).unwrap_or(false);
-                let status = if cancelled {
-                    "cancelled"
-                } else if result.ok {
-                    "success"
-                } else {
-                    "error"
-                };
-                let output = serde_json::from_str::<Value>(&result.result)
-                    .unwrap_or_else(|_| Value::String(result.result.clone()));
-                let mut messages = success(Some(id), json!({ "invocationId": invocation }));
-                messages.push(event(
-                    "WebMCP.toolResponded",
-                    json!({
-                        "invocationId": invocation,
-                        "status": status,
-                        "output": output,
-                        "errorText": result.error,
-                    }),
-                ));
-                messages
-            },
-            ScriptReply::Missing => error(Some(id), -32000, "inspection unavailable"),
+        self.complete_eval(id, client, &target_key, reply)
+    }
+
+    fn complete_eval(
+        &mut self,
+        id: i64,
+        client: u64,
+        target_key: &str,
+        reply: ScriptReply,
+    ) -> Vec<Value> {
+        if let ScriptReply::Eval(reply) = reply {
+            return success(Some(id), eval_result(&reply));
         }
+        self.complete_children(id, client, target_key, reply)
+    }
+
+    fn complete_children(
+        &mut self,
+        id: i64,
+        client: u64,
+        target_key: &str,
+        reply: ScriptReply,
+    ) -> Vec<Value> {
+        if let ScriptReply::Children(nodes) = reply {
+            return self.complete(id, client, ScriptReply::ChildrenOf { parent: 0, nodes });
+        }
+        self.complete_root(id, target_key, reply)
+    }
+
+    fn complete_root(&mut self, id: i64, target_key: &str, reply: ScriptReply) -> Vec<Value> {
+        if let ScriptReply::Root(node) = reply {
+            let root = node.map(|node| self.adopt_node(target_key, &node, true));
+            return success(Some(id), json!({ "root": root.unwrap_or(Value::Null) }));
+        }
+        self.complete_child_list(id, target_key, reply)
+    }
+
+    fn complete_child_list(&mut self, id: i64, target_key: &str, reply: ScriptReply) -> Vec<Value> {
+        if let ScriptReply::ChildrenOf { parent, nodes } = reply {
+            return self.child_list(target_key, id, parent, nodes);
+        }
+        self.complete_computed(id, reply)
+    }
+
+    fn child_list(
+        &mut self,
+        target_key: &str,
+        id: i64,
+        parent: i64,
+        nodes: Option<Vec<NodeInfo>>,
+    ) -> Vec<Value> {
+        let children: Vec<Value> = nodes
+            .unwrap_or_default()
+            .iter()
+            .map(|node| self.adopt_node(target_key, node, false))
+            .collect();
+        let mut messages = success(Some(id), json!({}));
+        messages.push(event(
+            "DOM.setChildNodes",
+            json!({ "parentId": parent, "nodes": children }),
+        ));
+        messages
+    }
+
+    fn complete_computed(&mut self, id: i64, reply: ScriptReply) -> Vec<Value> {
+        if let ScriptReply::Computed(styles) = reply {
+            return success(
+                Some(id),
+                json!({ "computedStyle": computed_styles(&styles) }),
+            );
+        }
+        self.complete_tool(id, reply)
+    }
+
+    fn complete_tool(&mut self, id: i64, reply: ScriptReply) -> Vec<Value> {
+        if let ScriptReply::Tool(invocation, result) = reply {
+            return self.tool_reply(id, invocation, result);
+        }
+        self.complete_empty(id, reply)
+    }
+
+    fn tool_reply(
+        &mut self,
+        id: i64,
+        invocation: String,
+        result: devtools_traits::WebMcpInvokeResult,
+    ) -> Vec<Value> {
+        let cancelled = self.cancelled.remove(&invocation).unwrap_or(false);
+        let output = serde_json::from_str::<Value>(&result.result)
+            .unwrap_or_else(|_| Value::String(result.result.clone()));
+        let mut messages = success(Some(id), json!({ "invocationId": invocation }));
+        messages.push(event(
+            "WebMCP.toolResponded",
+            json!({
+                "invocationId": invocation,
+                "status": tool_status(cancelled, result.ok),
+                "output": output,
+                "errorText": result.error,
+            }),
+        ));
+        messages
+    }
+
+    fn complete_empty(&self, id: i64, reply: ScriptReply) -> Vec<Value> {
+        if let ScriptReply::Empty = reply {
+            return success(Some(id), json!({}));
+        }
+        error(Some(id), -32000, "inspection unavailable")
     }
 
     fn enable(&mut self, client: u64, method: &str) {
@@ -405,36 +621,79 @@ impl Session {
     }
 
     fn script(&mut self, message: ScriptToDevtoolsControlMsg) -> Vec<(u64, Value)> {
-        match message {
-            ScriptToDevtoolsControlMsg::NewGlobal(
-                (browsing_context, pipeline, _, webview),
-                sender,
-                info,
-            ) => self.install_global(browsing_context, pipeline, webview, sender, info),
-            ScriptToDevtoolsControlMsg::Navigate(
-                browsing_context,
-                NavigationState::Stop(pipeline, info),
-            ) => self.navigate_stop(browsing_context, pipeline, info),
-            ScriptToDevtoolsControlMsg::Navigate(_, NavigationState::Start(_)) => Vec::new(),
-            ScriptToDevtoolsControlMsg::ConsoleAPI(pipeline, message, _) => {
-                self.console_message(pipeline, &message)
-            },
-            ScriptToDevtoolsControlMsg::ReportPageError(pipeline, error) => {
-                self.page_error(pipeline, &error)
-            },
-            ScriptToDevtoolsControlMsg::ClearConsole(pipeline, _) => self.clear_console(pipeline),
-            ScriptToDevtoolsControlMsg::WebMcpTools(pipeline, tools) => {
-                self.replace_tools(pipeline, tools)
-            },
-            ScriptToDevtoolsControlMsg::TitleChanged(pipeline, title) => {
-                if let Some(key) = self.pipelines.get(&pipeline).cloned() {
-                    if let Some(target) = self.targets.get_mut(&key) {
-                        target.title = title;
-                    }
-                }
-                Vec::new()
-            },
-            _ => Vec::new(),
+        if let ScriptToDevtoolsControlMsg::NewGlobal(
+            (browsing_context, pipeline, _, webview),
+            sender,
+            info,
+        ) = message
+        {
+            return self.install_global(browsing_context, pipeline, webview, sender, info);
+        }
+        self.script_navigation(message)
+    }
+
+    fn script_navigation(&mut self, message: ScriptToDevtoolsControlMsg) -> Vec<(u64, Value)> {
+        if let ScriptToDevtoolsControlMsg::Navigate(browsing_context, state) = message {
+            return self.navigation_state(browsing_context, state);
+        }
+        self.script_console(message)
+    }
+
+    fn navigation_state(
+        &mut self,
+        browsing_context: servo_base::id::BrowsingContextId,
+        state: NavigationState,
+    ) -> Vec<(u64, Value)> {
+        if let NavigationState::Stop(pipeline, info) = state {
+            return self.navigate_stop(browsing_context, pipeline, info);
+        }
+        Vec::new()
+    }
+
+    fn script_console(&mut self, message: ScriptToDevtoolsControlMsg) -> Vec<(u64, Value)> {
+        if let ScriptToDevtoolsControlMsg::ConsoleAPI(pipeline, message, _) = message {
+            return self.console_message(pipeline, &message);
+        }
+        self.script_page(message)
+    }
+
+    fn script_page(&mut self, message: ScriptToDevtoolsControlMsg) -> Vec<(u64, Value)> {
+        if let ScriptToDevtoolsControlMsg::ReportPageError(pipeline, error) = message {
+            return self.page_error(pipeline, &error);
+        }
+        self.script_tools(message)
+    }
+
+    fn script_tools(&mut self, message: ScriptToDevtoolsControlMsg) -> Vec<(u64, Value)> {
+        if let ScriptToDevtoolsControlMsg::ClearConsole(pipeline, _) = message {
+            return self.clear_console(pipeline);
+        }
+        self.script_registered(message)
+    }
+
+    fn script_registered(&mut self, message: ScriptToDevtoolsControlMsg) -> Vec<(u64, Value)> {
+        if let ScriptToDevtoolsControlMsg::WebMcpTools(pipeline, tools) = message {
+            return self.replace_tools(pipeline, tools);
+        }
+        self.script_title(message)
+    }
+
+    fn script_title(&mut self, message: ScriptToDevtoolsControlMsg) -> Vec<(u64, Value)> {
+        if let ScriptToDevtoolsControlMsg::TitleChanged(pipeline, title) = message {
+            self.set_title(pipeline, title);
+        }
+        Vec::new()
+    }
+
+    fn set_title(&mut self, pipeline: PipelineId, title: String) {
+        if let Some(key) = self.pipelines.get(&pipeline).cloned() {
+            self.store_title(&key, title);
+        }
+    }
+
+    fn store_title(&mut self, key: &str, title: String) {
+        if let Some(target) = self.targets.get_mut(key) {
+            target.title = title;
         }
     }
 
@@ -637,11 +896,7 @@ impl Session {
             }),
         );
         self.buffer(&key, entry.clone());
-        self.fanout(&key, vec![runtime, entry], |domains, message| {
-            let method = message.get("method").and_then(Value::as_str).unwrap_or("");
-            (method == "Runtime.exceptionThrown" && domains.runtime)
-                || (method == "Log.entryAdded" && domains.log)
-        })
+        self.fanout(&key, vec![runtime, entry], page_error_visible)
     }
 
     fn clear_console(&mut self, pipeline: PipelineId) -> Vec<(u64, Value)> {
@@ -683,16 +938,7 @@ impl Session {
     }
 
     fn network(&mut self, id: String, event: NetworkEvent) -> Vec<(u64, Value)> {
-        let browsing = match &event {
-            NetworkEvent::HttpRequest(request) => request.browsing_context_id.to_string(),
-            NetworkEvent::HttpRequestUpdate(request) => request.browsing_context_id.to_string(),
-            NetworkEvent::HttpResponse(response) => response.browsing_context_id.to_string(),
-            NetworkEvent::SecurityInfo(update) => update.browsing_context_id.to_string(),
-            NetworkEvent::Failed {
-                browsing_context_id,
-                ..
-            } => browsing_context_id.to_string(),
-        };
+        let browsing = browsing_context_of(&event);
         let Some(key) = self
             .targets
             .iter()
@@ -704,108 +950,89 @@ impl Session {
         if !self.network_open(&key) {
             return Vec::new();
         }
-        let messages = match event {
-            NetworkEvent::HttpRequest(request) | NetworkEvent::HttpRequestUpdate(request) => {
-                let target = self.targets.get_mut(&key).unwrap();
-                if !target.requests.contains_key(&id) {
-                    target.request_order.push_back(id.clone());
-                }
-                let entry = target.requests.entry(id.clone()).or_insert(NetRequest {
-                    events_sent: false,
-                    response_sent: false,
-                    finished: false,
-                    body: None,
-                });
-                if entry.events_sent {
-                    return Vec::new();
-                }
-                entry.events_sent = true;
-                let url = request.url.to_string();
-                vec![event_value(
-                    "Network.requestWillBeSent",
-                    json!({
-                        "requestId": id,
-                        "loaderId": id,
-                        "frameId": request.browsing_context_id.to_string(),
-                        "documentURL": url,
-                        "timestamp": timestamp_secs(request.started_date_time),
-                        "wallTime": timestamp_secs(request.started_date_time),
-                        "initiator": { "type": "other" },
-                        "type": resource_type(request.destination, request.is_xhr),
-                        "request": {
-                            "url": url,
-                            "method": request.method.to_string(),
-                            "headers": headers_json(&request.headers),
-                        },
-                    }),
-                )]
-            },
-            NetworkEvent::HttpResponse(response) => {
-                let target = self.targets.get_mut(&key).unwrap();
-                if !target.requests.contains_key(&id) {
-                    target.request_order.push_back(id.clone());
-                }
-                let entry = target.requests.entry(id.clone()).or_insert(NetRequest {
-                    events_sent: true,
-                    response_sent: false,
-                    finished: false,
-                    body: None,
-                });
-                if let Some(body) = response.body {
-                    if body.len() <= NETWORK_BODY_CAP {
-                        entry.body = Some(body.to_vec());
-                    }
-                }
-                let mut messages = Vec::new();
-                if !entry.response_sent {
-                    entry.response_sent = true;
-                    let mime = response
-                        .headers
-                        .as_ref()
-                        .and_then(|headers| headers.get(http::header::CONTENT_TYPE))
-                        .and_then(|value| value.to_str().ok())
-                        .unwrap_or("")
-                        .to_owned();
-                    messages.push(event_value(
-                        "Network.responseReceived",
-                        json!({
-                            "requestId": id,
-                            "loaderId": id,
-                            "frameId": response.browsing_context_id.to_string(),
-                            "timestamp": 0,
-                            "type": "Other",
-                            "response": {
-                                "url": "",
-                                "status": response.status.code().as_u16(),
-                                "statusText": String::from_utf8_lossy(response.status.message()).to_string(),
-                                "headers": response.headers.as_ref().map(headers_json).unwrap_or(json!({})),
-                                "mimeType": mime,
-                                "encodedDataLength": entry.body.as_ref().map(|body| body.len()).unwrap_or(0),
-                            },
-                        }),
-                    ));
-                }
-                if entry.body.is_some() && !entry.finished {
-                    entry.finished = true;
-                    messages.push(event_value(
-                        "Network.loadingFinished",
-                        json!({ "requestId": id, "timestamp": 0, "encodedDataLength": entry.body.as_ref().map(|body| body.len()).unwrap_or(0) }),
-                    ));
-                }
-                messages
-            },
-            NetworkEvent::Failed { error, .. } => {
-                vec![event_value(
-                    "Network.loadingFailed",
-                    json!({ "requestId": id, "timestamp": 0, "type": "other", "errorText": error, "canceled": false }),
-                )]
-            },
-            NetworkEvent::SecurityInfo(_) => Vec::new(),
+        let Some(messages) = self.network_messages(&key, id, event) else {
+            return Vec::new();
         };
         if let Some(target) = self.targets.get_mut(&key) {
             evict_requests(target);
         }
         self.fanout(&key, messages, |domains, _| domains.network)
+    }
+
+    fn network_messages(
+        &mut self,
+        key: &str,
+        id: String,
+        event: NetworkEvent,
+    ) -> Option<Vec<Value>> {
+        if let NetworkEvent::HttpRequest(request) | NetworkEvent::HttpRequestUpdate(request) = event
+        {
+            return self.will_send(key, id, request);
+        }
+        Some(self.network_later(key, id, event))
+    }
+
+    fn will_send(
+        &mut self,
+        key: &str,
+        id: String,
+        request: devtools_traits::HttpRequest,
+    ) -> Option<Vec<Value>> {
+        let target = self.targets.get_mut(key).unwrap();
+        if !target.requests.contains_key(&id) {
+            target.request_order.push_back(id.clone());
+        }
+        let entry = target.requests.entry(id.clone()).or_insert(NetRequest {
+            events_sent: false,
+            response_sent: false,
+            finished: false,
+            body: None,
+        });
+        if entry.events_sent {
+            return None;
+        }
+        entry.events_sent = true;
+        Some(vec![request_event(&id, &request)])
+    }
+
+    fn network_later(&mut self, key: &str, id: String, event: NetworkEvent) -> Vec<Value> {
+        if let NetworkEvent::HttpResponse(response) = event {
+            return self.response_event(key, id, response);
+        }
+        self.network_end(id, event)
+    }
+
+    fn network_end(&self, id: String, event: NetworkEvent) -> Vec<Value> {
+        if let NetworkEvent::Failed { error, .. } = event {
+            return vec![event_value(
+                "Network.loadingFailed",
+                json!({ "requestId": id, "timestamp": 0, "type": "other", "errorText": error, "canceled": false }),
+            )];
+        }
+        Vec::new()
+    }
+
+    fn response_event(
+        &mut self,
+        key: &str,
+        id: String,
+        response: devtools_traits::HttpResponse,
+    ) -> Vec<Value> {
+        let target = self.targets.get_mut(key).unwrap();
+        if !target.requests.contains_key(&id) {
+            target.request_order.push_back(id.clone());
+        }
+        let entry = target.requests.entry(id.clone()).or_insert(NetRequest {
+            events_sent: true,
+            response_sent: false,
+            finished: false,
+            body: None,
+        });
+        remember_body(entry, response.body.as_deref());
+        let mut messages = Vec::new();
+        push_received(&mut messages, entry, &id, &response);
+        push_finished(&mut messages, entry, &id);
+        messages
     }
 
     fn network_open(&self, key: &str) -> bool {
@@ -846,37 +1073,36 @@ impl Session {
         let Some(id) = id else {
             return CommandOutcome::Messages(Vec::new());
         };
+        self.invoke_named(id, target_key, params)
+    }
+
+    fn invoke_named(&mut self, id: i64, target_key: &str, params: &Value) -> CommandOutcome {
+        if let Some(outcome) = self.reject_frame(id, target_key, params) {
+            return outcome;
+        }
         let name = params
             .get("toolName")
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned();
-        if let Some(frame) = params.get("frameId").and_then(Value::as_str) {
-            let top = self
-                .targets
-                .get(target_key)
-                .and_then(|target| target.pipeline)
-                .map(|pipeline| pipeline.to_string());
-            if top.as_deref() != Some(frame) {
-                return CommandOutcome::Messages(error(
-                    Some(id),
-                    -32000,
-                    "only the top-level document is inspected",
-                ));
-            }
-        }
         let arguments = params
             .get("input")
             .map(|value| value.to_string())
             .unwrap_or_else(|| "{}".to_owned());
         let invocation = format!("invoke-{id}");
-        // The command result arrives with the script reply.
         self.pending(Some(id), target_key, |pipeline| ScriptRequest::InvokeTool {
             pipeline,
             invocation,
             name,
             arguments,
         })
+    }
+
+    fn reject_frame(&self, id: i64, target_key: &str, params: &Value) -> Option<CommandOutcome> {
+        let Some(frame) = params.get("frameId").and_then(Value::as_str) else {
+            return None;
+        };
+        frame_matches(self, id, target_key, frame)
     }
 
     fn pending(
@@ -902,21 +1128,12 @@ impl Session {
     }
 
     fn response_body(&self, target_key: &str, request_id: &str) -> Value {
-        let body = self
-            .targets
-            .get(target_key)
-            .and_then(|target| target.requests.get(request_id))
-            .and_then(|request| request.body.clone());
-        match body {
-            Some(body) => match String::from_utf8(body.clone()) {
-                Ok(text) => json!({ "body": text, "base64Encoded": false }),
-                Err(_) => json!({
-                    "body": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, body),
-                    "base64Encoded": true
-                }),
-            },
-            None => json!({ "body": "", "base64Encoded": false }),
-        }
+        body_json(
+            self.targets
+                .get(target_key)
+                .and_then(|target| target.requests.get(request_id))
+                .and_then(|request| request.body.clone()),
+        )
     }
 
     fn frame(&self, target_key: &str) -> Value {
@@ -937,32 +1154,8 @@ impl Session {
         let Some(target) = self.targets.get_mut(target_key) else {
             return Value::Null;
         };
-        let node_id = if let Some(id) = target.node_ids.get(&node.unique_id) {
-            *id
-        } else {
-            let id = target.next_node;
-            target.next_node += 1;
-            target.node_ids.insert(node.unique_id.clone(), id);
-            target.nodes.insert(id, node.unique_id.clone());
-            id
-        };
-        let mut attributes = Vec::new();
-        for attribute in &node.attrs {
-            attributes.push(Value::String(attribute.name.clone()));
-            attributes.push(Value::String(attribute.value.clone()));
-        }
-        json!({
-            "nodeId": node_id,
-            "backendNodeId": node_id,
-            "nodeType": node.node_type,
-            "nodeName": node.node_name,
-            "localName": node.node_name.to_ascii_lowercase(),
-            "nodeValue": node.node_value,
-            "childNodeCount": node.num_children,
-            "attributes": attributes,
-            "documentURL": if document { target.url.clone() } else { String::new() },
-            "baseURL": node.base_uri,
-        })
+        let node_id = assign_node_id(target, &node.unique_id);
+        node_json(target, node, node_id, document)
     }
 
     fn buffer(&mut self, key: &str, message: Value) {
@@ -1057,6 +1250,259 @@ pub(crate) enum ScriptReply {
     Missing,
 }
 
+fn computed_styles(styles: &Option<Vec<NodeStyle>>) -> Vec<Value> {
+    styles
+        .iter()
+        .flatten()
+        .map(|style| json!({ "name": style.name, "value": style.value }))
+        .collect()
+}
+
+fn tool_status(cancelled: bool, ok: bool) -> &'static str {
+    if cancelled {
+        return "cancelled";
+    }
+    outcome_status(ok)
+}
+
+fn outcome_status(ok: bool) -> &'static str {
+    if ok { "success" } else { "error" }
+}
+
+fn browsing_context_of(event: &NetworkEvent) -> String {
+    if let NetworkEvent::HttpRequest(request) | NetworkEvent::HttpRequestUpdate(request) = event {
+        return request.browsing_context_id.to_string();
+    }
+    browsing_response(event)
+}
+
+fn browsing_response(event: &NetworkEvent) -> String {
+    if let NetworkEvent::HttpResponse(response) = event {
+        return response.browsing_context_id.to_string();
+    }
+    browsing_other(event)
+}
+
+fn browsing_other(event: &NetworkEvent) -> String {
+    if let NetworkEvent::SecurityInfo(update) = event {
+        return update.browsing_context_id.to_string();
+    }
+    browsing_failed(event)
+}
+
+fn browsing_failed(event: &NetworkEvent) -> String {
+    if let NetworkEvent::Failed {
+        browsing_context_id,
+        ..
+    } = event
+    {
+        return browsing_context_id.to_string();
+    }
+    String::new()
+}
+
+fn request_event(id: &str, request: &devtools_traits::HttpRequest) -> Value {
+    let url = request.url.to_string();
+    event_value(
+        "Network.requestWillBeSent",
+        json!({
+            "requestId": id,
+            "loaderId": id,
+            "frameId": request.browsing_context_id.to_string(),
+            "documentURL": url,
+            "timestamp": timestamp_secs(request.started_date_time),
+            "wallTime": timestamp_secs(request.started_date_time),
+            "initiator": { "type": "other" },
+            "type": resource_type(request.destination, request.is_xhr),
+            "request": {
+                "url": url,
+                "method": request.method.to_string(),
+                "headers": headers_json(&request.headers),
+            },
+        }),
+    )
+}
+
+fn page_error_visible(domains: &Domains, message: &Value) -> bool {
+    let method = message.get("method").and_then(Value::as_str).unwrap_or("");
+    exception_visible(method, domains) || log_entry_visible(method, domains)
+}
+
+fn exception_visible(method: &str, domains: &Domains) -> bool {
+    method == "Runtime.exceptionThrown" && domains.runtime
+}
+
+fn log_entry_visible(method: &str, domains: &Domains) -> bool {
+    method == "Log.entryAdded" && domains.log
+}
+
+fn push_received(
+    messages: &mut Vec<Value>,
+    entry: &mut NetRequest,
+    id: &str,
+    response: &devtools_traits::HttpResponse,
+) {
+    if entry.response_sent {
+        return;
+    }
+    entry.response_sent = true;
+    messages.push(response_message(id, response, entry));
+}
+
+fn push_finished(messages: &mut Vec<Value>, entry: &mut NetRequest, id: &str) {
+    if ready_to_finish(entry) {
+        entry.finished = true;
+        messages.push(finished_message(id, entry));
+    }
+}
+
+fn ready_to_finish(entry: &NetRequest) -> bool {
+    entry.body.is_some() && !entry.finished
+}
+
+fn frame_matches(
+    session: &Session,
+    id: i64,
+    target_key: &str,
+    frame: &str,
+) -> Option<CommandOutcome> {
+    let top = session
+        .targets
+        .get(target_key)
+        .and_then(|target| target.pipeline)
+        .map(|pipeline| pipeline.to_string());
+    if top.as_deref() == Some(frame) {
+        return None;
+    }
+    Some(CommandOutcome::Messages(error(
+        Some(id),
+        -32000,
+        "only the top-level document is inspected",
+    )))
+}
+
+fn body_json(body: Option<Vec<u8>>) -> Value {
+    if let Some(body) = body {
+        return encoded_body(body);
+    }
+    json!({ "body": "", "base64Encoded": false })
+}
+
+fn encoded_body(body: Vec<u8>) -> Value {
+    if let Ok(text) = String::from_utf8(body.clone()) {
+        return json!({ "body": text, "base64Encoded": false });
+    }
+    json!({
+        "body": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, body),
+        "base64Encoded": true
+    })
+}
+
+fn assign_node_id(target: &mut Target, unique: &str) -> i64 {
+    if let Some(id) = target.node_ids.get(unique) {
+        return *id;
+    }
+    insert_node_id(target, unique)
+}
+
+fn insert_node_id(target: &mut Target, unique: &str) -> i64 {
+    let id = target.next_node;
+    target.next_node += 1;
+    target.node_ids.insert(unique.to_owned(), id);
+    target.nodes.insert(id, unique.to_owned());
+    id
+}
+
+fn node_json(target: &Target, node: &NodeInfo, node_id: i64, document: bool) -> Value {
+    json!({
+        "nodeId": node_id,
+        "backendNodeId": node_id,
+        "nodeType": node.node_type,
+        "nodeName": node.node_name,
+        "localName": node.node_name.to_ascii_lowercase(),
+        "nodeValue": node.node_value,
+        "childNodeCount": node.num_children,
+        "attributes": attribute_list(&node.attrs),
+        "documentURL": document_url(document, &target.url),
+        "baseURL": node.base_uri,
+    })
+}
+
+fn document_url(document: bool, url: &str) -> String {
+    if document {
+        return url.to_owned();
+    }
+    String::new()
+}
+
+fn attribute_list(attrs: &[devtools_traits::AttrInfo]) -> Vec<Value> {
+    let mut attributes = Vec::new();
+    for attribute in attrs {
+        push_attribute(&mut attributes, attribute);
+    }
+    attributes
+}
+
+fn push_attribute(attributes: &mut Vec<Value>, attribute: &devtools_traits::AttrInfo) {
+    attributes.push(Value::String(attribute.name.clone()));
+    attributes.push(Value::String(attribute.value.clone()));
+}
+
+fn remember_body(entry: &mut NetRequest, body: Option<&[u8]>) {
+    if let Some(body) = body {
+        store_capped_body(entry, body);
+    }
+}
+
+fn store_capped_body(entry: &mut NetRequest, body: &[u8]) {
+    if body.len() <= NETWORK_BODY_CAP {
+        entry.body = Some(body.to_vec());
+    }
+}
+
+fn response_message(
+    id: &str,
+    response: &devtools_traits::HttpResponse,
+    entry: &NetRequest,
+) -> Value {
+    let mime = response
+        .headers
+        .as_ref()
+        .and_then(|headers| headers.get(http::header::CONTENT_TYPE))
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    event_value(
+        "Network.responseReceived",
+        json!({
+            "requestId": id,
+            "loaderId": id,
+            "frameId": response.browsing_context_id.to_string(),
+            "timestamp": 0,
+            "type": "Other",
+            "response": {
+                "url": "",
+                "status": response.status.code().as_u16(),
+                "statusText": String::from_utf8_lossy(response.status.message()).to_string(),
+                "headers": response.headers.as_ref().map(headers_json).unwrap_or(json!({})),
+                "mimeType": mime,
+                "encodedDataLength": entry.body.as_ref().map(|body| body.len()).unwrap_or(0),
+            },
+        }),
+    )
+}
+
+fn finished_message(id: &str, entry: &NetRequest) -> Value {
+    event_value(
+        "Network.loadingFinished",
+        json!({
+            "requestId": id,
+            "timestamp": 0,
+            "encodedDataLength": entry.body.as_ref().map(|body| body.len()).unwrap_or(0),
+        }),
+    )
+}
+
 fn method_enables(method: &str) -> bool {
     matches!(
         method,
@@ -1117,21 +1563,50 @@ fn error(id: Option<i64>, code: i64, message: &str) -> Vec<Value> {
 }
 
 fn remote_object(value: &DebuggerValue) -> Value {
-    match value {
-        DebuggerValue::VoidValue => json!({ "type": "undefined" }),
-        DebuggerValue::NullValue(_) => {
-            json!({ "type": "object", "subtype": "null", "value": null })
-        },
-        DebuggerValue::BooleanValue(value) => json!({ "type": "boolean", "value": value }),
-        DebuggerValue::NumberValue(value) => json!({ "type": "number", "value": value }),
-        DebuggerValue::StringValue(value) => json!({ "type": "string", "value": value }),
-        DebuggerValue::ObjectValue { class, preview, .. } => json!({
+    if let DebuggerValue::VoidValue = value {
+        return json!({ "type": "undefined" });
+    }
+    remote_null(value)
+}
+
+fn remote_null(value: &DebuggerValue) -> Value {
+    if let DebuggerValue::NullValue(_) = value {
+        return json!({ "type": "object", "subtype": "null", "value": null });
+    }
+    remote_boolean(value)
+}
+
+fn remote_boolean(value: &DebuggerValue) -> Value {
+    if let DebuggerValue::BooleanValue(value) = value {
+        return json!({ "type": "boolean", "value": value });
+    }
+    remote_number(value)
+}
+
+fn remote_number(value: &DebuggerValue) -> Value {
+    if let DebuggerValue::NumberValue(value) = value {
+        return json!({ "type": "number", "value": value });
+    }
+    remote_string(value)
+}
+
+fn remote_string(value: &DebuggerValue) -> Value {
+    if let DebuggerValue::StringValue(value) = value {
+        return json!({ "type": "string", "value": value });
+    }
+    remote_class(value)
+}
+
+fn remote_class(value: &DebuggerValue) -> Value {
+    if let DebuggerValue::ObjectValue { class, preview, .. } = value {
+        return json!({
             "type": "object",
             "className": class,
             "description": class,
             "preview": preview.as_ref().map(|preview| json!({ "type": "object", "description": preview.kind })),
-        }),
+        });
     }
+    json!({ "type": "undefined" })
 }
 
 fn eval_result(reply: &EvaluateJSReply) -> Value {
@@ -1264,6 +1739,7 @@ mod tests {
         ConsoleMessageFields, DebuggerValue, HttpRequest as DevtoolsHttpRequest, WebMcpToolRecord,
         get_time_stamp,
     };
+    use embedder_traits::ConsoleLogLevel;
     use http::{HeaderMap, Method};
     use net_traits::request::Destination;
     use servo_base::generic_channel;
@@ -1273,6 +1749,26 @@ mod tests {
     use servo_url::ServoUrl;
 
     use super::*;
+
+    #[test]
+    fn console_levels_and_resource_types_cover_every_arm() {
+        assert_eq!(cdp_level(&ConsoleLogLevel::Debug), "debug");
+        assert_eq!(cdp_level(&ConsoleLogLevel::Info), "info");
+        assert_eq!(cdp_level(&ConsoleLogLevel::Warn), "warning");
+        assert_eq!(cdp_level(&ConsoleLogLevel::Error), "error");
+        assert_eq!(cdp_level(&ConsoleLogLevel::Trace), "trace");
+        assert_eq!(cdp_level(&ConsoleLogLevel::Dir), "dir");
+        assert_eq!(cdp_level(&ConsoleLogLevel::Log), "log");
+        assert_eq!(resource_type(Destination::Document, true), "XHR");
+        assert_eq!(resource_type(Destination::Document, false), "Document");
+        assert_eq!(resource_type(Destination::Script, false), "Script");
+        assert_eq!(resource_type(Destination::Worker, false), "Script");
+        assert_eq!(resource_type(Destination::SharedWorker, false), "Script");
+        assert_eq!(resource_type(Destination::Style, false), "Stylesheet");
+        assert_eq!(resource_type(Destination::Image, false), "Image");
+        assert_eq!(resource_type(Destination::Font, false), "Font");
+        assert_eq!(resource_type(Destination::None, false), "Other");
+    }
 
     fn page(url: &str) -> DevtoolsPageInfo {
         DevtoolsPageInfo {
